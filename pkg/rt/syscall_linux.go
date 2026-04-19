@@ -585,6 +585,7 @@ func installSyscallNS() {
 			// shell/sudo tearing down the process group.
 			Setsid: true,
 		}
+		var dir string
 		if len(vs) == 8 && vs[7] != vm.NIL {
 			optsMap, ok := vs[7].(*vm.PersistentMap)
 			if !ok {
@@ -596,8 +597,38 @@ func installSyscallNS() {
 				sysAttr.Setctty = true
 				sysAttr.Ctty = 0
 			}
+			// :uid / :gid — drop privileges between fork and exec via
+			// SysProcAttr.Credential. Both must be set together.
+			uidV := optsMap.ValueAt(vm.Keyword("uid"))
+			gidV := optsMap.ValueAt(vm.Keyword("gid"))
+			if uidV != nil && uidV != vm.NIL {
+				u, ok := uidV.(vm.Int)
+				if !ok {
+					return vm.NIL, fmt.Errorf("spawn-async :uid must be Int")
+				}
+				cred := &syscall.Credential{Uid: uint32(u), NoSetGroups: true}
+				if gidV != nil && gidV != vm.NIL {
+					g, ok := gidV.(vm.Int)
+					if !ok {
+						return vm.NIL, fmt.Errorf("spawn-async :gid must be Int")
+					}
+					cred.Gid = uint32(g)
+				} else {
+					cred.Gid = uint32(u)
+				}
+				sysAttr.Credential = cred
+			}
+			// :dir — chdir in the child before exec (Go's os.StartProcess Dir).
+			if d := optsMap.ValueAt(vm.Keyword("dir")); d != nil && d != vm.NIL {
+				ds, ok := d.(vm.String)
+				if !ok {
+					return vm.NIL, fmt.Errorf("spawn-async :dir must be String")
+				}
+				dir = string(ds)
+			}
 		}
 		proc, err := os.StartProcess(string(path), argv, &os.ProcAttr{
+			Dir:   dir,
 			Env:   env,
 			Files: []*os.File{stdinF, stdoutF, stderrF},
 			Sys:   sysAttr,

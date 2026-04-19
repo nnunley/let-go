@@ -67,7 +67,7 @@ func installUnixNS() {
 			return vm.NIL, fmt.Errorf("unix/listen expected String path")
 		}
 		_ = os.Remove(string(path))
-		l, err := net.ListenUnix("unix", &net.UnixAddr{Name: string(path), Net: "unix"})
+		l, err := net.ListenUnix("unixpacket", &net.UnixAddr{Name: string(path), Net: "unixpacket"})
 		if err != nil {
 			return vm.NIL, fmt.Errorf("unix/listen: %v", err)
 		}
@@ -97,7 +97,7 @@ func installUnixNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf("unix/connect expected String path")
 		}
-		c, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: string(path), Net: "unix"})
+		c, err := net.DialUnix("unixpacket", nil, &net.UnixAddr{Name: string(path), Net: "unixpacket"})
 		if err != nil {
 			return vm.NIL, fmt.Errorf("unix/connect: %v", err)
 		}
