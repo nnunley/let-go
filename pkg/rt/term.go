@@ -10,11 +10,37 @@ package rt
 import (
 	"fmt"
 	"os"
+	"syscall"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/nooga/let-go/pkg/vm"
 	"golang.org/x/term"
 )
+
+type winsize struct {
+	rows, cols, xpix, ypix uint16
+}
+
+// tiocswinsz is the ioctl number for TIOCSWINSZ. Defined per-OS in
+// term_pty_{linux,other}.go since the value differs across platforms.
+// openPtyPair() also lives there — Linux uses /dev/ptmx + TIOCGPTN; darwin
+// would need posix_openpt + grantpt/unlockpt. Container runtimes live on
+// Linux so the "other" variant returns an error.
+
+func fdFromHandle(v vm.Value) (int, error) {
+	b, ok := v.(*vm.Boxed)
+	if !ok {
+		return -1, fmt.Errorf("expected IOHandle")
+	}
+	if h, ok := b.Unbox().(*IOHandle); ok {
+		return int(h.File.Fd()), nil
+	}
+	if f, ok := b.Unbox().(*os.File); ok {
+		return int(f.Fd()), nil
+	}
+	return -1, fmt.Errorf("expected IOHandle, got %T", b.Unbox())
+}
 
 var termOldState *term.State
 
@@ -23,8 +49,21 @@ func installTermNS() {
 	ns := vm.NewNamespace("term")
 	ns.Refer(CoreNS, "", true)
 
-	// raw-mode! — enter raw terminal mode, returns true
+	// raw-mode! — enter raw terminal mode
+	//   (term/raw-mode!)         → TRUE, stores global state (stdin)
+	//   (term/raw-mode! handle)  → opaque saved state (Boxed), caller restores it
 	rawMode, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) == 1 {
+			fd, err := fdFromHandle(vs[0])
+			if err != nil {
+				return vm.NIL, fmt.Errorf("raw-mode!: %w", err)
+			}
+			old, err := term.MakeRaw(fd)
+			if err != nil {
+				return vm.NIL, fmt.Errorf("raw-mode!: %w", err)
+			}
+			return vm.NewBoxed(old), nil
+		}
 		if termOldState != nil {
 			return vm.TRUE, nil // already in raw mode
 		}
@@ -38,7 +77,27 @@ func installTermNS() {
 	ns.Def("raw-mode!", rawMode)
 
 	// restore-mode! — restore terminal to original state
+	//   (term/restore-mode!)              → restore global stdin state
+	//   (term/restore-mode! handle saved) → restore specific fd
 	restoreMode, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) == 2 {
+			fd, err := fdFromHandle(vs[0])
+			if err != nil {
+				return vm.NIL, fmt.Errorf("restore-mode!: %w", err)
+			}
+			b, ok := vs[1].(*vm.Boxed)
+			if !ok {
+				return vm.NIL, fmt.Errorf("restore-mode!: expected saved-state")
+			}
+			st, ok := b.Unbox().(*term.State)
+			if !ok {
+				return vm.NIL, fmt.Errorf("restore-mode!: expected saved-state, got %T", b.Unbox())
+			}
+			if err := term.Restore(fd, st); err != nil {
+				return vm.NIL, fmt.Errorf("restore-mode!: %w", err)
+			}
+			return vm.TRUE, nil
+		}
 		if termOldState == nil {
 			return vm.NIL, nil
 		}
@@ -67,14 +126,81 @@ func installTermNS() {
 	ns.Def("read-key", readKey)
 
 	// size — returns [cols rows] or nil if not a TTY
+	//   (term/size)         → stdout winsize
+	//   (term/size handle)  → arbitrary fd winsize
 	sizeFn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		w, h, err := term.GetSize(int(os.Stdout.Fd()))
+		fd := int(os.Stdout.Fd())
+		if len(vs) == 1 {
+			f, err := fdFromHandle(vs[0])
+			if err != nil {
+				return vm.NIL, fmt.Errorf("size: %w", err)
+			}
+			fd = f
+		}
+		w, h, err := term.GetSize(fd)
 		if err != nil {
 			return vm.NIL, nil // not a TTY
 		}
 		return vm.NewPersistentVector([]vm.Value{vm.MakeInt(w), vm.MakeInt(h)}), nil
 	})
 	ns.Def("size", sizeFn)
+
+	// set-size — (term/set-size handle cols rows) — TIOCSWINSZ
+	setSize, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 3 {
+			return vm.NIL, fmt.Errorf("set-size expects 3 args (handle cols rows)")
+		}
+		fd, err := fdFromHandle(vs[0])
+		if err != nil {
+			return vm.NIL, fmt.Errorf("set-size: %w", err)
+		}
+		cols, ok1 := vs[1].(vm.Int)
+		rows, ok2 := vs[2].(vm.Int)
+		if !ok1 || !ok2 {
+			return vm.NIL, fmt.Errorf("set-size: expected ints (cols rows)")
+		}
+		ws := winsize{rows: uint16(rows), cols: uint16(cols)}
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
+			uintptr(fd), uintptr(tiocswinsz), uintptr(unsafe.Pointer(&ws)))
+		if errno != 0 {
+			return vm.NIL, fmt.Errorf("set-size: %v", errno)
+		}
+		return vm.NIL, nil
+	})
+	ns.Def("set-size", setSize)
+
+	// tty? — (term/tty? handle) → bool
+	ttyPred, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.NIL, fmt.Errorf("tty? expects 1 arg (handle)")
+		}
+		fd, err := fdFromHandle(vs[0])
+		if err != nil {
+			return vm.NIL, fmt.Errorf("tty?: %w", err)
+		}
+		if term.IsTerminal(fd) {
+			return vm.TRUE, nil
+		}
+		return vm.FALSE, nil
+	})
+	ns.Def("tty?", ttyPred)
+
+	// open-pty — (term/open-pty) → {:master IOHandle :slave IOHandle :slave-path "/dev/pts/N"}
+	openPty, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 0 {
+			return vm.NIL, fmt.Errorf("open-pty expects 0 args")
+		}
+		master, slave, slavePath, err := openPtyPair()
+		if err != nil {
+			return vm.NIL, fmt.Errorf("open-pty: %w", err)
+		}
+		m := vm.EmptyPersistentMap
+		m = m.Assoc(vm.Keyword("master"), vm.NewBoxed(NewIOHandle(master))).(*vm.PersistentMap)
+		m = m.Assoc(vm.Keyword("slave"), vm.NewBoxed(NewIOHandle(slave))).(*vm.PersistentMap)
+		m = m.Assoc(vm.Keyword("slave-path"), vm.String(slavePath)).(*vm.PersistentMap)
+		return m, nil
+	})
+	ns.Def("open-pty", openPty)
 
 	// move-cursor — (move-cursor col row) — 1-based ANSI positioning
 	moveCursor, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {

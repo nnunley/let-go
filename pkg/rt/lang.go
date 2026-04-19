@@ -85,6 +85,7 @@ func init() {
 	installMathNS()
 	installTermNS()
 	installSyscallNS()
+	installUnixNS()
 	// walk namespace is embedded via WalkSrc and will be loaded on demand
 }
 

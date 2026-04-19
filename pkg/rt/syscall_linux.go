@@ -528,13 +528,15 @@ func installSyscallNS() {
 		return h.File, false, nil
 	}
 
-	// syscall/spawn-async — (syscall/spawn-async path argv env cloneflags stdin stdout stderr)
+	// syscall/spawn-async — (syscall/spawn-async path argv env cloneflags stdin stdout stderr [opts])
 	// Non-blocking: returns {:pid p} immediately. Caller waits via syscall/waitpid.
 	// Each stdio slot is nil (→ /dev/null) or an IOHandle. The child gets a dup of
 	// the underlying fd; the parent retains its handle and may close it after spawn.
+	// Optional 8th arg: map of options.
+	//   {:setctty? true} — make stdin the child's controlling terminal (pty slave).
 	spawnAsyncFn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		if len(vs) != 7 {
-			return vm.NIL, fmt.Errorf("syscall/spawn-async expects 7 args (path argv env cloneflags stdin stdout stderr)")
+		if len(vs) < 7 || len(vs) > 8 {
+			return vm.NIL, fmt.Errorf("syscall/spawn-async expects 7-8 args (path argv env cloneflags stdin stdout stderr [opts])")
 		}
 		path, ok := vs[0].(vm.String)
 		if !ok {
@@ -577,16 +579,28 @@ func installSyscallNS() {
 			defer stderrF.Close()
 		}
 
+		sysAttr := &syscall.SysProcAttr{
+			Cloneflags: uintptr(flags),
+			// Give the child its own session so it survives the parent's
+			// shell/sudo tearing down the process group.
+			Setsid: true,
+		}
+		if len(vs) == 8 && vs[7] != vm.NIL {
+			optsMap, ok := vs[7].(*vm.PersistentMap)
+			if !ok {
+				return vm.NIL, fmt.Errorf("spawn-async opts must be a map")
+			}
+			if v := optsMap.ValueAt(vm.Keyword("setctty?")); v != nil && v != vm.NIL && v != vm.FALSE {
+				// stdin (fd 0 in the child after the Files[] dup) becomes the
+				// controlling terminal. Requires Setsid (already set).
+				sysAttr.Setctty = true
+				sysAttr.Ctty = 0
+			}
+		}
 		proc, err := os.StartProcess(string(path), argv, &os.ProcAttr{
 			Env:   env,
 			Files: []*os.File{stdinF, stdoutF, stderrF},
-			Sys: &syscall.SysProcAttr{
-				Cloneflags: uintptr(flags),
-				// Give the child its own session so it survives the parent's
-				// shell/sudo tearing down the process group. Callers that want
-				// tty-attached children shouldn't use spawn-async.
-				Setsid: true,
-			},
+			Sys:   sysAttr,
 		})
 		if err != nil {
 			return vm.NIL, fmt.Errorf("spawn-async: %v", err)
