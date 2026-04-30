@@ -28,7 +28,6 @@ const memLimitBytes = 512 * 1024 * 1024
 // knownFailing lists test names (filename stems) that are known to fail.
 // Tests that pass but appear here will cause an error so the list stays current.
 var knownFailing = map[string]bool{
-	"assoc_bang":      true, // transient assoc edge cases
 	"atom":            true, // atom validator/meta edge cases
 	"bigint":          true, // BigInt promotion at Long range boundary
 	"binding":         true, // thread binding propagation to futures
@@ -39,12 +38,10 @@ var knownFailing = map[string]bool{
 	"disj_bang":       true, // disj! shim falls through to disj
 	"dissoc":          true, // dissoc on records has quirky behavior
 	"empty":           true, // empty on deftype/non-coll edge cases
-	"key":             true, // (key nil) doesn't throw
 	"plus_squote":     true, // +' BigInt promotion at Long boundary
 	"realized_qmark":  true, // realized? semantics mismatch
 	"star_squote":     true, // *' BigInt promotion at Long boundary
 	"underive":        true, // hierarchy stub returns empty
-	"val":             true, // (val nil) doesn't throw
 	"with_precision":  true, // with-precision is a no-op; results don't round
 	"byte":            true, // byte range overflow
 	"case":            true, // case macro complex matching
@@ -56,8 +53,6 @@ var knownFailing = map[string]bool{
 	"dec":             true, // dec overflow/type coercion
 	"disj":            true, // disj edge cases
 	"double_qmark":    true, // no float32/float64 distinction
-	"drop":            true, // (drop 5 nil) → nil not ()
-	"drop_while":      true, // (drop-while pred nil) → nil not ()
 	"empty_qmark":     true, // empty? on list containing nil
 	"eq":              true, // identical?-based eq function
 	"even_qmark":      true, // even? on float
@@ -76,8 +71,8 @@ var knownFailing = map[string]bool{
 	"minus":           true, // overflow not detected
 	"mod":             true, // mod NaN/ratio edge cases
 	"nnext":           true, // map ordering
-	"not_empty":       true, // not-empty on list containing nil
 	"not_eq":          true, // identical?-based eq within not_eq
+	"not_empty":       true, // not-empty on list containing nil
 	"nth":             true, // nth out-of-bounds doesn't throw
 	"nthnext":         true, // nthnext on various types
 	"num":             true, // num edge cases
@@ -111,7 +106,6 @@ var knownFailing = map[string]bool{
 	"take_nth":        true, // take-nth edge cases
 	"update":          true, // update edge cases
 	"uuid_qmark":      true, // UUID type predicate
-	"vec":             true, // vec of empty string, vector assoc
 	"when_first":      true, // when-first edge cases
 	"when_let":        true, // when-let macroexpand test
 }

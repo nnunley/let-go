@@ -64,7 +64,7 @@ func (l Map) First() Value {
 		return NIL
 	}
 	for k, v := range l {
-		return ArrayVector{k, v}
+		return MapEntry{Key: k, Value: v}
 	}
 	return NIL // unreachable
 }
@@ -72,7 +72,7 @@ func (l Map) First() Value {
 func (l Map) toEntries() []Value {
 	entries := make([]Value, 0, len(l))
 	for k, v := range l {
-		entries = append(entries, ArrayVector{k, v})
+		entries = append(entries, MapEntry{Key: k, Value: v})
 	}
 	return entries
 }
@@ -152,11 +152,11 @@ func (s *MapSeq) Cons(val Value) Seq {
 	return NewCons(val, s)
 }
 
-func (s *MapSeq) Count() Value    { return Int(len(s.entries) - s.i) }
-func (s *MapSeq) RawCount() int   { return len(s.entries) - s.i }
-func (s *MapSeq) Empty() Collection { return EmptyList }
+func (s *MapSeq) Count() Value              { return Int(len(s.entries) - s.i) }
+func (s *MapSeq) RawCount() int             { return len(s.entries) - s.i }
+func (s *MapSeq) Empty() Collection         { return EmptyList }
 func (s *MapSeq) Conj(val Value) Collection { return s.Cons(val).(*List) }
-func (s *MapSeq) Seq() Seq { return s }
+func (s *MapSeq) Seq() Seq                  { return s }
 
 // Count implements Collection
 func (l Map) Count() Value {

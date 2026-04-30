@@ -342,7 +342,14 @@ func (c *Context) compileForm(o vm.Value) error {
 	case vm.ArrayVectorType:
 		tp := c.tailPosition
 		c.tailPosition = false
-		v := o.(vm.ArrayVector)
+		v, ok := o.(vm.ArrayVector)
+		if !ok {
+			if me, ok := o.(vm.MapEntry); ok {
+				v = vm.ArrayVector{me.Key, me.Value}
+			} else {
+				return c.compileError("expected vector form")
+			}
+		}
 		// Optimization: const vectors could be pushed as constants
 		//if len(v) == 0 {
 		//	n := c.constant(v)
@@ -376,8 +383,12 @@ func (c *Context) compileForm(o vm.Value) error {
 			s := sq.Seq()
 			var entries []vm.Value
 			for s != nil && s != vm.EmptyList {
-				entry := s.First().(vm.ArrayVector)
-				entries = append(entries, entry[0], entry[1])
+				k, v, ok := vm.MapEntryKV(s.First())
+				if !ok {
+					s = s.Next()
+					continue
+				}
+				entries = append(entries, k, v)
 				s = s.Next()
 			}
 			count = len(entries) / 2

@@ -53,6 +53,64 @@ type MapEntry struct {
 	Value Value
 }
 
+func (e MapEntry) Type() ValueType    { return ArrayVectorType }
+func (e MapEntry) Unbox() interface{} { return []Value{e.Key, e.Value} }
+func (e MapEntry) String() string {
+	return "[" + e.Key.String() + " " + e.Value.String() + "]"
+}
+func (e MapEntry) First() Value { return e.Key }
+func (e MapEntry) More() Seq    { return EmptyList.Cons(e.Value) }
+func (e MapEntry) Next() Seq    { return EmptyList.Cons(e.Value) }
+func (e MapEntry) Cons(v Value) Seq {
+	return NewCons(v, e.Seq())
+}
+func (e MapEntry) Seq() Seq {
+	return ArrayVector{e.Key, e.Value}.Seq()
+}
+func (e MapEntry) Count() Value  { return Int(2) }
+func (e MapEntry) RawCount() int { return 2 }
+func (e MapEntry) Empty() Collection {
+	return ArrayVector{}
+}
+func (e MapEntry) Conj(v Value) Collection {
+	return ArrayVector{e.Key, e.Value}.Conj(v)
+}
+func (e MapEntry) ValueAt(k Value) Value {
+	return e.ValueAtOr(k, NIL)
+}
+func (e MapEntry) ValueAtOr(k Value, dflt Value) Value {
+	idx, ok := k.(Int)
+	if !ok {
+		return dflt
+	}
+	switch idx {
+	case 0:
+		return e.Key
+	case 1:
+		return e.Value
+	default:
+		return dflt
+	}
+}
+func (e MapEntry) Equals(other Value) bool {
+	return ArrayVector{e.Key, e.Value}.Equals(other)
+}
+func (e MapEntry) Hash() uint32 {
+	return ArrayVector{e.Key, e.Value}.Hash()
+}
+
+func MapEntryKV(entry Value) (Value, Value, bool) {
+	switch e := entry.(type) {
+	case MapEntry:
+		return e.Key, e.Value, true
+	case ArrayVector:
+		if len(e) == 2 {
+			return e[0], e[1], true
+		}
+	}
+	return NIL, NIL, false
+}
+
 // --- Bit helpers ---
 
 func hmapMaskFn(hash uint32, shift uint) uint32 {
@@ -502,9 +560,15 @@ func (m *PersistentMap) Hash() uint32 {
 	var h uint32
 	s := m.Seq()
 	for s != nil && s != EmptyList {
-		entry := s.First().(ArrayVector)
+		entry := s.First()
+		var key, val Value
+		key, val, ok := MapEntryKV(entry)
+		if !ok {
+			s = s.Next()
+			continue
+		}
 		// Combine key and value hashes into a pair hash, then XOR+add into total
-		h += hashValue(entry[0]) ^ hashValue(entry[1])
+		h += hashValue(key) ^ hashValue(val)
 		s = s.Next()
 	}
 	m._hash = mixFinish(h)
@@ -520,10 +584,10 @@ func (m *PersistentMap) String() string {
 	b.WriteRune('{')
 	entries := m.entries()
 	for i, e := range entries {
-		entry := e.(ArrayVector)
-		b.WriteString(entry[0].String())
+		entry := e.(MapEntry)
+		b.WriteString(entry.Key.String())
 		b.WriteRune(' ')
-		b.WriteString(entry[1].String())
+		b.WriteString(entry.Value.String())
 		if i < len(entries)-1 {
 			b.WriteRune(' ')
 		}
@@ -547,8 +611,14 @@ func (m *PersistentMap) Conj(value Value) Collection {
 		result := m
 		entries := om.entries()
 		for _, e := range entries {
-			if av, ok := e.(ArrayVector); ok && len(av) == 2 {
+			switch av := e.(type) {
+			case ArrayVector:
+				if len(av) != 2 {
+					continue
+				}
 				result = result.Assoc(av[0], av[1]).(*PersistentMap)
+			case MapEntry:
+				result = result.Assoc(av.Key, av.Value).(*PersistentMap)
 			}
 		}
 		return result
@@ -671,7 +741,7 @@ func (m *PersistentMap) entries() []Value {
 	mes := m.root.nodeSeq()
 	result := make([]Value, len(mes))
 	for i, e := range mes {
-		result[i] = ArrayVector{e.Key, e.Value}
+		result[i] = e
 	}
 	return result
 }

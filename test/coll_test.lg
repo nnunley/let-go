@@ -31,6 +31,10 @@
     (is (= 1 (get {:a 1 :b 2} :a)))
     (is (= 1 ({:a 1 :b 2} :a)))  ; map as function
     (is (= 1 (:a {:a 1 :b 2})))  ; keyword as function
+    (is (= :a (key (first {:a 1}))))
+    (is (= 1 (val (first {:a 1}))))
+    (is (= :caught (try (key [:a 1]) (catch e :caught))))
+    (is (= :caught (try (val [:a 1]) (catch e :caught))))
     (is (nil? (get {:a 1} :b)))
     (is (= :default (get {:a 1} :b :default))))
   

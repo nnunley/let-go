@@ -398,8 +398,8 @@ func (m *SortedMap) Empty() Collection { return EmptySortedMap }
 
 func (m *SortedMap) Conj(value Value) Collection {
 	// Accept [k v] vectors or MapEntry-like things
-	if av, ok := value.(ArrayVector); ok && len(av) == 2 {
-		return m.assocImpl(av[0], av[1])
+	if k, v, ok := MapEntryKV(value); ok {
+		return m.assocImpl(k, v)
 	}
 	// Accept another map
 	if om, ok := value.(*SortedMap); ok {
@@ -414,8 +414,8 @@ func (m *SortedMap) Conj(value Value) Collection {
 		result := m
 		entries := om.entries()
 		for _, e := range entries {
-			if av, ok := e.(ArrayVector); ok && len(av) == 2 {
-				result = result.assocImpl(av[0], av[1])
+			if k, v, ok := MapEntryKV(e); ok {
+				result = result.assocImpl(k, v)
 			}
 		}
 		return result
@@ -425,8 +425,8 @@ func (m *SortedMap) Conj(value Value) Collection {
 		seq := s.Seq()
 		if seq != nil && seq != EmptyList {
 			f := seq.First()
-			if av, ok := f.(ArrayVector); ok && len(av) == 2 {
-				return m.assocImpl(av[0], av[1])
+			if k, v, ok := MapEntryKV(f); ok {
+				return m.assocImpl(k, v)
 			}
 		}
 	}
@@ -568,8 +568,7 @@ func (s *SortedMapSeq) String() string {
 }
 
 func (s *SortedMapSeq) First() Value {
-	e := s.entries[s.i]
-	return ArrayVector{e.Key, e.Value}
+	return s.entries[s.i]
 }
 
 func (s *SortedMapSeq) More() Seq {

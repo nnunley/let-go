@@ -204,9 +204,13 @@ func (b *ModuleBuilder) internStringsForValue(v vm.Value) {
 	case *vm.PersistentMap:
 		s := val.Seq()
 		for s != nil && s != vm.EmptyList {
-			entry := s.First().(vm.ArrayVector)
-			b.internStringsForValue(entry[0])
-			b.internStringsForValue(entry[1])
+			k, v, ok := vm.MapEntryKV(s.First())
+			if !ok {
+				s = s.Next()
+				continue
+			}
+			b.internStringsForValue(k)
+			b.internStringsForValue(v)
 			s = s.Next()
 		}
 	case *vm.PersistentSet:
@@ -600,11 +604,14 @@ func (e *encoder) writeMapConsts(m *vm.PersistentMap) error {
 	}
 	s := m.Seq()
 	for s != nil && s != vm.EmptyList {
-		entry := s.First().(vm.ArrayVector)
-		if err := e.writeValue(entry[0]); err != nil {
+		k, v, ok := vm.MapEntryKV(s.First())
+		if !ok {
+			return fmt.Errorf("invalid map entry: %s", s.First().String())
+		}
+		if err := e.writeValue(k); err != nil {
 			return err
 		}
-		if err := e.writeValue(entry[1]); err != nil {
+		if err := e.writeValue(v); err != nil {
 			return err
 		}
 		s = s.Next()

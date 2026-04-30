@@ -99,6 +99,9 @@ func mixFinish(h uint32) uint32 {
 // valueEquiv tests if two Values are equivalent for map key purposes.
 // Uses hash as a fast negative check, then structural comparison.
 func valueEquiv(a, b Value) bool {
+	if (a == NIL && b == EmptyList) || (a == EmptyList && b == NIL) {
+		return true
+	}
 	// Fast path: pointer/value identity
 	if isComparable(a) && isComparable(b) {
 		if a == b {

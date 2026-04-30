@@ -14,7 +14,7 @@ import (
 // Each defrecord call creates a unique RecordType instance.
 type RecordType struct {
 	typeName string
-	fields   []Keyword      // ordered field names
+	fields   []Keyword       // ordered field names
 	fieldIdx map[Keyword]int // field name → index for O(1) access
 }
 
@@ -45,7 +45,7 @@ type Record struct {
 	fields []Value        // fixed fields, indexed by RecordType.fieldIdx
 	extra  *PersistentMap // overflow for assoc'd keys not in the record definition
 	meta   Value
-	origin interface{}    // original Go struct for fast roundtrip (nil if mutated)
+	origin interface{} // original Go struct for fast roundtrip (nil if mutated)
 }
 
 func NewRecord(rtype *RecordType, data *PersistentMap) *Record {
@@ -64,14 +64,18 @@ func NewRecord(rtype *RecordType, data *PersistentMap) *Record {
 	// Anything not a fixed field goes to extra
 	s := data.Seq()
 	for s != nil && s != EmptyList {
-		entry := s.First().(ArrayVector)
-		if kw, ok := entry[0].(Keyword); ok {
+		key, val, ok := MapEntryKV(s.First())
+		if !ok {
+			s = s.Next()
+			continue
+		}
+		if kw, ok := key.(Keyword); ok {
 			if _, isField := rtype.fieldIdx[kw]; isField {
 				s = s.Next()
 				continue
 			}
 		}
-		r.extra = r.extra.Assoc(entry[0], entry[1]).(*PersistentMap)
+		r.extra = r.extra.Assoc(key, val).(*PersistentMap)
 		s = s.Next()
 	}
 	return r
@@ -79,7 +83,7 @@ func NewRecord(rtype *RecordType, data *PersistentMap) *Record {
 
 // --- Value interface ---
 
-func (r *Record) Type() ValueType    { return r.rtype }
+func (r *Record) Type() ValueType { return r.rtype }
 func (r *Record) Unbox() interface{} {
 	if r.origin != nil {
 		return r.origin
@@ -115,13 +119,17 @@ func (r *Record) String() string {
 	// Print extra fields
 	s := r.extra.Seq()
 	for s != nil && s != EmptyList {
-		entry := s.First().(ArrayVector)
+		key, val, ok := MapEntryKV(s.First())
+		if !ok {
+			s = s.Next()
+			continue
+		}
 		if !first {
 			b.WriteString(", ")
 		}
-		b.WriteString(entry[0].String())
+		b.WriteString(key.String())
 		b.WriteRune(' ')
-		b.WriteString(entry[1].String())
+		b.WriteString(val.String())
 		first = false
 		s = s.Next()
 	}
@@ -233,7 +241,7 @@ func (r *Record) Dissoc(key Value) Associative {
 
 // --- Collection ---
 
-func (r *Record) Count() Value  { return MakeInt(r.RawCount()) }
+func (r *Record) Count() Value { return MakeInt(r.RawCount()) }
 func (r *Record) RawCount() int {
 	n := r.extra.RawCount()
 	for _, v := range r.fields {

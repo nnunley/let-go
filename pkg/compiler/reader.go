@@ -864,8 +864,11 @@ func flattenMap(form vm.Value) vm.Value {
 	}
 	ret := vm.ArrayVector{}
 	for s := sq.Seq(); s != nil && s != vm.EmptyList; s = s.Next() {
-		entry := s.First().(vm.ArrayVector)
-		ret = append(ret, entry[0], entry[1])
+		k, v, ok := vm.MapEntryKV(s.First())
+		if !ok {
+			continue
+		}
+		ret = append(ret, k, v)
 	}
 	return ret
 }
@@ -1195,8 +1198,11 @@ func readMeta(r *LispReader, _ rune) (vm.Value, error) {
 			}
 			if sq, ok := m2.(vm.Sequable); ok {
 				for s := sq.Seq(); s != nil && s != vm.EmptyList; s = s.Next() {
-					entry := s.First().(vm.ArrayVector)
-					m = m.(*vm.PersistentMap).Assoc(entry[0], entry[1]).(*vm.PersistentMap)
+					k, v, ok := vm.MapEntryKV(s.First())
+					if !ok {
+						continue
+					}
+					m = m.(*vm.PersistentMap).Assoc(k, v).(*vm.PersistentMap)
 				}
 			}
 		case ':':

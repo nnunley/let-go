@@ -34,7 +34,7 @@
 ;; MapEntry/create constructs a [k v] pair — our PersistentMap already uses vectors
 ;; for entries so a plain vector satisfies (instance? ...) via vector equality checks.
 (ns clojure.lang.MapEntry)
-(defn create [k v] [k v])
+(defn create [k v] (first {k v}))
 
 ;; Best-effort stubs for Clojure APIs that let-go doesn't implement. These
 ;; let more test files compile; tests that exercise real behavior will fail
@@ -86,4 +86,3 @@
 ;; define as a ValueType placeholder that matches nothing.
 (def Object (type nil))
 (in-ns 'clojure.core-test.portability)
-

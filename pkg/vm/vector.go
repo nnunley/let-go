@@ -81,11 +81,19 @@ func (l ArrayVector) Unbox() interface{} {
 // Equals implements value equality for ArrayVector
 func (l ArrayVector) Equals(other Value) bool {
 	switch o := other.(type) {
+	case MapEntry:
+		return l.Equals(ArrayVector{o.Key, o.Value})
 	case ArrayVector:
 		if len(l) != len(o) {
 			return false
 		}
 		for i, v := range l {
+			if nilListEquivalent(v, o[i]) {
+				continue
+			}
+			if ValueEquals != nil && ValueEquals(v, o[i]) {
+				continue
+			}
 			if eq, ok := v.(interface{ Equals(Value) bool }); ok {
 				if !eq.Equals(o[i]) {
 					return false
@@ -101,6 +109,12 @@ func (l ArrayVector) Equals(other Value) bool {
 		}
 		for i, v := range l {
 			ov := o.ValueAt(Int(i))
+			if nilListEquivalent(v, ov) {
+				continue
+			}
+			if ValueEquals != nil && ValueEquals(v, ov) {
+				continue
+			}
 			if eq, ok := v.(interface{ Equals(Value) bool }); ok {
 				if !eq.Equals(ov) {
 					return false
@@ -113,6 +127,10 @@ func (l ArrayVector) Equals(other Value) bool {
 	default:
 		return false
 	}
+}
+
+func nilListEquivalent(a, b Value) bool {
+	return (a == NIL && b == EmptyList) || (a == EmptyList && b == NIL)
 }
 
 // First implements Seq

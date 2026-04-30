@@ -73,3 +73,17 @@
           m (persistent! t)]
       (is (= 42 (:a m)))
       (is (= 1 (count m))))))
+
+(deftest transient-assoc-missing-value
+  (testing "assoc! treats a missing final value as nil"
+    (let [m (persistent! (assoc! (transient {:a 1}) :b 2 :c))
+          v (persistent! (assoc! (transient [1]) 0 2 1))]
+      (is (= {:a 1 :b 2 :c nil} m))
+      (is (= [2 nil] v)))))
+
+(deftest vec-object-array-alias
+  (testing "vec aliases object arrays"
+    (let [a (to-array [1 2 3])
+          v (vec a)]
+      (aset a 0 -1)
+      (is (= [-1 2 3] v)))))

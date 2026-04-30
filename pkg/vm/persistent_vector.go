@@ -101,6 +101,8 @@ func (v PersistentVector) Unbox() interface{} {
 // Equals implements value equality for PersistentVector
 func (v PersistentVector) Equals(other Value) bool {
 	switch o := other.(type) {
+	case MapEntry:
+		return v.Equals(ArrayVector{o.Key, o.Value})
 	case PersistentVector:
 		if v.count != o.count {
 			return false
@@ -108,6 +110,12 @@ func (v PersistentVector) Equals(other Value) bool {
 		for i := 0; i < v.count; i++ {
 			vv := v.ValueAt(Int(i))
 			ov := o.ValueAt(Int(i))
+			if nilListEquivalent(vv, ov) {
+				continue
+			}
+			if ValueEquals != nil && ValueEquals(vv, ov) {
+				continue
+			}
 			if eq, ok := vv.(interface{ Equals(Value) bool }); ok {
 				if !eq.Equals(ov) {
 					return false
@@ -123,6 +131,12 @@ func (v PersistentVector) Equals(other Value) bool {
 		}
 		for i := 0; i < v.count; i++ {
 			vv := v.ValueAt(Int(i))
+			if nilListEquivalent(vv, o[i]) {
+				continue
+			}
+			if ValueEquals != nil && ValueEquals(vv, o[i]) {
+				continue
+			}
 			if eq, ok := vv.(interface{ Equals(Value) bool }); ok {
 				if !eq.Equals(o[i]) {
 					return false

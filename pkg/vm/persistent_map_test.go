@@ -200,8 +200,8 @@ func TestPersistentMapSeq(t *testing.T) {
 	seen := make(map[string]bool)
 	count := 0
 	for seq != nil && seq != EmptyList {
-		entry := seq.First().(ArrayVector)
-		key := entry[0].(Keyword)
+		entry := seq.First().(MapEntry)
+		key := entry.Key.(Keyword)
 		seen[string(key)] = true
 		count++
 		seq = seq.Next()

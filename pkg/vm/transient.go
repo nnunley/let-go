@@ -81,8 +81,8 @@ func (t *TransientMap) Conj(value Value) (*TransientMap, error) {
 	if err := t.ensureEditable(); err != nil {
 		return nil, err
 	}
-	if av, ok := value.(ArrayVector); ok && len(av) == 2 {
-		return t.Assoc(av[0], av[1])
+	if k, v, ok := MapEntryKV(value); ok {
+		return t.Assoc(k, v)
 	}
 	// Handle PersistentVector or any 2-element vector/seq
 	if l, ok := value.(Lookup); ok {

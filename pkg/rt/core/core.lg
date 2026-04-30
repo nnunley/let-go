@@ -417,9 +417,13 @@
               (rf result input)
               result)))))))
   ([n xs]
-   (if (> n 0)
-    (recur (dec n) (next xs))
-    xs)))
+   (if (nil? xs)
+     '()
+     (let [step (fn [n xs]
+                  (if (> n 0)
+                    (recur (dec n) (next xs))
+                    xs))]
+       (step n xs)))))
 
 (defn split-at [n coll]
   [(take n coll) (drop n coll)])
@@ -797,7 +801,7 @@
 
 (defn assoc-in
   [m [k & ks] v]
-  (if ks
+  (if (seq ks)
     (assoc m k (assoc-in (get m k) ks v))
     (assoc m k v)))
 
@@ -896,7 +900,7 @@
                 (let [s (seq coll)]
                   (if (and s (pred (first s)))
                     (recur pred (rest s))
-                    s)))]
+                    (or s '()))))]
      (step pred coll))))
 
 (defn split-with [pred coll]
@@ -1048,9 +1052,6 @@
            ret)
          (next keys)))
       ret)))
-
-(defn key [e] (first e))
-(defn val [e] (second e))
 
 (defn keys [m]
   (when (seq m)

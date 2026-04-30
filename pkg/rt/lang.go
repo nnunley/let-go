@@ -218,12 +218,12 @@ func mapEquals(a, b mapLike) bool {
 	seq := a.Seq()
 	for seq != nil && seq != vm.EmptyList {
 		entry := seq.First()
-		if av, ok := entry.(vm.ArrayVector); ok && len(av) == 2 {
-			bv := b.ValueAtOr(av[0], sentinel)
+		if k, v, ok := mapEntryKV(entry); ok {
+			bv := b.ValueAtOr(k, sentinel)
 			if bv == sentinel {
 				return false
 			}
-			if !valueEquals(av[1], bv) {
+			if !valueEquals(v, bv) {
 				return false
 			}
 		}
@@ -306,14 +306,18 @@ func iterateMap(v vm.Value, f func(k, v vm.Value) bool) {
 		seq := m.Seq()
 		for seq != nil && seq != vm.EmptyList {
 			entry := seq.First()
-			if av, ok := entry.(vm.ArrayVector); ok && len(av) == 2 {
-				if !f(av[0], av[1]) {
+			if k, v, ok := mapEntryKV(entry); ok {
+				if !f(k, v) {
 					return
 				}
 			}
 			seq = seq.Next()
 		}
 	}
+}
+
+func mapEntryKV(entry vm.Value) (vm.Value, vm.Value, bool) {
+	return vm.MapEntryKV(entry)
 }
 
 // crossSetEquals compares two set-like values of potentially different types.
@@ -379,10 +383,10 @@ func iterateSet(v vm.Value, f func(vm.Value) bool) {
 // valueEquals performs deep equality comparison for Clojure semantics
 func valueEquals(a, b vm.Value) bool {
 	// Handle nil
-	if a == vm.NIL && b == vm.NIL {
+	if isNilValue(a) && isNilValue(b) {
 		return true
 	}
-	if a == vm.NIL || b == vm.NIL {
+	if isNilValue(a) || isNilValue(b) {
 		return false
 	}
 
@@ -442,7 +446,7 @@ func valueEquals(a, b vm.Value) bool {
 			return false
 		}
 		for i := range av {
-			if !valueEquals(av[i], bv[i]) {
+			if !nilListEquivalent(av[i], bv[i]) && !valueEquals(av[i], bv[i]) {
 				return false
 			}
 		}
@@ -569,6 +573,10 @@ func valueEquals(a, b vm.Value) bool {
 	}
 }
 
+func isNilValue(v vm.Value) bool {
+	return v == nil || v == vm.NIL
+}
+
 // seqCompareElements compares two values for ordering, used by compare on seqs.
 func seqCompareElements(a, b vm.Value) int {
 	if a == vm.NIL && b == vm.NIL {
@@ -611,6 +619,10 @@ func seqCompareElements(a, b vm.Value) int {
 		return -1
 	}
 	return 1
+}
+
+func nilListEquivalent(a, b vm.Value) bool {
+	return (a == vm.NIL && b == vm.EmptyList) || (a == vm.EmptyList && b == vm.NIL)
 }
 
 // isSequentialType returns true for types that participate in cross-type
@@ -1007,6 +1019,9 @@ func installLangNS() {
 		}
 		if v, ok := vs[0].(vm.ArrayVector); ok {
 			return v, nil
+		}
+		if a, ok := vs[0].(*vm.TypedArray); ok && a.Kind() == vm.ArrayObject {
+			return vm.ArrayVector(a.Unbox().([]vm.Value)), nil
 		}
 		seq, err := seqOf(vs[0])
 		if err != nil {
@@ -1444,6 +1459,26 @@ func installLangNS() {
 			return as.ValueAt(key), nil
 		}
 		return as.ValueAtOr(key, vs[2]), nil
+	})
+
+	keyf, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
+		}
+		if e, ok := vs[0].(vm.MapEntry); ok {
+			return e.Key, nil
+		}
+		return vm.NIL, fmt.Errorf("key expects map entry")
+	})
+
+	valf, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
+		}
+		if e, ok := vs[0].(vm.MapEntry); ok {
+			return e.Value, nil
+		}
+		return vm.NIL, fmt.Errorf("val expects map entry")
 	})
 
 	// nth: indexed access that works on any sequential type.
@@ -2857,14 +2892,18 @@ func installLangNS() {
 
 	// assoc!: mutating assoc on a transient
 	assocBang, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		if len(vs) < 3 || len(vs)%2 == 0 {
+		if len(vs) < 2 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
 		switch t := vs[0].(type) {
 		case *vm.TransientMap:
 			var err error
 			for i := 1; i < len(vs); i += 2 {
-				t, err = t.Assoc(vs[i], vs[i+1])
+				val := vm.Value(vm.NIL)
+				if i+1 < len(vs) {
+					val = vs[i+1]
+				}
+				t, err = t.Assoc(vs[i], val)
 				if err != nil {
 					return vm.NIL, err
 				}
@@ -2873,7 +2912,11 @@ func installLangNS() {
 		case *vm.TransientVector:
 			var err error
 			for i := 1; i < len(vs); i += 2 {
-				t, err = t.Assoc(vs[i], vs[i+1])
+				val := vm.Value(vm.NIL)
+				if i+1 < len(vs) {
+					val = vs[i+1]
+				}
+				t, err = t.Assoc(vs[i], val)
 				if err != nil {
 					return vm.NIL, err
 				}
@@ -4367,6 +4410,8 @@ func installLangNS() {
 	ns.Def("next", next)
 	ns.Def("rest", rest)
 	ns.Def("get", get)
+	ns.Def("key", keyf)
+	ns.Def("val", valf)
 	ns.Def("nth", nthf)
 	ns.Def("count", count)
 	ns.Def("contains?", contains)
