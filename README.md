@@ -141,7 +141,6 @@ Full results with methodology: [benchmark/results.md](benchmark/results.md)
 
 ### Not implemented
 
-- **Sorted collections** (`sorted-map`, `sorted-set`)
 - **Refs / STM** — atoms + channels cover practical concurrency needs
 - **Agents** — use `go` blocks and channels instead
 - **Hierarchies** (`derive`, `underive`, `ancestors`, `descendants`, `parents`) — stub only; multimethod dispatch works, but `isa?` chains do not
@@ -153,6 +152,7 @@ Full results with methodology: [benchmark/results.md](benchmark/results.md)
 - **Spec** — no `clojure.spec`
 - **`alter-var-root`** — vars are mutable but no `alter-var-root`
 - **Numeric overflow detection** — `+`/`-`/`*`/`inc`/`dec` wrap silently on int64 overflow rather than promoting to BigInt; use `+'`/`-'`/`*'` for explicit BigInt math
+- **`subseq` / `rsubseq`** — sorted collections themselves work (`sorted-map`, `sorted-set`, `sorted-map-by`, `sorted-set-by`, `rseq`), but range queries on them are not yet implemented
 
 ### Known behavioral differences
 
