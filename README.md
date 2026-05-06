@@ -144,7 +144,7 @@ Full results with methodology: [benchmark/results.md](benchmark/results.md)
 - **Refs / STM** — atoms + channels cover practical concurrency needs
 - **Agents** — use `go` blocks and channels instead
 - **Hierarchies** (`derive`, `underive`, `ancestors`, `descendants`, `parents`) — stub only; multimethod dispatch works, but `isa?` chains do not
-- **BigDecimal** — `M` literals parse as floats; no arbitrary-precision decimals or `with-precision`
+- **`with-precision`** — `BigDecimal` itself works (`M` literals, `bigdec`, `decimal?`, exact arithmetic), but `with-precision` is a no-op so explicit rounding control is missing
 - **Chunked sequences** — lazy seqs are unchunked (simpler, slightly different perf characteristics)
 - **Reader tagged literals** (`#inst`, `#uuid`)
 - **`deftype`** — use `defrecord` instead
