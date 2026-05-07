@@ -17,6 +17,7 @@ Install any combination — the script auto-detects what's available:
 |---|---|
 | [babashka](https://babashka.org/) | `brew install babashka` |
 | [joker](https://joker-lang.org/) | `brew install candid82/brew/joker` |
+| [go-joker](https://github.com/rcarmo/go-joker) (optimized joker fork) | See [Go-joker setup](#go-joker-setup) |
 | [Clojure JVM](https://clojure.org/) | `brew install clojure` |
 | [fennel](https://fennel-lang.org/) + cljlib | See [Fennel setup](#fennel-setup) |
 | [gloat](https://github.com/gloathub/gloat) (glojure AOT) | See [Gloat setup](#gloat-setup) |
@@ -57,6 +58,26 @@ Verify it works:
 ```bash
 benchmark/fennel/run-fennel.sh -e '(local core (require :io.gitlab.andreyorst.cljlib.core)) (print (core.reduce core.+ 0 (core.range 10)))'
 # Should print: 45
+```
+
+## Go-joker setup
+
+[go-joker](https://github.com/rcarmo/go-joker) is an optimized fork of joker with an IR
+bytecode interpreter and WASM/wazero JIT for hot numeric loops. Its binary is also called
+`joker`, so it must be built into a separate location and pointed at via the `GOJOKER`
+environment variable to avoid conflicting with upstream joker.
+
+```bash
+git clone https://github.com/rcarmo/go-joker /tmp/go-joker
+cd /tmp/go-joker
+go build -o go-joker .
+export GOJOKER=/tmp/go-joker/go-joker
+```
+
+Set `GOJOKER` (in your shell or in front of `run.sh`) and the script auto-detects it:
+
+```bash
+GOJOKER=/tmp/go-joker/go-joker bash benchmark/run.sh
 ```
 
 ## Gloat setup

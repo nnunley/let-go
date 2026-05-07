@@ -19,6 +19,8 @@ LETGO="$SCRIPT_DIR/letgo"
 BB="$(which bb 2>/dev/null || true)"
 CLJ="$(which clj 2>/dev/null || true)"
 JOKER="$(which joker 2>/dev/null || true)"
+GOJOKER="${GOJOKER:-}"
+[ -n "$GOJOKER" ] && [ ! -x "$GOJOKER" ] && { echo "GOJOKER=$GOJOKER is not executable"; GOJOKER=""; }
 GLOAT="$(which gloat 2>/dev/null || true)"
 GLOAT_BIN_DIR="$SCRIPT_DIR/gloat/bin"
 FENNEL_RUNNER="$SCRIPT_DIR/fennel/run-fennel.sh"
@@ -27,6 +29,7 @@ FENNEL=""
 
 # Benchmarks to skip for specific runtimes (too slow or unsupported)
 JOKER_SKIP="tak transducers"
+GOJOKER_SKIP="fib tak transducers"
 
 # --- Build gloat AOT binaries ---
 
@@ -60,6 +63,8 @@ JDK_VERSION=""
 JDK_SIZE=""
 JOKER_VERSION=""
 JOKER_SIZE=""
+GOJOKER_VERSION=""
+GOJOKER_SIZE=""
 GLOAT_VERSION=""
 GLOAT_SIZE=""
 FENNEL_VERSION=""
@@ -92,6 +97,12 @@ if [ -n "$JOKER" ]; then
     JOKER_SIZE="$(ls -lh "$JOKER_PATH" 2>/dev/null | awk '{print $5}')"
 fi
 
+if [ -n "$GOJOKER" ]; then
+    GOJOKER_VERSION="go-joker $("$GOJOKER" --version 2>&1 | head -1)"
+    GOJOKER_PATH="$(readlink -f "$GOJOKER" 2>/dev/null || readlink "$GOJOKER" 2>/dev/null || echo "$GOJOKER")"
+    GOJOKER_SIZE="$(ls -lh "$GOJOKER_PATH" 2>/dev/null | awk '{print $5}')"
+fi
+
 if [ -n "$GLOAT" ]; then
     GLOAT_VERSION="$(gloat --version 2>&1 | head -1)"
     # Average size of AOT binaries
@@ -118,6 +129,7 @@ echo "System: $(uname -ms), $CPU_INFO"
 echo "let-go: $LETGO_SIZE binary"
 [ -n "$BB" ] && echo "babashka: $BB_VERSION ($BB_SIZE binary)"
 [ -n "$JOKER" ] && echo "joker: $JOKER_VERSION ($JOKER_SIZE binary)"
+[ -n "$GOJOKER" ] && echo "go-joker: $GOJOKER_VERSION ($GOJOKER_SIZE binary)"
 [ -n "$GLOAT" ] && echo "gloat: $GLOAT_VERSION ($GLOAT_SIZE AOT binary)"
 [ -n "$FENNEL" ] && echo "fennel: $FENNEL_VERSION ($FENNEL_SIZE binary, with cljlib)"
 [ -n "$CLJ" ] && echo "clojure: $CLJ_VERSION"
@@ -132,6 +144,7 @@ STARTUP_CMDS=("$LETGO -e nil")
 STARTUP_NAMES=("-n let-go")
 [ -n "$BB" ] && STARTUP_CMDS+=("bb -e nil") && STARTUP_NAMES+=("-n babashka")
 [ -n "$JOKER" ] && STARTUP_CMDS+=("joker -e nil") && STARTUP_NAMES+=("-n joker")
+[ -n "$GOJOKER" ] && STARTUP_CMDS+=("$GOJOKER -e nil") && STARTUP_NAMES+=("-n go-joker")
 [ -n "$GLOAT" ] && [ -f "$GLOAT_BIN_DIR/startup" ] && STARTUP_CMDS+=("$GLOAT_BIN_DIR/startup") && STARTUP_NAMES+=("-n gloat")
 [ -n "$FENNEL" ] && STARTUP_CMDS+=("$FENNEL -e nil") && STARTUP_NAMES+=("-n fennel")
 [ -n "$CLJ" ] && STARTUP_CMDS+=("clj -M -e nil") && STARTUP_NAMES+=("-n clojure")
@@ -169,6 +182,8 @@ BB_STARTUP_MEM=""
 [ -n "$BB" ] && BB_STARTUP_MEM=$(measure_mem "bb -e nil" "babashka" | tail -1)
 JOKER_STARTUP_MEM=""
 [ -n "$JOKER" ] && JOKER_STARTUP_MEM=$(measure_mem "joker -e nil" "joker" | tail -1)
+GOJOKER_STARTUP_MEM=""
+[ -n "$GOJOKER" ] && GOJOKER_STARTUP_MEM=$(measure_mem "$GOJOKER -e nil" "go-joker" | tail -1)
 GLOAT_STARTUP_MEM=""
 [ -n "$GLOAT" ] && [ -f "$GLOAT_BIN_DIR/startup" ] && GLOAT_STARTUP_MEM=$(measure_mem "$GLOAT_BIN_DIR/startup" "gloat" | tail -1)
 FENNEL_STARTUP_MEM=""
@@ -183,6 +198,10 @@ BB_FIB_MEM=""
 [ -n "$BB" ] && BB_FIB_MEM=$(measure_mem "bb benchmark/fib.clj" "babashka" | tail -1)
 JOKER_FIB_MEM=""
 [ -n "$JOKER" ] && JOKER_FIB_MEM=$(measure_mem "joker benchmark/fib.clj" "joker" | tail -1)
+GOJOKER_FIB_MEM=""
+if [ -n "$GOJOKER" ] && ! echo "$GOJOKER_SKIP" | grep -qw "fib"; then
+    GOJOKER_FIB_MEM=$(measure_mem "$GOJOKER benchmark/fib.clj" "go-joker" | tail -1)
+fi
 GLOAT_FIB_MEM=""
 [ -n "$GLOAT" ] && [ -f "$GLOAT_BIN_DIR/fib" ] && GLOAT_FIB_MEM=$(measure_mem "$GLOAT_BIN_DIR/fib" "gloat" | tail -1)
 FENNEL_FIB_MEM=""
@@ -197,6 +216,10 @@ BB_REDUCE_MEM=""
 [ -n "$BB" ] && BB_REDUCE_MEM=$(measure_mem "bb benchmark/reduce.clj" "babashka" | tail -1)
 JOKER_REDUCE_MEM=""
 [ -n "$JOKER" ] && JOKER_REDUCE_MEM=$(measure_mem "joker benchmark/reduce.clj" "joker" | tail -1)
+GOJOKER_REDUCE_MEM=""
+if [ -n "$GOJOKER" ] && ! echo "$GOJOKER_SKIP" | grep -qw "reduce"; then
+    GOJOKER_REDUCE_MEM=$(measure_mem "$GOJOKER benchmark/reduce.clj" "go-joker" | tail -1)
+fi
 GLOAT_REDUCE_MEM=""
 [ -n "$GLOAT" ] && [ -f "$GLOAT_BIN_DIR/reduce" ] && GLOAT_REDUCE_MEM=$(measure_mem "$GLOAT_BIN_DIR/reduce" "gloat" | tail -1)
 FENNEL_REDUCE_MEM=""
@@ -223,6 +246,9 @@ for bench in "${BENCHMARKS[@]}"; do
     if [ -n "$JOKER" ] && ! echo "$JOKER_SKIP" | grep -qw "$name"; then
         CMDS+=("-n joker" "joker $bench")
     fi
+    if [ -n "$GOJOKER" ] && ! echo "$GOJOKER_SKIP" | grep -qw "$name"; then
+        CMDS+=("-n go-joker" "$GOJOKER $bench")
+    fi
     if [ -n "$GLOAT" ] && [ -f "$GLOAT_BIN_DIR/$name" ]; then
         CMDS+=("-n gloat" "$GLOAT_BIN_DIR/$name")
     fi
@@ -243,6 +269,7 @@ RESULTS_FILE="$SCRIPT_DIR/results.md"
 # Determine which runtimes are available for column headers
 RUNTIME_NAMES=("let-go" "babashka")
 [ -n "$JOKER" ] && RUNTIME_NAMES+=("joker")
+[ -n "$GOJOKER" ] && RUNTIME_NAMES+=("go-joker")
 [ -n "$GLOAT" ] && RUNTIME_NAMES+=("gloat")
 [ -n "$FENNEL" ] && RUNTIME_NAMES+=("fennel")
 RUNTIME_NAMES+=("clojure JVM")
@@ -255,6 +282,21 @@ for rn in "${RUNTIME_NAMES[@]}"; do
     sep_row+="---|"
 done
 
+version_row="| **Version** |"
+platform_row="| **Platform** |"
+size_row="| **Binary/runtime size** |"
+for rn in "${RUNTIME_NAMES[@]}"; do
+    case "$rn" in
+        "let-go")     version_row+=" — |"; platform_row+=" Go bytecode VM |"; size_row+=" **$LETGO_SIZE** |" ;;
+        "babashka")   version_row+=" $BB_VERSION |"; platform_row+=" GraalVM native |"; size_row+=" $BB_SIZE |" ;;
+        "joker")      version_row+=" ${JOKER_VERSION:-—} |"; platform_row+=" Go tree-walk interpreter |"; size_row+=" ${JOKER_SIZE:-—} |" ;;
+        "go-joker")   version_row+=" ${GOJOKER_VERSION:-—} |"; platform_row+=" Go IR + WASM/wazero JIT |"; size_row+=" ${GOJOKER_SIZE:-—} |" ;;
+        "gloat")      version_row+=" ${GLOAT_VERSION:-—} |"; platform_row+=" Go AOT (Clojure→Go) |"; size_row+=" ${GLOAT_SIZE:-—} |" ;;
+        "fennel")     version_row+=" ${FENNEL_VERSION:-—} |"; platform_row+=" Lua VM + cljlib |"; size_row+=" ${FENNEL_SIZE:-—} |" ;;
+        "clojure JVM") version_row+=" $CLJ_VERSION |"; platform_row+=" JVM (HotSpot) |"; size_row+=" $JDK_SIZE |" ;;
+    esac
+done
+
 cat > "$RESULTS_FILE" << EOF
 ## Benchmark Results
 
@@ -264,8 +306,8 @@ All benchmarks use [hyperfine](https://github.com/sharkdp/hyperfine) with $WARMU
 and $RUNS timed runs per benchmark. Times shown are mean ± σ wall-clock time. Peak memory is
 measured via \`/usr/bin/time -l\` (median of 3 runs).
 
-Benchmark files are valid Clojure that runs unmodified on let-go, babashka, joker, glojure,
-and Clojure JVM. Fennel uses equivalent implementations via
+Benchmark files are valid Clojure that runs unmodified on let-go, babashka, joker, go-joker,
+glojure, and Clojure JVM. Fennel uses equivalent implementations via
 [fennel-cljlib](https://gitlab.com/andreyorst/fennel-cljlib) (lazy seqs, transducers,
 persistent data structures). Gloat benchmarks are pre-compiled to native binaries via
 [gloat](https://github.com/gloathub/gloat) AOT (Clojure→Go); compilation time is not
@@ -281,9 +323,9 @@ features (transducers). Binary sizes for gloat are averaged across all benchmark
 
 $header_row
 $sep_row
-| **Version** | — | $BB_VERSION | ${JOKER_VERSION:-—} | ${GLOAT_VERSION:-—} | ${FENNEL_VERSION:-—} | $CLJ_VERSION |
-| **Platform** | Go bytecode VM | GraalVM native | Go tree-walk interpreter | Go AOT (Clojure→Go) | Lua VM + cljlib | JVM (HotSpot) |
-| **Binary/runtime size** | **$LETGO_SIZE** | $BB_SIZE | ${JOKER_SIZE:-—} | ${GLOAT_SIZE:-—} | ${FENNEL_SIZE:-—} | $JDK_SIZE |
+$version_row
+$platform_row
+$size_row
 
 ### Startup Time
 
@@ -329,6 +371,8 @@ MEM_SEP+="---|"
 
 HAS_JOKER_COL=""
 [ -n "$JOKER" ] && HAS_JOKER_COL="1"
+HAS_GOJOKER_COL=""
+[ -n "$GOJOKER" ] && HAS_GOJOKER_COL="1"
 HAS_GLOAT_COL=""
 [ -n "$GLOAT" ] && HAS_GLOAT_COL="1"
 HAS_FENNEL_COL=""
@@ -336,6 +380,7 @@ HAS_FENNEL_COL=""
 
 python3 -c "
 has_joker = '$HAS_JOKER_COL' != ''
+has_gojoker = '$HAS_GOJOKER_COL' != ''
 has_gloat = '$HAS_GLOAT_COL' != ''
 has_fennel = '$HAS_FENNEL_COL' != ''
 
@@ -367,6 +412,7 @@ rows_data = [
         ('${LETGO_STARTUP_MEM}MB', parse_mb('${LETGO_STARTUP_MEM}')),
         ('${BB_STARTUP_MEM:-—}MB', parse_mb('${BB_STARTUP_MEM}')),
     ] + ([('${JOKER_STARTUP_MEM:-—}MB', parse_mb('${JOKER_STARTUP_MEM}'))] if has_joker else [])
+      + ([('${GOJOKER_STARTUP_MEM:-—}MB', parse_mb('${GOJOKER_STARTUP_MEM}'))] if has_gojoker else [])
       + ([('${GLOAT_STARTUP_MEM:-—}MB', parse_mb('${GLOAT_STARTUP_MEM}'))] if has_gloat else [])
       + ([('${FENNEL_STARTUP_MEM:-—}MB', parse_mb('${FENNEL_STARTUP_MEM}'))] if has_fennel else []) + [
         ('${CLJ_STARTUP_MEM:-—}MB', parse_mb('${CLJ_STARTUP_MEM}')),
@@ -375,6 +421,7 @@ rows_data = [
         ('${LETGO_FIB_MEM}MB', parse_mb('${LETGO_FIB_MEM}')),
         ('${BB_FIB_MEM:-—}MB', parse_mb('${BB_FIB_MEM}')),
     ] + ([('${JOKER_FIB_MEM:-—}MB', parse_mb('${JOKER_FIB_MEM}'))] if has_joker else [])
+      + ([('${GOJOKER_FIB_MEM:-—}MB', parse_mb('${GOJOKER_FIB_MEM}'))] if has_gojoker else [])
       + ([('${GLOAT_FIB_MEM:-—}MB', parse_mb('${GLOAT_FIB_MEM}'))] if has_gloat else [])
       + ([('${FENNEL_FIB_MEM:-—}MB', parse_mb('${FENNEL_FIB_MEM}'))] if has_fennel else []) + [
         ('${CLJ_FIB_MEM:-—}MB', parse_mb('${CLJ_FIB_MEM}')),
@@ -383,6 +430,7 @@ rows_data = [
         ('${LETGO_REDUCE_MEM}MB', parse_mb('${LETGO_REDUCE_MEM}')),
         ('${BB_REDUCE_MEM:-—}MB', parse_mb('${BB_REDUCE_MEM}')),
     ] + ([('${JOKER_REDUCE_MEM:-—}MB', parse_mb('${JOKER_REDUCE_MEM}'))] if has_joker else [])
+      + ([('${GOJOKER_REDUCE_MEM:-—}MB', parse_mb('${GOJOKER_REDUCE_MEM}'))] if has_gojoker else [])
       + ([('${GLOAT_REDUCE_MEM:-—}MB', parse_mb('${GLOAT_REDUCE_MEM}'))] if has_gloat else [])
       + ([('${FENNEL_REDUCE_MEM:-—}MB', parse_mb('${FENNEL_REDUCE_MEM}'))] if has_fennel else []) + [
         ('${CLJ_REDUCE_MEM:-—}MB', parse_mb('${CLJ_REDUCE_MEM}')),
@@ -393,6 +441,9 @@ header = '| Workload | let-go | babashka |'
 sep = '|---|---|---|'
 if has_joker:
     header += ' joker |'
+    sep += '---|'
+if has_gojoker:
+    header += ' go-joker |'
     sep += '---|'
 if has_gloat:
     header += ' gloat |'
@@ -423,6 +474,7 @@ EOF
 PERF_HEADER="| Benchmark | let-go | babashka |"
 PERF_SEP="|---|---|---|"
 [ -n "$JOKER" ] && PERF_HEADER+=" joker |" && PERF_SEP+="---|"
+[ -n "$GOJOKER" ] && PERF_HEADER+=" go-joker |" && PERF_SEP+="---|"
 [ -n "$GLOAT" ] && PERF_HEADER+=" gloat |" && PERF_SEP+="---|"
 [ -n "$FENNEL" ] && PERF_HEADER+=" fennel |" && PERF_SEP+="---|"
 PERF_HEADER+=" clojure JVM |"
@@ -454,6 +506,7 @@ for r in d['results']:
     if cmd == 'let-go': results['letgo'] = (fmt(r['mean'], r['stddev']), r['mean'])
     elif cmd == 'babashka': results['bb'] = (fmt(r['mean'], r['stddev']), r['mean'])
     elif cmd == 'joker': results['joker'] = (fmt(r['mean'], r['stddev']), r['mean'])
+    elif cmd == 'go-joker': results['gojoker'] = (fmt(r['mean'], r['stddev']), r['mean'])
     elif cmd == 'gloat': results['gloat'] = (fmt(r['mean'], r['stddev']), r['mean'])
     elif cmd == 'fennel': results['fennel'] = (fmt(r['mean'], r['stddev']), r['mean'])
     elif cmd == 'clojure': results['clj'] = (fmt(r['mean'], r['stddev']), r['mean'])
@@ -473,11 +526,14 @@ def cell(key):
     return f'{s}{tag}'
 
 has_joker_col = '$JOKER' != ''
+has_gojoker_col = '$GOJOKER' != ''
 has_gloat_col = '$GLOAT' != ''
 has_fennel_col = '$FENNEL' != ''
 row = '| $name | ' + cell('letgo') + ' | ' + cell('bb') + ' |'
 if has_joker_col:
     row += ' ' + cell('joker') + ' |'
+if has_gojoker_col:
+    row += ' ' + cell('gojoker') + ' |'
 if has_gloat_col:
     row += ' ' + cell('gloat') + ' |'
 if has_fennel_col:
