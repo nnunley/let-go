@@ -133,6 +133,25 @@ func postCoreInit() {
 	rsVar := coreNS.LookupOrAdd(vm.Symbol("read-string"))
 	rsVar.(*vm.Var).SetRoot(readStringFn)
 
+	// load-string: compile and evaluate a string of code, returning the last value.
+	loadStringFn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.NIL, nil
+		}
+		s, ok := vs[0].(vm.String)
+		if !ok {
+			return vm.NIL, nil
+		}
+		c := NewCompiler(consts, rt.NS(rt.NameCoreNS))
+		_, out, err := c.CompileMultiple(strings.NewReader(string(s)))
+		if err != nil {
+			return vm.NIL, err
+		}
+		return out, nil
+	})
+	lsVar := coreNS.LookupOrAdd(vm.Symbol("load-string"))
+	lsVar.(*vm.Var).SetRoot(loadStringFn)
+
 	// Wire up EDN reader for pod support
 	rt.SetReadEDN(func(s string) (vm.Value, error) {
 		return ReadString(s)

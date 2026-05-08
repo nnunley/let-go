@@ -315,7 +315,15 @@
   ([f c1 c2 & colls] (lazy-cat-seqs (apply map f c1 c2 colls))))
 
 (defmacro ns [n & body]
-  (let [emit-one (fn [forms req]
+  ;; Strip metadata wrappers from the namespace symbol: `(ns ^{...} foo.bar)`
+  ;; is read as `(ns (with-meta foo.bar {...}) ...)`. We don't yet attach the
+  ;; meta to the namespace, but we must at least unwrap so `in-ns` sees a sym.
+  (let [n (if (and (seq? n) (= 'with-meta (first n))) (second n) n)
+        ;; A docstring as the first body form is also valid (Clojure compat).
+        body (if (string? (first body)) (next body) body)
+        ;; An attr-map as the next body form is valid too — drop for now.
+        body (if (map? (first body)) (next body) body)
+        emit-one (fn [forms req]
                    (cond
                      (symbol? req)
                      (conj forms (list 'use (list 'quote req)))

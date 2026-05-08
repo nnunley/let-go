@@ -1193,32 +1193,35 @@ func readMeta(r *LispReader, _ rune) (vm.Value, error) {
 		return vm.NIL, NewReaderError(r, "reading meta")
 	}
 	var m vm.Value = vm.EmptyPersistentMap
+	tagKey := vm.Keyword("tag")
 	for {
-		switch ch {
-		case '{':
-			m2, err := readMap(r, ch)
-			if err != nil {
-				return vm.NIL, NewReaderError(r, "reading meta map")
-			}
-			if sq, ok := m2.(vm.Sequable); ok {
-				for s := sq.Seq(); s != nil && s != vm.EmptyList; s = s.Next() {
-					k, v, ok := vm.MapEntryKV(s.First())
-					if !ok {
-						continue
-					}
-					m = m.(*vm.PersistentMap).Assoc(k, v).(*vm.PersistentMap)
+		// Unread the lookahead so r.Read() can dispatch normally.
+		if err := r.unread(); err != nil {
+			return vm.NIL, NewReaderError(r, "reading meta")
+		}
+		mForm, err := r.Read()
+		if err != nil {
+			return vm.NIL, NewReaderError(r, "reading meta")
+		}
+		switch v := mForm.(type) {
+		case *vm.PersistentMap:
+			for s := v.Seq(); s != nil && s != vm.EmptyList; s = s.Next() {
+				k, val, ok := vm.MapEntryKV(s.First())
+				if !ok {
+					continue
 				}
+				m = m.(*vm.PersistentMap).Assoc(k, val).(*vm.PersistentMap)
 			}
-		case ':':
-			k, err := readToken(r, ':')
-			if err != nil {
-				return vm.NIL, NewReaderError(r, "reading meta keyword")
+		case vm.Map:
+			for k, val := range v {
+				m = m.(*vm.PersistentMap).Assoc(k, val).(*vm.PersistentMap)
 			}
-			k, err = interpretToken(r, k)
-			if err != nil {
-				return vm.NIL, NewReaderError(r, "reading meta keyword")
-			}
-			m = m.(*vm.PersistentMap).Assoc(k, vm.TRUE).(*vm.PersistentMap)
+		case vm.Keyword:
+			m = m.(*vm.PersistentMap).Assoc(v, vm.TRUE).(*vm.PersistentMap)
+		case vm.Symbol:
+			m = m.(*vm.PersistentMap).Assoc(tagKey, v).(*vm.PersistentMap)
+		case vm.String:
+			m = m.(*vm.PersistentMap).Assoc(tagKey, v).(*vm.PersistentMap)
 		default:
 			return vm.NIL, NewReaderError(r, "unsupported meta form")
 		}

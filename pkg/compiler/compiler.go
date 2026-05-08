@@ -1410,8 +1410,18 @@ func defCompiler(c *Context, form vm.Value) error {
 		}
 	}
 	l := len(args)
-	if l < 1 || l > 2 {
-		return NewCompileError(fmt.Sprintf("def: wrong number of forms (%d), need 1 or 2", l))
+	if l < 1 || l > 3 {
+		return NewCompileError(fmt.Sprintf("def: wrong number of forms (%d), need 1, 2 or 3", l))
+	}
+	// 3-arg form: (def name "docstring" value) — drop the docstring for now.
+	// TODO: when var metadata lands, attach as :doc on the var.
+	if l == 3 {
+		if _, ok := args[1].(vm.String); ok {
+			args = []vm.Value{args[0], args[2]}
+			l = 2
+		} else {
+			return NewCompileError("def: 3-arg form requires a docstring (String) as second argument")
+		}
 	}
 	var meta vm.Value = vm.NIL
 	sym := args[0]
