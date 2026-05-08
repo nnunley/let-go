@@ -98,23 +98,33 @@ Sentinel satisfaction is just a Go predicate per sentinel
 
 ### Layer 3 — `(.method obj args)` and `(Class. args)`
 
-These are reader/compiler features. The reader currently does not
-recognize them as special forms — they are just symbols.
+**Mostly already built.** The compiler already rewrites:
 
-- `(.method obj args)` → `(method-dispatch :method obj args)` where
-  `method-dispatch` is a multimethod on `obj`'s type. Each shim
-  namespace registers methods (e.g., `(.startsWith s prefix)` →
-  `(string/starts-with? s prefix)`).
-- `(Class. args)` → `(class-construct Class args)` — looks up a
-  factory registered against the `Class` value.
+- `(.member instance args)` → `(. instance 'member args)` →
+  `instance.InvokeMethod(member, args)` via the `Receiver` interface
+  (`pkg/compiler/compiler.go:450`, `pkg/rt/lang.go:2000`).
+- `(Class. args)` → `(->Class args)` — works for any defrecord/deftype
+  (`pkg/compiler/compiler.go:441`).
 
-**Cost**: ~150 lines of compiler work + a method/constructor registry.
+What's missing is just *populating* these mechanisms for the types
+the corpus reaches into:
+
+1. Built-in value types (`String`, `PersistentVector`, `PersistentMap`,
+   …) currently do **not** implement `Receiver`. Today `(.startsWith
+   "abc" "a")` errors with "method-invoke expected Receiver". Make
+   each implement `InvokeMethod` with a small per-type method table
+   delegating to existing builtins (`String.startsWith` →
+   `strings.HasPrefix`, `.length` → len, etc.).
+2. Shim "Java types" (`URI`, `URLEncoder`) need `->URI` style
+   constructors. Easiest path: a tiny defrecord-shaped wrapper in a
+   `java.net` shim ns that holds a parsed value and exposes
+   `.getHost`, `.getPath`, etc. via `InvokeMethod`.
+
+**Cost**: ~50 lines per built-in type for the method table; a Go-side
+registration helper to keep them concise. ~30 corpus methods total.
 **Unblocks**: nearly all "interop" usage in the corpus.
 
-The trick: most `.method` calls in the corpus map to a small set of
-common operations — string prefix/suffix/contains, collection count,
-URI accessors, IO read/write. We register these by hand. Reflection
-is not on the table.
+Reflection is not on the table — the registry is hand-curated.
 
 ### (Layer 4 — `deftype` body Java methods)
 
@@ -144,10 +154,13 @@ delta.
 - Run corpus → expect hiccup/util.clj to load if Layer 3 isn't needed
   for it (it is — the URI body needs `.getHost`).
 
-**Phase C** — Layer 3 (interop sugar).
-- Reader recognizes `.method` / `Class.` symbol shapes.
-- Compiler emits dispatch calls.
+**Phase C** — Layer 3 (populate Receiver for built-in types).
+- Reader/compiler dispatch already exists — only need to add
+  `InvokeMethod` to `String`, the persistent collection types, and
+  whatever else the corpus invokes methods on.
 - Hand-register the ~30 methods the corpus actually uses.
+- Add `java.net`/`java.io` shim types (defrecord-shaped) for the
+  classes that show up in `(Class. args)` form.
 - Run corpus → hiccup loads end-to-end.
 
 Stop after C and re-evaluate. Layer 4 (deftype Java methods) only if
@@ -209,6 +222,8 @@ the remaining corpus failures still pin on it.
 
 ## Estimate
 
-Phase A: 1 day. Phase B: 1 day. Phase C: 2–3 days. Layer 4 if needed:
-2 days. Total: ~1 working week to land the spine, plus ongoing work
-each time the corpus surfaces a new method/class.
+Phase A: 1 day. Phase B: 1 day. Phase C: 1–2 days (smaller than the
+original estimate — the compiler-side dispatch is already built;
+only the receiver tables need writing). Layer 4 if needed: 2 days.
+Total: ~3–5 working days to land the spine, plus ongoing work each
+time the corpus surfaces a new method/class.
