@@ -1,7 +1,6 @@
 ;; Transducer pipeline — no intermediate collections
 (transduce
   (comp (map #(* % %))
-        (filter even?)
-        (take 100))
+        (filter even?))
   + 0
-  (range 10000))
+  (range 100000))

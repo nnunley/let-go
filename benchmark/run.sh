@@ -7,8 +7,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
-WARMUP=3
-RUNS=10
+# Filter mode: positional args select which perf benches to run.
+# In filter mode, startup/memory are skipped and results.md is NOT regenerated;
+# results are printed only. Use this for iterating on a single bench.
+FILTER_BENCHES=("$@")
+FILTER_MODE=0
+[ ${#FILTER_BENCHES[@]} -gt 0 ] && FILTER_MODE=1
+
+if [ "$FILTER_MODE" -eq 1 ]; then
+    WARMUP=10
+    RUNS=50
+else
+    WARMUP=3
+    RUNS=10
+fi
 
 # Build let-go binary
 echo "Building let-go..."
@@ -29,7 +41,7 @@ FENNEL=""
 
 # Benchmarks to skip for specific runtimes (too slow or unsupported)
 JOKER_SKIP="tak transducers"
-GOJOKER_SKIP="fib tak transducers"
+GOJOKER_SKIP=""
 
 # --- Build gloat AOT binaries ---
 
@@ -45,8 +57,23 @@ if [ -n "$GLOAT" ]; then
     done
 fi
 
-# Collect benchmark files
-BENCHMARKS=($(ls "$SCRIPT_DIR"/*.clj 2>/dev/null | sort))
+# Collect benchmark files (apply filter if any positional args were passed)
+ALL_BENCHMARKS=($(ls "$SCRIPT_DIR"/*.clj 2>/dev/null | sort))
+BENCHMARKS=()
+if [ "$FILTER_MODE" -eq 1 ]; then
+    for want in "${FILTER_BENCHES[@]}"; do
+        match="$SCRIPT_DIR/${want}.clj"
+        if [ -f "$match" ]; then
+            BENCHMARKS+=("$match")
+        else
+            echo "Unknown benchmark: $want (no $match)" >&2
+            exit 1
+        fi
+    done
+    echo "Filter mode: running ${FILTER_BENCHES[*]} (warmup=$WARMUP runs=$RUNS, no results.md update)"
+else
+    BENCHMARKS=("${ALL_BENCHMARKS[@]}")
+fi
 
 if [ ${#BENCHMARKS[@]} -eq 0 ]; then
     echo "No benchmark files found in $SCRIPT_DIR"
@@ -138,6 +165,7 @@ echo ""
 
 # --- Measure startup time ---
 
+if [ "$FILTER_MODE" -eq 0 ]; then
 echo "=== Startup Time ==="
 STARTUP_JSON="/tmp/bench_startup.json"
 STARTUP_CMDS=("$LETGO -e nil")
@@ -227,6 +255,8 @@ FENNEL_REDUCE_MEM=""
 CLJ_REDUCE_MEM=""
 [ -n "$CLJ" ] && CLJ_REDUCE_MEM=$(measure_mem "clj -M -e '(load-file \"benchmark/reduce.clj\")'" "clojure" | tail -1)
 
+fi  # end FILTER_MODE == 0 (startup + memory block)
+
 # --- Run benchmarks ---
 
 echo ""
@@ -263,6 +293,13 @@ for bench in "${BENCHMARKS[@]}"; do
 done
 
 # --- Generate results.md ---
+
+if [ "$FILTER_MODE" -eq 1 ]; then
+    echo ""
+    echo "=== Done (filter mode — results.md not updated) ==="
+    rm -f "$SCRIPT_DIR/letgo"
+    exit 0
+fi
 
 RESULTS_FILE="$SCRIPT_DIR/results.md"
 

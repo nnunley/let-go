@@ -3,7 +3,6 @@
 
 (core.transduce
   (core.comp (core.map #(* $ $))
-             (core.filter core.even?)
-             (core.take 100))
+             (core.filter core.even?))
   core.+ 0
-  (core.range 10000))
+  (core.range 100000))
