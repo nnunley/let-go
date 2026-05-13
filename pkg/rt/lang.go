@@ -598,50 +598,6 @@ func isNaNValue(v vm.Value) bool {
 	return ok && math.IsNaN(float64(f))
 }
 
-// seqCompareElements compares two values for ordering, used by compare on seqs.
-func seqCompareElements(a, b vm.Value) int {
-	if a == vm.NIL && b == vm.NIL {
-		return 0
-	}
-	if a == vm.NIL {
-		return -1
-	}
-	if b == vm.NIL {
-		return 1
-	}
-	if vm.IsNumber(a) && vm.IsNumber(b) {
-		lt, _ := vm.NumLt(a, b)
-		if lt {
-			return -1
-		}
-		gt, _ := vm.NumGt(a, b)
-		if gt {
-			return 1
-		}
-		return 0
-	}
-	if sa, ok := a.(vm.String); ok {
-		if sb, ok := b.(vm.String); ok {
-			as, bs := string(sa), string(sb)
-			if as < bs {
-				return -1
-			}
-			if as > bs {
-				return 1
-			}
-			return 0
-		}
-	}
-	// Fallback: equal if valueEquals, otherwise arbitrary but stable
-	if valueEquals(a, b) {
-		return 0
-	}
-	if fmt.Sprintf("%v", a) < fmt.Sprintf("%v", b) {
-		return -1
-	}
-	return 1
-}
-
 func nilListEquivalent(a, b vm.Value) bool {
 	return (a == vm.NIL && b == vm.EmptyList) || (a == vm.EmptyList && b == vm.NIL)
 }
