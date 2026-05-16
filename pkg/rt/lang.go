@@ -1277,16 +1277,16 @@ func installLangNS() {
 		}
 		elem := vs[0]
 		if vs[1] == vm.NIL {
-			return vm.EmptyList.Cons(elem), nil
+			return vm.NewCons(elem, nil), nil
 		}
 		seq, err := seqOf(vs[1])
 		if err != nil {
 			return vm.NIL, fmt.Errorf("cons expected Seq")
 		}
 		if seq == nil {
-			return vm.EmptyList.Cons(elem), nil
+			return vm.NewCons(elem, nil), nil
 		}
-		return seq.Cons(elem), nil
+		return vm.NewCons(elem, seq), nil
 	})
 
 	conj, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {

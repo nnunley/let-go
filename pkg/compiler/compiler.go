@@ -1288,7 +1288,7 @@ func doCompiler(c *Context, form vm.Value) error {
 	for i := range args {
 		// Detect top-level (in-ns 'foo) and update compiler namespace early
 		if i == 0 && args[i].Type() == vm.ListType {
-			lst := args[i].(*vm.List)
+			lst := args[i].(vm.Seq)
 			if lst.First().Type() == vm.SymbolType && vm.Symbol(lst.First().(vm.Symbol)) == vm.Symbol("in-ns") {
 				alist := lst.Next()
 				if alist != nil {
@@ -1312,7 +1312,7 @@ func doCompiler(c *Context, form vm.Value) error {
 		}
 		// Simulate ns helpers at compile-time so later forms in the same do can resolve
 		if args[i].Type() == vm.ListType {
-			lst := args[i].(*vm.List)
+			lst := args[i].(vm.Seq)
 			if lst.First().Type() == vm.SymbolType {
 				fname := vm.Symbol(lst.First().(vm.Symbol))
 				// core/alias

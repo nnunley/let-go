@@ -51,7 +51,6 @@ var knownFailing = map[string]bool{
 	"minus":          true, // overflow not detected
 	"nnext":          true, // map ordering
 	"num":            true, // num edge cases
-	"peek":           true, // peek on cons
 	"plus":           true, // overflow not detected
 	"reduce":         true, // reduce interop edge cases
 	"short":          true, // short coercion
