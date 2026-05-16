@@ -4357,6 +4357,7 @@ func installLangNS() {
 	CurrentNS = ns.Def("*ns*", ns)
 	ns.Def("*compiling-aot*", vm.FALSE)
 	ns.Def("*in-wasm*", vm.FALSE)
+	ns.Def("Object", vm.AnyType)
 	// True if the host terminal renders ANSI escape sequences. Defaults to
 	// true; flipped to false on platforms that don't (e.g. plan9 / rio —
 	// see term_plan9.go).
@@ -4536,6 +4537,7 @@ func installLangNS() {
 	ns.Def("make-deftype", makeDType)
 	ns.Def("make-deftype-instance", makeDTypeInstance)
 	ns.Def("defprotocol*", defProtocol)
+	installHierarchyBuiltins(ns)
 	ns.Def("make-protocol-fn", makeProtocolFn)
 	ns.Def("extend-type*", extendType)
 	ns.Def("satisfies?", satisfies)

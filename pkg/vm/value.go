@@ -26,8 +26,8 @@ type Value interface {
 
 // IMeta is implemented by values that support metadata.
 type IMeta interface {
-	Meta() Value           // returns the metadata map, or NIL
-	WithMeta(Value) Value  // returns a copy of this value with the given metadata
+	Meta() Value          // returns the metadata map, or NIL
+	WithMeta(Value) Value // returns a copy of this value with the given metadata
 }
 
 // Seq is implemented by all sequence-like values
@@ -106,6 +106,18 @@ func (t *theTypeType) Unbox() interface{} { return reflect.TypeOf(t) }
 
 func (t *theTypeType) Name() string { return "let-go.lang.Type" }
 func (t *theTypeType) Box(b interface{}) (Value, error) {
+	return NIL, NewTypeError(b, "can't be boxed as", t)
+}
+
+type theAnyType struct{}
+
+var AnyType *theAnyType = &theAnyType{}
+
+func (t *theAnyType) String() string     { return t.Name() }
+func (t *theAnyType) Type() ValueType    { return TypeType }
+func (t *theAnyType) Unbox() interface{} { return reflect.TypeOf(t) }
+func (t *theAnyType) Name() string       { return "java.lang.Object" }
+func (t *theAnyType) Box(b interface{}) (Value, error) {
 	return NIL, NewTypeError(b, "can't be boxed as", t)
 }
 
@@ -196,10 +208,12 @@ func BoxValue(v reflect.Value) (Value, error) {
 		for iter.Next() {
 			k, err := BoxValue(iter.Key())
 			if err != nil {
-				return NIL, err 			}
+				return NIL, err
+			}
 			val, err := BoxValue(iter.Value())
 			if err != nil {
-				return NIL, err 			}
+				return NIL, err
+			}
 			result = result.Assoc(k, val).(*PersistentMap)
 		}
 		return result, nil

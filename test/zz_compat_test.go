@@ -30,22 +30,17 @@ const memLimitBytes = 512 * 1024 * 1024
 var knownFailing = map[string]bool{
 	"add_watch":      true, // agent stub is synchronous; some assertions need real agent behavior
 	"remove_watch":   true, // ditto
-	"ancestors":      true, // hierarchy stub returns empty
-	"parents":        true, // hierarchy stub returns nil
 	"atom":           true, // atom validator/meta edge cases
 	"bigint":         true, // BigInt promotion at Long range boundary
 	"binding":        true, // thread binding propagation to futures
 	"bound_fn":       true, // bound-fn shim doesn't propagate dyn vars
 	"bound_fn_star":  true, // bound-fn* shim is identity
-	"derive":         true, // hierarchy stub has no real behavior
-	"descendants":    true, // hierarchy stub has no real behavior
 	"disj_bang":      true, // disj! shim falls through to disj
 	"dissoc":         true, // dissoc on records has quirky behavior
 	"empty":          true, // empty on deftype/non-coll edge cases
 	"plus_squote":    true, // +' BigInt promotion at Long boundary
 	"realized_qmark": true, // realized? semantics mismatch
 	"star_squote":    true, // *' BigInt promotion at Long boundary
-	"underive":       true, // hierarchy stub returns empty
 	"with_precision": true, // with-precision is a no-op; results don't round
 	"case":           true, // case macro complex matching
 	"compare":        true, // compare cross-type issues

@@ -229,7 +229,9 @@
 (defn empty? [x] (not (seq x)))
 
 (defn set [coll]
-  (reduce conj #{} coll))
+  (if (seq coll)
+    (reduce conj #{} coll)
+    #{}))
 
 (defn concat-vec [a b]
   (if (empty? b)
@@ -1565,10 +1567,12 @@
         pos-ctor-body (cons 'make-deftype-instance (cons name fields))
         pos-ctor      (list 'def pos-ctor-name
                             (list 'fn (vec fields) pos-ctor-body))
+        protocol-parents (filter symbol? protocol-impls)
+        parent-forms  (map (fn [p] (list 'register-type-parent! name p)) protocol-parents)
         forms         (list 'do (list 'def name type-def) pos-ctor)]
     (if (seq protocol-impls)
-      (concat forms (list (cons 'extend-type (cons name protocol-impls))))
-      forms)))
+      (concat forms parent-forms (list (cons 'extend-type (cons name protocol-impls))))
+      (concat forms parent-forms))))
 
 (defmacro defrecord [name fields & protocol-impls]
   (let [field-keywords (map keyword fields)
@@ -1581,11 +1585,14 @@
         pos-ctor (list 'def pos-ctor-name (cons 'fn (cons (vec fields) (list pos-ctor-body))))
         ;; Map constructor: (map->Point {:x 1 :y 2}) → (make-record Point m)
         map-ctor-name (symbol (str "map->" name))
-        map-ctor (list 'def map-ctor-name (list 'fn ['m] (list 'make-record name 'm)))]
-    (list 'do
-          (list 'def name type-def)
-          pos-ctor
-          map-ctor)))
+        map-ctor (list 'def map-ctor-name (list 'fn ['m] (list 'make-record name 'm)))
+        protocol-parents (filter symbol? protocol-impls)
+        parent-forms (map (fn [p] (list 'register-type-parent! name p)) protocol-parents)]
+    (concat (list 'do
+                  (list 'def name type-def)
+                  pos-ctor
+                  map-ctor)
+            parent-forms)))
 
 ;; --- Protocols ---
 
