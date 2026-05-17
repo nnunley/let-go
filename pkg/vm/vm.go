@@ -883,7 +883,14 @@ func (f *Frame) Run() (Value, error) {
 			a := f.stack[f.sp-2]
 			if ai, ok := a.(Int); ok {
 				if bi, ok := b.(Int); ok {
-					f.stack[f.sp-2] = Int(int64(ai) + int64(bi))
+					r, ok := checkedAddInt(ai, bi)
+					if !ok {
+						if f.handleError(NewExecutionError("integer overflow")) {
+							continue
+						}
+						return NIL, NewExecutionError("integer overflow")
+					}
+					f.stack[f.sp-2] = r
 					f.sp--
 					f.ip++
 					continue
@@ -905,7 +912,14 @@ func (f *Frame) Run() (Value, error) {
 			a := f.stack[f.sp-2]
 			if ai, ok := a.(Int); ok {
 				if bi, ok := b.(Int); ok {
-					f.stack[f.sp-2] = Int(int64(ai) - int64(bi))
+					r, ok := checkedSubInt(ai, bi)
+					if !ok {
+						if f.handleError(NewExecutionError("integer overflow")) {
+							continue
+						}
+						return NIL, NewExecutionError("integer overflow")
+					}
+					f.stack[f.sp-2] = r
 					f.sp--
 					f.ip++
 					continue
@@ -927,7 +941,14 @@ func (f *Frame) Run() (Value, error) {
 			a := f.stack[f.sp-2]
 			if ai, ok := a.(Int); ok {
 				if bi, ok := b.(Int); ok {
-					f.stack[f.sp-2] = Int(int64(ai) * int64(bi))
+					r, ok := checkedMulInt(ai, bi)
+					if !ok {
+						if f.handleError(NewExecutionError("integer overflow")) {
+							continue
+						}
+						return NIL, NewExecutionError("integer overflow")
+					}
+					f.stack[f.sp-2] = r
 					f.sp--
 					f.ip++
 					continue
@@ -1060,7 +1081,14 @@ func (f *Frame) Run() (Value, error) {
 		case OP_INC:
 			a := f.stack[f.sp-1]
 			if ai, ok := a.(Int); ok {
-				f.stack[f.sp-1] = Int(int64(ai) + 1)
+				r, ok := checkedAddInt(ai, 1)
+				if !ok {
+					if f.handleError(NewExecutionError("integer overflow")) {
+						continue
+					}
+					return NIL, NewExecutionError("integer overflow")
+				}
+				f.stack[f.sp-1] = r
 				f.ip++
 				continue
 			}
@@ -1074,7 +1102,14 @@ func (f *Frame) Run() (Value, error) {
 		case OP_DEC:
 			a := f.stack[f.sp-1]
 			if ai, ok := a.(Int); ok {
-				f.stack[f.sp-1] = Int(int64(ai) - 1)
+				r, ok := checkedSubInt(ai, 1)
+				if !ok {
+					if f.handleError(NewExecutionError("integer overflow")) {
+						continue
+					}
+					return NIL, NewExecutionError("integer overflow")
+				}
+				f.stack[f.sp-1] = r
 				f.ip++
 				continue
 			}

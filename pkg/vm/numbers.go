@@ -6,6 +6,48 @@ import (
 	"math/big"
 )
 
+const maxIntValue = Int(int(^uint(0) >> 1))
+const minIntValue = -maxIntValue - 1
+
+func checkedAddInt(a, b Int) (Int, bool) {
+	if (b > 0 && a > maxIntValue-b) || (b < 0 && a < minIntValue-b) {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func checkedSubInt(a, b Int) (Int, bool) {
+	if (b < 0 && a > maxIntValue+b) || (b > 0 && a < minIntValue+b) {
+		return 0, false
+	}
+	return a - b, true
+}
+
+func checkedMulInt(a, b Int) (Int, bool) {
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if (a == minIntValue && b == -1) || (b == minIntValue && a == -1) {
+		return 0, false
+	}
+	if a > 0 {
+		if b > 0 && a > maxIntValue/b {
+			return 0, false
+		}
+		if b < 0 && b < minIntValue/a {
+			return 0, false
+		}
+	} else {
+		if b > 0 && a < minIntValue/b {
+			return 0, false
+		}
+		if b < 0 && a < maxIntValue/b {
+			return 0, false
+		}
+	}
+	return a * b, true
+}
+
 // Numeric type promotion and arithmetic dispatch.
 // All functions use direct type assertions (no Unbox) to avoid allocation.
 // Promotion: Int op BigInt → BigInt, BigInt op Float → Float, Int op Float → Float.
@@ -16,7 +58,11 @@ func NumAdd(a, b Value) (Value, error) {
 	case Int:
 		switch bv := b.(type) {
 		case Int:
-			return MakeInt(int(av) + int(bv)), nil
+			r, ok := checkedAddInt(av, bv)
+			if !ok {
+				return NIL, fmt.Errorf("integer overflow")
+			}
+			return MakeInt(int(r)), nil
 		case Float:
 			return Float(float64(av) + float64(bv)), nil
 		case *BigInt:
@@ -58,7 +104,11 @@ func NumSub(a, b Value) (Value, error) {
 	case Int:
 		switch bv := b.(type) {
 		case Int:
-			return MakeInt(int(av) - int(bv)), nil
+			r, ok := checkedSubInt(av, bv)
+			if !ok {
+				return NIL, fmt.Errorf("integer overflow")
+			}
+			return MakeInt(int(r)), nil
 		case Float:
 			return Float(float64(av) - float64(bv)), nil
 		case *BigInt:
@@ -100,7 +150,11 @@ func NumMul(a, b Value) (Value, error) {
 	case Int:
 		switch bv := b.(type) {
 		case Int:
-			return MakeInt(int(av) * int(bv)), nil
+			r, ok := checkedMulInt(av, bv)
+			if !ok {
+				return NIL, fmt.Errorf("integer overflow")
+			}
+			return MakeInt(int(r)), nil
 		case Float:
 			return Float(float64(av) * float64(bv)), nil
 		case *BigInt:

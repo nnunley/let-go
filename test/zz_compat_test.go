@@ -28,6 +28,7 @@ const memLimitBytes = 512 * 1024 * 1024
 // knownFailing lists test names (filename stems) that are known to fail.
 // Tests that pass but appear here will cause an error so the list stays current.
 var knownFailing = map[string]bool{
+	"abs":            true, // :default reader branch expects min-int negation to succeed
 	"bigint":         true, // BigInt promotion at Long range boundary
 	"dissoc":         true, // dissoc on records has quirky behavior
 	"plus_squote":    true, // +' BigInt promotion at Long boundary
@@ -38,12 +39,9 @@ var knownFailing = map[string]bool{
 	"dec":            true, // dec overflow/type coercion
 	"double_qmark":   true, // no float32/float64 distinction
 	"inc":            true, // overflow untested assertion
-	"minus":          true, // overflow not detected
-	"plus":           true, // overflow not detected
 	"reduce":         true, // reduce interop edge cases
 	"short":          true, // short coercion
 	"slash":          true, // division edge cases
-	"star":           true, // overflow not detected
 }
 
 // suiteCounters tracks aggregate assertion counts across the entire suite.
