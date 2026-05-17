@@ -75,7 +75,7 @@ lens, with no known failures, compile skips, panic skips, or runtime skips.
 
 | Namespace            | Status                                                                                                                                                                                        |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `clojure.core`       | macros, destructuring, lazy seqs, transducers, protocols, records, multimethods, hierarchies, atoms, regex, metadata, BigInt, BigDecimal                                                       |
+| `clojure.core`       | macros, destructuring, lazy seqs, transducers, protocols, records, `deftype`, multimethods, hierarchies, atoms, regex, metadata, BigInt, BigDecimal                                            |
 | `clojure.string`     | full                                                                                                                                                                                          |
 | `clojure.set`        | full                                                                                                                                                                                          |
 | `clojure.walk`       | `prewalk`, `postwalk`, `keywordize-keys`, `stringify-keys`, `walk`                                                                                                                            |
@@ -119,7 +119,7 @@ for what's available.
 - **Agents** (use `go` blocks and channels)
 - **Chunked sequences**: lazy seqs are unchunked
 - **Custom tagged literal readers**: built-in `#uuid` and `#inst` work; `*data-readers*` / `*default-data-reader-fn*` are not implemented
-- **`deftype`** (use `defrecord`)
+- **Java-style `deftype` method bodies / host interfaces**: field-backed `deftype` and protocol implementations work; JVM host methods do not
 - **`reify`** (protocols can only be extended to named types)
 - **Spec** (no `clojure.spec`)
 - **Checked arithmetic on base ops**: `+`/`-`/`*`/`inc`/`dec` use fixed-width integer arithmetic; use `+'`/`-'`/`*'`/`inc'`/`dec'` for BigInt-promoting exact math
@@ -162,7 +162,7 @@ brew install let-go
 
 ### Download
 
-Prebuilt binaries for Linux, macOS, and Windows on amd64/arm64 in
+Prebuilt binaries for Linux, macOS, and Plan 9 in
 [Releases](https://github.com/nooga/let-go/releases).
 
 ### From source (Go 1.22+)
