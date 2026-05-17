@@ -1094,6 +1094,9 @@ func (f *Frame) Run() (Value, error) {
 			}
 			r, err := NumAdd(a, Int(1))
 			if err != nil {
+				if f.handleError(err) {
+					continue
+				}
 				return NIL, err
 			}
 			f.stack[f.sp-1] = r
@@ -1115,6 +1118,9 @@ func (f *Frame) Run() (Value, error) {
 			}
 			r, err := NumSub(a, Int(1))
 			if err != nil {
+				if f.handleError(err) {
+					continue
+				}
 				return NIL, err
 			}
 			f.stack[f.sp-1] = r
