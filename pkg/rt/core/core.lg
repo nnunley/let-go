@@ -408,8 +408,11 @@
                 result))))))))
   ([n coll]
    (lazy-seq
-     (when (and (pos? n) (seq coll))
-       (cons (first coll) (take (dec n) (next coll)))))))
+     (when (pos? n)
+       (when-let [s (seq coll)]
+         (cons (first s)
+               (when (> n 1)
+                 (take (dec n) (rest s)))))))))
 
 (defn drop
   ([n]

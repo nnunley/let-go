@@ -52,7 +52,6 @@ var knownFailing = map[string]bool{
 	"short":          true, // short coercion
 	"slash":          true, // division edge cases
 	"star":           true, // overflow not detected
-	"when_let":       true, // lazy seq realization count
 }
 
 // suiteCounters tracks aggregate assertion counts across the entire suite.
