@@ -81,6 +81,17 @@
     (is (= "a,b,c" (str-join "," ["a" "b" "c"])))
     (is (= "abc" (str-join ["a" "b" "c"])))))
 
+(deftest str-number-format-test
+  (testing "str formats numeric edge cases like Clojure"
+    (is (= "Infinity" (str ##Inf)))
+    (is (= "-Infinity" (str ##-Inf)))
+    (is (= "0" (str 0N)))
+    (is (= "1" (str 1N)))
+    (is (= "-1" (str -1N)))
+    (is (= "0.0" (str 0.0M)))
+    (is (= "1.0" (str 1.0M)))
+    (is (= "-1.0" (str -1.0M)))))
+
 (deftest rand-int-test
   (testing "rand-int returns int in range"
     (let [n (rand-int 100)]

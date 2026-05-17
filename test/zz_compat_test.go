@@ -53,7 +53,6 @@ var knownFailing = map[string]bool{
 	"short":          true, // short coercion
 	"slash":          true, // division edge cases
 	"star":           true, // overflow not detected
-	"str":            true, // str reader conditional
 	"when_let":       true, // lazy seq realization count
 }
 

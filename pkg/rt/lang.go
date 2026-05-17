@@ -1872,17 +1872,7 @@ func installLangNS() {
 	str, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		b := &strings.Builder{}
 		for i := range vs {
-			if vs[i] == vm.NIL {
-				continue
-			}
-			if vs[i].Type() == vm.StringType {
-				b.WriteString(string(vs[i].(vm.String)))
-				continue
-			} else if vs[i].Type() == vm.CharType {
-				b.WriteRune(rune(vs[i].(vm.Char)))
-				continue
-			}
-			b.WriteString(vs[i].String())
+			b.WriteString(strValue(vs[i]))
 		}
 		return vm.String(b.String()), nil
 	})
@@ -5741,4 +5731,30 @@ func installLangNS() {
 	CoreNS = ns
 
 	RegisterNS(ns)
+}
+
+func strValue(v vm.Value) string {
+	if v == vm.NIL {
+		return ""
+	}
+	switch x := v.(type) {
+	case vm.String:
+		return string(x)
+	case vm.Char:
+		return string(rune(x))
+	case vm.Float:
+		f := float64(x)
+		if math.IsInf(f, 1) {
+			return "Infinity"
+		}
+		if math.IsInf(f, -1) {
+			return "-Infinity"
+		}
+	case *vm.BigInt:
+		return x.Val().String()
+	case *vm.BigDecimal:
+		s := x.String()
+		return strings.TrimSuffix(s, "M")
+	}
+	return v.String()
 }
