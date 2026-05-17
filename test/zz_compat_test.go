@@ -70,8 +70,8 @@ func TestClojureTestSuite(t *testing.T) {
 	compiler.SetMatchCljConditional(true)
 	defer compiler.SetMatchCljConditional(false)
 
-	suiteDir := "clojure-test-suite/test/clojure/core_test"
-	if _, err := os.Stat(suiteDir); os.IsNotExist(err) {
+	suiteRoot := "clojure-test-suite/test/clojure"
+	if _, err := os.Stat(filepath.Join(suiteRoot, "core_test")); os.IsNotExist(err) {
 		t.Skip("clojure-test-suite submodule not initialized (run: git submodule update --init)")
 	}
 
@@ -101,12 +101,16 @@ func TestClojureTestSuite(t *testing.T) {
 		t.Fatal("failed to compile portability shim:", err)
 	}
 
-	files, err := filepath.Glob(filepath.Join(suiteDir, "*.cljc"))
-	if err != nil {
-		t.Fatal(err)
+	var files []string
+	for _, dir := range []string{"core_test", "string_test"} {
+		matches, err := filepath.Glob(filepath.Join(suiteRoot, dir, "*.cljc"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, matches...)
 	}
 	if len(files) == 0 {
-		t.Fatal("no .cljc files found in", suiteDir)
+		t.Fatal("no .cljc files found in", suiteRoot)
 	}
 
 	totals := &suiteCounters{}

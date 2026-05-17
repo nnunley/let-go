@@ -68,7 +68,7 @@ Full per-benchmark numbers and methodology:
 ## Compatibility
 
 Tested against [jank-lang/clojure-test-suite](https://github.com/jank-lang/clojure-test-suite):
-**5522 / 5522 assertions pass** across 224 files through the `:clj` reader
+**5621 / 5621 assertions pass** across 232 files through the `:clj` reader
 lens, with no known failures, compile skips, panic skips, or runtime skips.
 
 ### Standard namespaces

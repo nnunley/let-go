@@ -3890,6 +3890,24 @@ func installLangNS() {
 		return ns, nil
 	})
 
+	resolvef, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
+		}
+		sym, ok := vs[0].(vm.Symbol)
+		if !ok {
+			return vm.NIL, fmt.Errorf("resolve expected Symbol")
+		}
+		cns := CurrentNS.Deref().(*vm.Namespace)
+		if v := cns.Lookup(sym); v != vm.NIL {
+			return v, nil
+		}
+		return vm.NIL, nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
 	// all-ns returns a list of all loaded namespaces
 	allNs, err := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		var nss []vm.Value
@@ -5038,6 +5056,7 @@ func installLangNS() {
 	ns.Def("re-seq", reSeq)
 	ns.Def("require", requiref)
 	ns.Def("find-ns", findNs)
+	ns.Def("resolve", resolvef)
 	ns.Def("all-ns", allNs)
 	ns.Def("the-ns", theNs)
 	ns.Def("ns-name", nsName)

@@ -496,6 +496,13 @@
     (is (= "olleh" (s/reverse "hello")))
     (is (= "" (s/reverse "")))))
 
+(deftest resolve-test
+  (testing "resolve finds vars visible from the current namespace"
+    (is (var? (resolve 'long)))
+    (is (var? (resolve 'not)))
+    (is (var? (resolve 'some?)))
+    (is (nil? (resolve 'not-a-real-var)))))
+
 (deftest string-escape-test
   (testing "string/escape"
     (is (= "h&lt;llo" (s/escape "h<llo" {\< "&lt;"})))))
