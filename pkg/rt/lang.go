@@ -270,6 +270,20 @@ func isMapType(v vm.Value) bool {
 	return false
 }
 
+func canConjMapEntry(v vm.Value) bool {
+	if isMapType(v) {
+		return true
+	}
+	if _, _, ok := vm.MapEntryKV(v); ok {
+		return true
+	}
+	switch pv := v.(type) {
+	case vm.PersistentVector:
+		return pv.RawCount() == 2
+	}
+	return false
+}
+
 func isSetType(v vm.Value) bool {
 	switch v.(type) {
 	case vm.Set, *vm.PersistentSet, *vm.SortedSet:
@@ -1306,13 +1320,29 @@ func installLangNS() {
 		if vs[0] == vm.NIL {
 			seq = vm.EmptyList
 		} else {
+			if _, ok := vs[0].(vm.String); ok {
+				return vm.NIL, fmt.Errorf("conj expected Collection")
+			}
 			var ok bool
 			seq, ok = vs[0].(vm.Collection)
 			if !ok {
+				if s, ok := vs[0].(vm.Seq); ok {
+					for i := 1; i < len(vs); i++ {
+						if seq == nil {
+							seq = vm.NewCons(vs[i], s)
+						} else {
+							seq = seq.Conj(vs[i])
+						}
+					}
+					return seq, nil
+				}
 				return vm.NIL, fmt.Errorf("conj expected Collection")
 			}
 		}
 		for i := 1; i < len(vs); i++ {
+			if isMapType(seq) && !canConjMapEntry(vs[i]) {
+				return vm.NIL, fmt.Errorf("conj expected map entry")
+			}
 			seq = seq.Conj(vs[i])
 		}
 		return seq, nil

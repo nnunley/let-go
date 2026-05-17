@@ -35,12 +35,10 @@ var knownFailing = map[string]bool{
 	"star_squote":    true, // *' BigInt promotion at Long boundary
 	"with_precision": true, // with-precision is a no-op; results don't round
 	"case":           true, // case macro complex matching
-	"conj":           true, // conj arity/nil edge cases
 	"dec":            true, // dec overflow/type coercion
 	"double_qmark":   true, // no float32/float64 distinction
 	"inc":            true, // overflow untested assertion
 	"int":            true, // int overflow bounds
-	"merge":          true, // merge with nil/meta
 	"minus":          true, // overflow not detected
 	"plus":           true, // overflow not detected
 	"reduce":         true, // reduce interop edge cases

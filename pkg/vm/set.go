@@ -174,11 +174,11 @@ func (s *SetSeq) Cons(val Value) Seq {
 	return NewCons(val, s)
 }
 
-func (s *SetSeq) Count() Value      { return Int(len(s.keys) - s.i) }
-func (s *SetSeq) RawCount() int     { return len(s.keys) - s.i }
-func (s *SetSeq) Empty() Collection { return EmptyList }
+func (s *SetSeq) Count() Value              { return Int(len(s.keys) - s.i) }
+func (s *SetSeq) RawCount() int             { return len(s.keys) - s.i }
+func (s *SetSeq) Empty() Collection         { return EmptyList }
 func (s *SetSeq) Conj(val Value) Collection { return s.Cons(val).(*List) }
-func (s *SetSeq) Seq() Seq { return s }
+func (s *SetSeq) Seq() Seq                  { return s }
 
 // Count implements Collection
 func (l Set) Count() Value {
@@ -237,5 +237,8 @@ type SetWithMeta struct {
 	meta Value
 }
 
-func (s *SetWithMeta) Meta() Value          { return s.meta }
+func (s *SetWithMeta) Meta() Value            { return s.meta }
 func (s *SetWithMeta) WithMeta(m Value) Value { return &SetWithMeta{Set: s.Set, meta: m} }
+func (s *SetWithMeta) Conj(value Value) Collection {
+	return &SetWithMeta{Set: s.Set.Conj(value).(Set), meta: s.meta}
+}

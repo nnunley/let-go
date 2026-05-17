@@ -132,6 +132,7 @@ func (l *List) Cons(val Value) Seq {
 		first: val,
 		next:  l,
 		count: l.count + 1,
+		meta:  l.meta,
 	}
 }
 

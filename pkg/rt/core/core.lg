@@ -1015,7 +1015,7 @@
   ([m & maps]
    (reduce (fn [a b]
              (if b
-               (reduce conj (or a {}) (seq b))
+               (conj (or a {}) b)
                a))
            m maps)))
 
