@@ -150,6 +150,9 @@ func (l *List) RawCount() int {
 
 // Empty implements Collection
 func (l *List) Empty() Collection {
+	if l.meta != nil {
+		return EmptyList.WithMeta(l.meta).(*List)
+	}
 	return EmptyList
 }
 

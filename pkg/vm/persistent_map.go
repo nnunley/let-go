@@ -618,6 +618,9 @@ func (m *PersistentMap) Count() Value  { return Int(m.count) }
 func (m *PersistentMap) RawCount() int { return m.count }
 
 func (m *PersistentMap) Empty() Collection {
+	if m.meta != nil {
+		return EmptyPersistentMap.WithMeta(m.meta).(*PersistentMap)
+	}
 	return EmptyPersistentMap
 }
 

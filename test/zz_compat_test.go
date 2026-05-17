@@ -33,7 +33,6 @@ var knownFailing = map[string]bool{
 	"bound_fn":       true, // bound-fn shim doesn't propagate dyn vars
 	"bound_fn_star":  true, // bound-fn* shim is identity
 	"dissoc":         true, // dissoc on records has quirky behavior
-	"empty":          true, // empty on deftype/non-coll edge cases
 	"plus_squote":    true, // +' BigInt promotion at Long boundary
 	"realized_qmark": true, // realized? semantics mismatch
 	"star_squote":    true, // *' BigInt promotion at Long boundary

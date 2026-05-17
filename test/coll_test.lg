@@ -109,7 +109,16 @@
     (is (empty? '()))
     (is (empty? {}))
     (is (empty? #{}))
-    (is (not (empty? [1])))))
+    (is (not (empty? [1]))))
+
+  (testing "empty returns empty list for ranges"
+    (is (= '() (empty (range))))
+    (is (= '() (empty (range 10)))))
+
+  (testing "empty returns nil for strings and non-collections"
+    (is (nil? (empty "")))
+    (is (nil? (empty 1)))
+    (is (nil? (empty :a)))))
 
 (deftest into-test
   (testing "into"

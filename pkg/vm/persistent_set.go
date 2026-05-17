@@ -95,6 +95,9 @@ func (s *PersistentSet) Count() Value  { return s.impl.Count() }
 func (s *PersistentSet) RawCount() int { return s.impl.RawCount() }
 
 func (s *PersistentSet) Empty() Collection {
+	if s.meta != nil {
+		return EmptyPersistentSet.WithMeta(s.meta).(*PersistentSet)
+	}
 	return EmptyPersistentSet
 }
 

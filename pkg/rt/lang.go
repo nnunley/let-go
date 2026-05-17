@@ -1531,9 +1531,15 @@ func installLangNS() {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
+		if vs[0] == vm.NIL || vs[0].Type() == vm.StringType {
+			return vm.NIL, nil
+		}
+		if _, ok := vs[0].(*vm.InfiniteRange); ok {
+			return vm.EmptyList, nil
+		}
 		coll, ok := vs[0].(vm.Collection)
 		if !ok {
-			return vm.NIL, fmt.Errorf("empty expected Collection")
+			return vm.NIL, nil
 		}
 		return coll.Empty(), nil
 	})

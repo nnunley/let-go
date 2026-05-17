@@ -281,6 +281,7 @@ func (v PersistentVector) Empty() Collection {
 		root:    newNode(),
 		tail:    make([]Value, 0, nodeCap),
 		tailOff: 0,
+		meta:    v.meta,
 	}
 }
 
