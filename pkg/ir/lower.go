@@ -375,13 +375,22 @@ func (l *lowerer) argsAtTop(args []NodeID) bool {
 // which is exactly what the source compiler emits for the same expr.
 func (l *lowerer) shouldBodyEmitCheap(nid NodeID) bool {
 	uc := l.useCount[nid]
-	if uc > 1 {
-		return true
-	}
 	if uc == 0 {
-		// Dead; don't bother emitting. Body walk would skip via
-		// OpInvalid in normal flow, but cheap nodes can survive a
-		// dead pass without being marked OpInvalid.
+		// Dead; don't bother emitting.
+		return false
+	}
+	// For multi-use cheap nodes, the body-emit-then-DUP_NTH strategy
+	// costs MORE than just re-emitting the cheap load at each use site.
+	// Profiling (cmul / cmagsq with N=2 uses each) showed: body-emit + N
+	// DUP_NTH = 2 + 2N bytes vs source compiler's N LOAD_ARGs = 2N bytes.
+	// Even at the break-even point body-emit loses on dispatch count.
+	// So: for cheap multi-use, re-emit at the use site (cheap path of
+	// materialize handles this with a single LOAD_ARG / LOAD_CONST etc).
+	//
+	// Body-emit is reserved for the SINGLE-USE-AS-FIRST-REF case where
+	// the body-walk's natural ordering leaves the value at the consumer's
+	// expected position (refsAtTopLastUse fires, zero cost).
+	if uc > 1 {
 		return false
 	}
 	// Single use: find it and check if this node is the first ref.
