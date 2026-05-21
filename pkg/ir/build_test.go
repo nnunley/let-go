@@ -7,6 +7,7 @@
 package ir
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -412,4 +413,131 @@ func TestStackEffectCoversInstStride(t *testing.T) {
 		// (No specific expected value — we just want coverage assurance.)
 		_ = stackEffect(op, code, 0)
 	}
+}
+
+// TestBuild_Closure_RoundTrip: (defn make-adder [n] (fn [x] (+ n x)))
+// builds, lowers, runs. make-adder(5) should return a closure that
+// returns 8 when invoked with 3. Exercises OpLoadArg, OpLoadConst,
+// OpMakeClosure, and OpPushClosed in Build + Lower.
+//
+// IMPORTANT: this test logs only the static IR and the runtime *type*
+// of the returned closure. It never %s-prints a vm.Value whose String()
+// could recurse (no lazy seqs here, but the discipline matters).
+func TestBuild_Closure_RoundTrip(t *testing.T) {
+	consts := vm.NewConsts()
+	ns := rt.NS(rt.NameCoreNS)
+	ctx := compiler.NewCompiler(consts, ns)
+	src := `(defn make-adder [n] (fn [x] (+ n x)))`
+	_, _, err := ctx.CompileMultiple(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	v := ns.Lookup(vm.Symbol("make-adder")).(*vm.Var).Deref()
+	fn := v.(*vm.Func)
+	irFn, err := Build(fn.Chunk(), "make-adder", 1, false)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	// Safe to log IR — it's a fixed structure, not a runtime value.
+	t.Logf("IR:\n%s", Dump(irFn))
+	chunk, err := Lower(irFn)
+	if err != nil {
+		t.Fatalf("Lower: %v", err)
+	}
+	// make-adder(5) returns a closure (finite, safe).
+	frame := vm.NewFrame(chunk, []vm.Value{vm.Int(5)})
+	closure, err := frame.Run()
+	vm.ReleaseFrame(frame)
+	if err != nil {
+		t.Fatalf("run make-adder: %v", err)
+	}
+	// DO NOT log `closure` directly with %s — it's a Closure value;
+	// print only its type if needed.
+	t.Logf("got %T", closure)
+	closureFn, ok := closure.(vm.Fn)
+	if !ok {
+		t.Fatalf("make-adder didn't return a Fn, got %T", closure)
+	}
+	result, err := closureFn.Invoke([]vm.Value{vm.Int(3)})
+	if err != nil {
+		t.Fatalf("invoke closure: %v", err)
+	}
+	if result.String() != "8" {
+		t.Errorf("expected 8, got %s", result)
+	}
+}
+
+// TestBuild_LazySeq_Bounded: naturals-from(1) creates a lazy seq.
+// We only realize the first two elements via explicit first/next and
+// never log/stringify the seq itself (it's infinite — would loop
+// forever and OOM the process).
+//
+// If Build can't yet handle naturals-from's opcodes (MAKE_MULTI_ARITY
+// or similar), the test skips gracefully.
+func TestBuild_LazySeq_Bounded(t *testing.T) {
+	consts := vm.NewConsts()
+	ns := rt.NS(rt.NameCoreNS)
+	ctx := compiler.NewCompiler(consts, ns)
+	src := `(defn naturals-from [n] (lazy-seq (cons n (naturals-from (inc n)))))`
+	_, _, err := ctx.CompileMultiple(strings.NewReader(src))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	v := ns.Lookup(vm.Symbol("naturals-from")).(*vm.Var).Deref()
+	fn := v.(*vm.Func)
+	irFn, err := Build(fn.Chunk(), "naturals-from", 1, false)
+	if err != nil {
+		if errors.Is(err, ErrUnsupportedOp) {
+			t.Skipf("Build unsupported for naturals-from: %v", err)
+			return
+		}
+		t.Fatalf("Build: %v", err)
+	}
+	// Log the IR (a fixed structure) — DO NOT log any vm.Value result.
+	t.Logf("IR:\n%s", Dump(irFn))
+	chunk, err := Lower(irFn)
+	if err != nil {
+		t.Fatalf("Lower: %v", err)
+	}
+	frame := vm.NewFrame(chunk, []vm.Value{vm.Int(1)})
+	seq, err := frame.Run()
+	vm.ReleaseFrame(frame)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	// CRITICAL: `seq` is a lazy seq. NEVER call seq.String() or print
+	// with %%s. Only realize bounded prefixes via first/next.
+	t.Logf("got seq of type %T (NOT printing contents — infinite seq)", seq)
+
+	firstVal := ns.Lookup(vm.Symbol("first"))
+	nextVal := ns.Lookup(vm.Symbol("next"))
+	if firstVal == vm.NIL || nextVal == vm.NIL {
+		t.Skip("first/next not available in this build")
+		return
+	}
+	firstFn, ok1 := firstVal.(*vm.Var).Deref().(vm.Fn)
+	nextFn, ok2 := nextVal.(*vm.Var).Deref().(vm.Fn)
+	if !ok1 || !ok2 {
+		t.Skip("first/next not Fn in this build")
+		return
+	}
+	first1, err := firstFn.Invoke([]vm.Value{seq})
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if first1.String() != "1" {
+		t.Errorf("first element: expected 1, got %s", first1.String())
+	}
+	rest, err := nextFn.Invoke([]vm.Value{seq})
+	if err != nil {
+		t.Fatalf("next: %v", err)
+	}
+	first2, err := firstFn.Invoke([]vm.Value{rest})
+	if err != nil {
+		t.Fatalf("first of rest: %v", err)
+	}
+	if first2.String() != "2" {
+		t.Errorf("second element: expected 2, got %s", first2.String())
+	}
+	// Stop here. Do NOT try to realize more or to print the seq.
 }

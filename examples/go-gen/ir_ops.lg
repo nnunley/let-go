@@ -46,7 +46,7 @@
     ["Const"      0  1 true  false nil                true  "Const"      ".Aux = vm.Value (the constant)"]
     ["LoadArg"    0  1 true  false OP_LOAD_ARG        true  "LoadArg"    ".Aux = int (arg index)"]
     ["LoadVar"    0  1 false false OP_LOAD_VAR        true  "LoadVar"    ".Aux = *vm.Var; var roots are mutable"]
-    ["LoadClosed" 0  1 true  false nil                true  "LoadClosed" ".Aux = int (closed-over index)"]
+    ["LoadClosed" 0  1 true  false OP_LOAD_CLOSEDOVER true  "LoadClosed" ".Aux = int (closed-over index)"]
 
     ;; Block parameter — value flowing in from a predecessor's
     ;; branch-with-args. No Refs; (block-id, param-index) is implicit
@@ -75,7 +75,11 @@
     ;; --- Terminators ---
     ["Return"     1  0 false true  OP_RETURN          false "Return"     ".Refs[0] = value"]
     ["Branch"     0  0 false true  OP_JUMP            false "Branch"     "unconditional; .Aux = *BranchTarget"]
-    ["BranchIf"   1  0 false true  OP_BRANCH_FALSE    false "BranchIf"   ".Refs[0] = cond; .Aux = struct{True,False *BranchTarget}"]])
+    ["BranchIf"   1  0 false true  OP_BRANCH_FALSE    false "BranchIf"   ".Refs[0] = cond; .Aux = struct{True,False *BranchTarget}"]
+
+    ;; --- Closures ---
+    ["MakeClosure" 1  1 false false OP_MAKE_CLOSURE    false "MakeClosure" ".Refs[0] = *Func value (the func to wrap as a closure)"]
+    ["PushClosed"  2  1 false false OP_PUSH_CLOSEDOVER false "PushClosed"  ".Refs[0] = closure, .Refs[1] = value to attach"]])
 
 (g/check-spec ops)
 

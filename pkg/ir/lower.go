@@ -567,6 +567,29 @@ func (l *lowerer) lowerNode(nid NodeID) error {
 			})
 		}
 
+	case OpLoadClosed:
+		l.recordSourceInfo(n)
+		l.emitWithArg(vm.OP_LOAD_CLOSEDOVER, n.Aux.(int))
+		l.stackSP++
+		l.bumpMaxStack()
+
+	case OpMakeClosure:
+		// Refs[0] = func value, already on top of stack (materialized
+		// by the body walk). OP_MAKE_CLOSURE pops the *Func and pushes
+		// a *Closure in its place — net stack change 0.
+		l.recordSourceInfo(n)
+		l.emit(vm.OP_MAKE_CLOSURE)
+		// stack: 1 in, 1 out → no change
+
+	case OpPushClosed:
+		// Refs[0] = closure, Refs[1] = value. After materialization
+		// they sit as [closure, value] on top of stack. OP_PUSH_CLOSEDOVER
+		// pops the value and mutates the closure beneath, leaving the
+		// closure on top — net -1.
+		l.recordSourceInfo(n)
+		l.emit(vm.OP_PUSH_CLOSEDOVER)
+		l.stackSP-- // 2 in, 1 out
+
 	default:
 		return fmt.Errorf("unsupported op for lowering: %s", n.Op)
 	}

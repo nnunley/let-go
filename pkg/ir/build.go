@@ -282,6 +282,12 @@ func stackEffect(op int32, code []int32, ip int) int {
 		return -1 // pops 2, pushes 1
 	case vm.OP_INC, vm.OP_DEC:
 		return 0 // pops 1, pushes 1
+	case vm.OP_MAKE_CLOSURE:
+		return 0 // pops fn, pushes closure
+	case vm.OP_LOAD_CLOSEDOVER:
+		return 1 // pushes closed-over value
+	case vm.OP_PUSH_CLOSEDOVER:
+		return -1 // pops value (mutates closure beneath in VM; net -1)
 	case vm.OP_POP:
 		return -1
 	case vm.OP_POP_N:
@@ -636,6 +642,33 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		b.f.AddPred(target, blockID)
 		return nil
 
+	case vm.OP_MAKE_CLOSURE:
+		// Pop *Func, push closure value.
+		fn, err := pop()
+		if err != nil {
+			return err
+		}
+		push(Node{Op: OpMakeClosure, Refs: []NodeID{fn}})
+		return nil
+
+	case vm.OP_LOAD_CLOSEDOVER:
+		idx := int(code[ip+1])
+		push(Node{Op: OpLoadClosed, Aux: idx})
+		return nil
+
+	case vm.OP_PUSH_CLOSEDOVER:
+		// Pop value, pop closure, push updated closure.
+		val, err := pop()
+		if err != nil {
+			return err
+		}
+		cls, err := pop()
+		if err != nil {
+			return err
+		}
+		push(Node{Op: OpPushClosed, Refs: []NodeID{cls, val}})
+		return nil
+
 	case vm.OP_BRANCH_FALSE, vm.OP_BRANCH_TRUE:
 		cond, err := pop()
 		if err != nil {
@@ -833,12 +866,14 @@ func instStride(op int32) int {
 	case vm.OP_NOOP, vm.OP_POP, vm.OP_RETURN,
 		vm.OP_ADD, vm.OP_SUB, vm.OP_MUL,
 		vm.OP_LT, vm.OP_LTE, vm.OP_GT, vm.OP_GTE, vm.OP_EQ,
-		vm.OP_INC, vm.OP_DEC, vm.OP_SET_VAR:
+		vm.OP_INC, vm.OP_DEC, vm.OP_SET_VAR,
+		vm.OP_MAKE_CLOSURE, vm.OP_PUSH_CLOSEDOVER:
 		return 1
 	case vm.OP_LOAD_CONST, vm.OP_LOAD_VAR, vm.OP_LOAD_ARG,
 		vm.OP_BRANCH_TRUE, vm.OP_BRANCH_FALSE, vm.OP_JUMP,
 		vm.OP_INVOKE, vm.OP_TAIL_CALL,
-		vm.OP_POP_N, vm.OP_DUP_NTH:
+		vm.OP_POP_N, vm.OP_DUP_NTH,
+		vm.OP_LOAD_CLOSEDOVER:
 		return 2
 	case vm.OP_RECUR:
 		return 4 // offset, argc, ignore

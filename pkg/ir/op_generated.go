@@ -46,10 +46,12 @@ const (
 	OpEq
 	OpInc
 	OpDec
-	OpPop      // discard top stack value; no result (OP_POP)
-	OpReturn   // .Refs[0] = value
-	OpBranch   // unconditional; .Aux = *BranchTarget
-	OpBranchIf // .Refs[0] = cond; .Aux = struct{True,False *BranchTarget}
+	OpPop         // discard top stack value; no result (OP_POP)
+	OpReturn      // .Refs[0] = value
+	OpBranch      // unconditional; .Aux = *BranchTarget
+	OpBranchIf    // .Refs[0] = cond; .Aux = struct{True,False *BranchTarget}
+	OpMakeClosure // .Refs[0] = *Func value (the func to wrap as a closure)
+	OpPushClosed  // .Refs[0] = closure, .Refs[1] = value to attach
 )
 
 // opInfo describes an Op's structural metadata.
@@ -62,29 +64,31 @@ type opInfo struct {
 }
 
 var opTable = [...]opInfo{
-	OpInvalid:    {"INVALID", 0, 0, false, false},
-	OpConst:      {"Const", 0, 1, true, false},
-	OpLoadArg:    {"LoadArg", 0, 1, true, false},
-	OpLoadVar:    {"LoadVar", 0, 1, false, false},
-	OpLoadClosed: {"LoadClosed", 0, 1, true, false},
-	OpBlockArg:   {"BlockArg", 0, 1, true, false},
-	OpSetVar:     {"SetVar", 1, 1, false, false},
-	OpCall:       {"Call", -1, 1, false, false},
-	OpTailCall:   {"TailCall", -1, 1, false, true},
-	OpAdd:        {"Add", 2, 1, true, false},
-	OpSub:        {"Sub", 2, 1, true, false},
-	OpMul:        {"Mul", 2, 1, true, false},
-	OpLt:         {"Lt", 2, 1, true, false},
-	OpLte:        {"Lte", 2, 1, true, false},
-	OpGt:         {"Gt", 2, 1, true, false},
-	OpGte:        {"Gte", 2, 1, true, false},
-	OpEq:         {"Eq", 2, 1, true, false},
-	OpInc:        {"Inc", 1, 1, true, false},
-	OpDec:        {"Dec", 1, 1, true, false},
-	OpPop:        {"Pop", 1, 0, false, false},
-	OpReturn:     {"Return", 1, 0, false, true},
-	OpBranch:     {"Branch", 0, 0, false, true},
-	OpBranchIf:   {"BranchIf", 1, 0, false, true},
+	OpInvalid:     {"INVALID", 0, 0, false, false},
+	OpConst:       {"Const", 0, 1, true, false},
+	OpLoadArg:     {"LoadArg", 0, 1, true, false},
+	OpLoadVar:     {"LoadVar", 0, 1, false, false},
+	OpLoadClosed:  {"LoadClosed", 0, 1, true, false},
+	OpBlockArg:    {"BlockArg", 0, 1, true, false},
+	OpSetVar:      {"SetVar", 1, 1, false, false},
+	OpCall:        {"Call", -1, 1, false, false},
+	OpTailCall:    {"TailCall", -1, 1, false, true},
+	OpAdd:         {"Add", 2, 1, true, false},
+	OpSub:         {"Sub", 2, 1, true, false},
+	OpMul:         {"Mul", 2, 1, true, false},
+	OpLt:          {"Lt", 2, 1, true, false},
+	OpLte:         {"Lte", 2, 1, true, false},
+	OpGt:          {"Gt", 2, 1, true, false},
+	OpGte:         {"Gte", 2, 1, true, false},
+	OpEq:          {"Eq", 2, 1, true, false},
+	OpInc:         {"Inc", 1, 1, true, false},
+	OpDec:         {"Dec", 1, 1, true, false},
+	OpPop:         {"Pop", 1, 0, false, false},
+	OpReturn:      {"Return", 1, 0, false, true},
+	OpBranch:      {"Branch", 0, 0, false, true},
+	OpBranchIf:    {"BranchIf", 1, 0, false, true},
+	OpMakeClosure: {"MakeClosure", 1, 1, false, false},
+	OpPushClosed:  {"PushClosed", 2, 1, false, false},
 }
 
 // String returns the op's display name (or "Op?" for an unknown op).
@@ -134,6 +138,8 @@ func irOpToBytecode(op Op) int32 {
 		return vm.OP_LOAD_ARG
 	case OpLoadVar:
 		return vm.OP_LOAD_VAR
+	case OpLoadClosed:
+		return vm.OP_LOAD_CLOSEDOVER
 	case OpCall:
 		return vm.OP_INVOKE
 	case OpTailCall:
@@ -164,6 +170,10 @@ func irOpToBytecode(op Op) int32 {
 		return vm.OP_JUMP
 	case OpBranchIf:
 		return vm.OP_BRANCH_FALSE
+	case OpMakeClosure:
+		return vm.OP_MAKE_CLOSURE
+	case OpPushClosed:
+		return vm.OP_PUSH_CLOSEDOVER
 	default:
 		return vm.OP_NOOP
 	}
@@ -175,6 +185,8 @@ func bytecodeToIROp(op int32) Op {
 		return OpLoadArg
 	case vm.OP_LOAD_VAR:
 		return OpLoadVar
+	case vm.OP_LOAD_CLOSEDOVER:
+		return OpLoadClosed
 	case vm.OP_INVOKE:
 		return OpCall
 	case vm.OP_TAIL_CALL:
@@ -205,6 +217,10 @@ func bytecodeToIROp(op int32) Op {
 		return OpBranch
 	case vm.OP_BRANCH_FALSE:
 		return OpBranchIf
+	case vm.OP_MAKE_CLOSURE:
+		return OpMakeClosure
+	case vm.OP_PUSH_CLOSEDOVER:
+		return OpPushClosed
 	default:
 		return OpInvalid
 	}
