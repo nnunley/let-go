@@ -34,6 +34,11 @@ import (
 func CSE(f *ir.Function) (changed bool) {
 	redirect := make(map[ir.NodeID]ir.NodeID, len(f.Nodes))
 
+	// Flow analysis: which vars are mutated anywhere in this function?
+	// LoadVar nodes targeting stable (non-mutated) vars can be merged
+	// despite OpLoadVar's defensive `pure=false` flag.
+	mutatedVars, allMutated := computeMutatedVars(f)
+
 	for bid := range f.Blocks {
 		blk := &f.Blocks[bid]
 
@@ -44,7 +49,7 @@ func CSE(f *ir.Function) (changed bool) {
 		kept := blk.Nodes[:0]
 		for _, nid := range blk.Nodes {
 			n := f.Node(nid)
-			if !n.Op.IsPure() {
+			if !n.Op.IsPure() && !cseSafeImpureLoadVar(n, mutatedVars, allMutated) {
 				kept = append(kept, nid)
 				continue
 			}
@@ -126,6 +131,107 @@ func nodeKey(n *ir.Node, redirect map[ir.NodeID]ir.NodeID) string {
 		fmt.Fprintf(&sb, "%p", v)
 	}
 	return sb.String()
+}
+
+// computeMutatedVars scans the function for nodes that may mutate a
+// var's root, returning a set of var-identity pointers.
+//
+// A var is potentially mutated by:
+//
+//   - OpSetVar n  — direct (set! var ...). The Aux holds *vm.Var.
+//   - OpCall n where the callee is a known-mutating builtin
+//     (alter-var-root!, with-redefs unwinds, etc.). We use the var's
+//     name to identify these; if you call alter-var-root! on a var
+//     whose identity we don't statically know, we conservatively
+//     mark ALL vars as mutated.
+//
+// Returns nil if no mutation found (caller treats every var as stable).
+// Returns a non-nil "all mutated" sentinel if we can't be precise.
+//
+// CSE uses this to decide whether to merge LoadVar nodes: a LoadVar
+// whose target var is stable (not in the mutated set) can be CSE'd
+// across the function without risk of a stale read.
+func computeMutatedVars(f *ir.Function) (mutated map[*vm.Var]bool, allMutated bool) {
+	mutated = make(map[*vm.Var]bool)
+	for i := range f.Nodes {
+		n := &f.Nodes[i]
+		switch n.Op {
+		case ir.OpSetVar:
+			// Aux holds the target Var (set by Build).
+			if vv, ok := n.Aux.(vm.Value); ok {
+				if v, ok := vv.(*vm.Var); ok {
+					mutated[v] = true
+					continue
+				}
+			}
+			// We saw a SetVar but couldn't identify its target.
+			// Conservative: mark all vars as mutated.
+			return nil, true
+		case ir.OpCall:
+			// Check if the callee is a known-mutating builtin.
+			if len(n.Refs) == 0 {
+				continue
+			}
+			fnNode := &f.Nodes[n.Refs[0]]
+			if fnNode.Op != ir.OpLoadVar {
+				continue
+			}
+			fv, _ := fnNode.Aux.(vm.Value)
+			fnVar, _ := fv.(*vm.Var)
+			if fnVar == nil {
+				continue
+			}
+			if knownMutatingBuiltins[fnVar.VarName()] {
+				// We can't statically know which var this mutates
+				// without deeper analysis (the var argument is at runtime).
+				// Conservative: mark all vars as mutated.
+				return nil, true
+			}
+		}
+	}
+	return mutated, false
+}
+
+// knownMutatingBuiltins lists core builtins that mutate var roots.
+// When we see a call to one of these, we can't precisely know which
+// var(s) it mutates from the static IR — so we conservatively mark
+// all vars as potentially mutated.
+//
+// (A more precise analysis would examine the call's args: if the var
+// arg is a constant *vm.Var, mark only that one. Deferred.)
+var knownMutatingBuiltins = map[string]bool{
+	"alter-var-root":  true,
+	"alter-var-root!": true,
+	"intern":          true,
+	"with-redefs":     true,
+}
+
+// cseSafeImpureLoadVar reports whether n is a LoadVar whose target var
+// is provably not mutated in this function. CSE can merge such LoadVars
+// across the function — they always return the same value within a
+// single invocation.
+//
+// The IR's general purity flag for LoadVar is `false` (defensive
+// default), but a var that's never mutated anywhere is effectively
+// constant from this function's perspective.
+//
+// Caller pre-computes the mutated set via computeMutatedVars.
+func cseSafeImpureLoadVar(n *ir.Node, mutated map[*vm.Var]bool, allMutated bool) bool {
+	if allMutated {
+		return false
+	}
+	if n.Op != ir.OpLoadVar {
+		return false
+	}
+	v, ok := n.Aux.(vm.Value)
+	if !ok {
+		return false
+	}
+	vv, ok := v.(*vm.Var)
+	if !ok {
+		return false
+	}
+	return !mutated[vv]
 }
 
 // follow walks the redirect chain to its terminus. Returns the final

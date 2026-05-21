@@ -487,15 +487,28 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		return nil
 
 	case vm.OP_SET_VAR:
-		v, err := pop()
+		// VM stack at SET_VAR time: [..., var, value]. Pop value first,
+		// then var. The OpLoadVar node for the var sits in our value-
+		// stack as well; we capture both as Refs (var, value) and store
+		// the var's *vm.Var in Aux so flow-analysis can identify which
+		// var was mutated.
+		val, err := pop()
 		if err != nil {
 			return err
 		}
-		// SET_VAR's var-name is on the stack just below; original VM
-		// pops the var ref + value. Here we model the var-ref as the
-		// value already loaded; this is approximate. For the spike,
-		// the support is limited.
-		push(Node{Op: OpSetVar, Refs: []NodeID{v}})
+		varRef, err := pop()
+		if err != nil {
+			return err
+		}
+		// Look up the var's *vm.Var via the LoadVar node's Aux.
+		var targetVar vm.Value
+		if int(varRef) < len(b.f.Nodes) {
+			vn := &b.f.Nodes[varRef]
+			if vn.Op == OpLoadVar {
+				targetVar, _ = vn.Aux.(vm.Value)
+			}
+		}
+		push(Node{Op: OpSetVar, Refs: []NodeID{varRef, val}, Aux: targetVar})
 		return nil
 
 	case vm.OP_ADD, vm.OP_SUB, vm.OP_MUL,
