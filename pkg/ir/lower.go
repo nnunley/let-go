@@ -514,20 +514,41 @@ func (l *lowerer) lowerNode(nid NodeID) error {
 		dropCount := curSP - targetParams
 		l.recordSourceInfo(n)
 		if dropCount > 0 {
-			// We want to end at sp = targetParams. Cleanup must preserve
-			// the top `argc` items (the explicit args) AND any pass-through
-			// items between them and the dead values. In the common
-			// loop-back-edge case, argc == targetParams and dropCount is
-			// the count of stale loop bindings below the new args.
+			// We want to end at sp = targetParams. Two layouts to handle:
 			//
-			// OP_RECUR(offset, k, ignore) net sp change = -(k + ignore).
-			// We need -(k + ignore) = -dropCount → k + ignore = dropCount.
-			// Pick k = argc (the explicit args) so RECUR preserves them
-			// by reference, and ignore = dropCount - argc.
-			ignore := dropCount - argc
-			if ignore < 0 {
-				return fmt.Errorf("ir.Lower: block %d branch to %d has dropCount=%d < argc=%d (curSP=%d targetParams=%d)", n.Block, bt.Target, dropCount, argc, curSP, targetParams)
+			//   (a) Back-edge (recur): stack = [...old-K-params..., ...new-K-args...]
+			//       where K = argc = targetParams. curSP = K + K = 2K (or more,
+			//       with intermediate non-tracked junk between). dropCount = K
+			//       (or more). OP_RECUR(k=argc, ignore=dropCount-argc) is the
+			//       right mechanism: pops argc args saved, drops dropCount-argc
+			//       extra items, then drops the saved argc items, pushes argc
+			//       back. Net stack change = -(argc + ignore) = -dropCount.
+			//
+			//   (b) Forward branch with extra junk (e.g., LICM pre-header):
+			//       stack = [..., extra-junk..., ...K-args...]. argc > dropCount.
+			//       The args are NOT replacing stale slots; they're fresh.
+			//       OP_RECUR doesn't fit (its semantics drop argc*2+ignore from
+			//       top, which would consume the args twice). Instead: save
+			//       args, drop dropCount junk items, restore args. Same shape
+			//       as RECUR but with ignore = dropCount and the runtime
+			//       drop count = argc + ignore = argc + dropCount.
+			//
+			// The runtime's RECUR handler drops `argc*2 + ignore` items, which
+			// implements case (a). For case (b) we'd need a different
+			// "save-drop-restore" primitive. As a stopgap, we can simulate
+			// case (b) using an UNUSED form: a sequence of DUP_NTH pulls the
+			// non-arg dead values into junk-only positions and then we POP_N
+			// them. Or even simpler: emit POP_N to drop just the non-arg dead
+			// (NOT the args), but POP_N drops contiguous items from top —
+			// which would eat the args.
+			//
+			// For now: only the back-edge case (dropCount >= argc) works.
+			// The forward-with-junk case errors out — caller (LICM) should
+			// arrange that no junk sits below newly-materialized args.
+			if dropCount < argc {
+				return fmt.Errorf("ir.Lower: block %d branch to %d has dropCount=%d < argc=%d (curSP=%d targetParams=%d) — pre-header→header with junk-below-args not yet handled; LICM may need to thread values differently", n.Block, bt.Target, dropCount, argc, curSP, targetParams)
 			}
+			ignore := dropCount - argc
 			l.chunk.Append(vm.OP_RECUR | int32(l.stackSP<<16))
 			offIP := l.chunk.Length()
 			l.chunk.Append32(0) // placeholder offset
