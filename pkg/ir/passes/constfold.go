@@ -46,6 +46,19 @@ func ConstFold(f *ir.Function) (changed bool) {
 			if n.Op == ir.OpConst || n.Op == ir.OpInvalid {
 				continue
 			}
+			// Canonicalize commutative operands: when one operand of a
+			// commutative op is a Const, ensure it's the SECOND operand.
+			// Matches Clojure source idiom (e.g., (+ x 5)). After
+			// canonicalization, CSE recognizes (+ x 5) and (+ 5 x) as
+			// the same expression. Doesn't trigger applyFold/redirectTo
+			// on its own; the next iteration of the loop will catch any
+			// new fold opportunity the swap exposes.
+			if canonicalizeCommutative(f, n) {
+				anyChange = true
+				changed = true
+				// Don't `continue` — fall through to fold/identity in
+				// case the swap exposed an immediate simplification.
+			}
 			// Pure-op constant folding.
 			if n.Op.IsPure() {
 				if folded, ok := tryFold(f, n); ok {
@@ -76,6 +89,78 @@ func ConstFold(f *ir.Function) (changed bool) {
 			return changed
 		}
 	}
+}
+
+// canonicalizeCommutative reorders a commutative binary op's operands
+// so that any Const operand is in the SECOND (right) position. This
+// makes (+ 5 x) and (+ x 5) equivalent for CSE's hash-based duplicate
+// detection.
+//
+// Commutative ops covered as primitives: OpAdd, OpMul, OpEq.
+// (OpSub, OpLt/Lte/Gt/Gte are NOT commutative — order matters.)
+//
+// Also covers commutative OpCall to known builtins: bit-and, bit-or,
+// bit-xor (and = via the primitive OpEq path). The OpCall path swaps
+// Refs[1] and Refs[2] (Refs[0] is the fn reference).
+//
+// Returns true if it swapped.
+//
+// Skip when both operands are Const (folding will collapse the whole
+// expression) or when neither is Const (no canonical order without
+// more sophisticated value-numbering).
+func canonicalizeCommutative(f *ir.Function, n *ir.Node) bool {
+	switch n.Op {
+	case ir.OpAdd, ir.OpMul, ir.OpEq:
+		if len(n.Refs) != 2 {
+			return false
+		}
+		lhsConst := f.Nodes[n.Refs[0]].Op == ir.OpConst
+		rhsConst := f.Nodes[n.Refs[1]].Op == ir.OpConst
+		if lhsConst && !rhsConst {
+			n.Refs[0], n.Refs[1] = n.Refs[1], n.Refs[0]
+			return true
+		}
+	case ir.OpCall:
+		// Refs[0] is the fn ref, Refs[1:] are args. Check if the fn
+		// is a commutative known-pure builtin.
+		if len(n.Refs) != 3 {
+			return false
+		}
+		fnNode := &f.Nodes[n.Refs[0]]
+		if fnNode.Op != ir.OpLoadVar {
+			return false
+		}
+		varVal, ok := fnNode.Aux.(vm.Value)
+		if !ok {
+			return false
+		}
+		v, ok := varVal.(*vm.Var)
+		if !ok {
+			return false
+		}
+		if !commutativeBuiltins[v.VarName()] {
+			return false
+		}
+		lhsConst := f.Nodes[n.Refs[1]].Op == ir.OpConst
+		rhsConst := f.Nodes[n.Refs[2]].Op == ir.OpConst
+		if lhsConst && !rhsConst {
+			n.Refs[1], n.Refs[2] = n.Refs[2], n.Refs[1]
+			return true
+		}
+	}
+	return false
+}
+
+// commutativeBuiltins is the set of known-pure core builtins for which
+// argument order doesn't matter. Same shape as knownPureFolders; both
+// could share an attribute table if we generated from defop.
+var commutativeBuiltins = map[string]bool{
+	"bit-and": true,
+	"bit-or":  true,
+	"bit-xor": true,
+	// NOT "/": (/ 10 3) ≠ (/ 3 10).
+	// NOT "quot", "rem", "mod": all order-dependent.
+	// NOT "bit-shift-*": shift amount is the second arg, distinct role.
 }
 
 // applyFold rewrites node nid in-place to an OpConst holding val, and
