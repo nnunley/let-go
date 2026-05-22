@@ -24,19 +24,19 @@ func TestConstFold_PreservesOperandSpans(t *testing.T) {
 	siB := vm.SourceInfo{File: "f.lg", Line: 1, Column: 5}
 	siAdd := vm.SourceInfo{File: "f.lg", Line: 1, Column: 3}
 
-	a := f.AddNode(ir.Node{Op: ir.OpConst, Aux: vm.Int(1), Block: b0, SourceInfos: []vm.SourceInfo{siA}})
+	a := f.AddNode(ir.Inst{Op: ir.OpConst, Aux: vm.Int(1), Block: b0, SourceInfos: []vm.SourceInfo{siA}})
 	f.AppendToBlock(b0, a)
-	b := f.AddNode(ir.Node{Op: ir.OpConst, Aux: vm.Int(2), Block: b0, SourceInfos: []vm.SourceInfo{siB}})
+	b := f.AddNode(ir.Inst{Op: ir.OpConst, Aux: vm.Int(2), Block: b0, SourceInfos: []vm.SourceInfo{siB}})
 	f.AppendToBlock(b0, b)
-	add := f.AddNode(ir.Node{Op: ir.OpAdd, Refs: []ir.NodeID{a, b}, Block: b0, SourceInfos: []vm.SourceInfo{siAdd}})
+	add := f.AddNode(ir.Inst{Op: ir.OpAdd, Refs: []ir.InstId{a, b}, Block: b0, SourceInfos: []vm.SourceInfo{siAdd}})
 	f.AppendToBlock(b0, add)
-	ret := f.AddNode(ir.Node{Op: ir.OpReturn, Refs: []ir.NodeID{add}, Block: b0})
+	ret := f.AddNode(ir.Inst{Op: ir.OpReturn, Refs: []ir.InstId{add}, Block: b0})
 	f.SetTerminator(b0, ret)
 
 	if !ConstFold(f) {
 		t.Fatal("ConstFold did not change anything")
 	}
-	folded := f.Node(add)
+	folded := f.Inst(add)
 	if folded.Op != ir.OpConst {
 		t.Fatalf("expected folded node to be OpConst, got %s", folded.Op)
 	}
@@ -62,21 +62,21 @@ func TestCSE_MergesSpans(t *testing.T) {
 	si1 := vm.SourceInfo{File: "f.lg", Line: 2, Column: 1}
 	si2 := vm.SourceInfo{File: "f.lg", Line: 3, Column: 1}
 
-	a := f.AddNode(ir.Node{Op: ir.OpLoadArg, Aux: 0, Block: b0, SourceInfos: []vm.SourceInfo{si1}})
+	a := f.AddNode(ir.Inst{Op: ir.OpLoadArg, Aux: 0, Block: b0, SourceInfos: []vm.SourceInfo{si1}})
 	f.AppendToBlock(b0, a)
-	b := f.AddNode(ir.Node{Op: ir.OpLoadArg, Aux: 0, Block: b0, SourceInfos: []vm.SourceInfo{si2}})
+	b := f.AddNode(ir.Inst{Op: ir.OpLoadArg, Aux: 0, Block: b0, SourceInfos: []vm.SourceInfo{si2}})
 	f.AppendToBlock(b0, b)
 	// Use both somewhere so they aren't dead.
-	add := f.AddNode(ir.Node{Op: ir.OpAdd, Refs: []ir.NodeID{a, b}, Block: b0})
+	add := f.AddNode(ir.Inst{Op: ir.OpAdd, Refs: []ir.InstId{a, b}, Block: b0})
 	f.AppendToBlock(b0, add)
-	ret := f.AddNode(ir.Node{Op: ir.OpReturn, Refs: []ir.NodeID{add}, Block: b0})
+	ret := f.AddNode(ir.Inst{Op: ir.OpReturn, Refs: []ir.InstId{add}, Block: b0})
 	f.SetTerminator(b0, ret)
 
 	if !CSE(f) {
 		t.Fatal("CSE did not change anything (expected two LoadArg 0s to merge)")
 	}
 	// The survivor is `a`. It must carry both si1 and si2.
-	survivor := f.Node(a)
+	survivor := f.Inst(a)
 	seen := map[vm.SourceInfo]bool{}
 	for _, si := range survivor.SourceInfos {
 		seen[si] = true

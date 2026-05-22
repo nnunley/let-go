@@ -24,27 +24,27 @@ func TestLower_CrossBlockMultiUse_Errors(t *testing.T) {
 	b1 := f.AddBlock()
 
 	// v0 = LoadArg 0 — explicit fn-arg reference in the entry block.
-	v0 := f.AddNode(Node{Op: OpLoadArg, Aux: 0, Block: b0})
+	v0 := f.AddNode(Inst{Op: OpLoadArg, Aux: 0, Block: b0})
 	f.AppendToBlock(b0, v0)
 
 	// Use 1 (in-block, Refs): Inc inside b0
-	incID := f.AddNode(Node{Op: OpInc, Refs: []NodeID{v0}, Block: b0})
+	incID := f.AddNode(Inst{Op: OpInc, Refs: []InstId{v0}, Block: b0})
 	f.AppendToBlock(b0, incID)
 
 	// Pop the inc result so it doesn't dangle.
-	popID := f.AddNode(Node{Op: OpPop, Refs: []NodeID{incID}, Block: b0})
+	popID := f.AddNode(Inst{Op: OpPop, Refs: []InstId{incID}, Block: b0})
 	f.AppendToBlock(b0, popID)
 
 	// b0 terminator: unconditional branch to b1 (no args — v0 will be
 	// referenced directly by b1's Return, which is the cross-block sin).
 	bt := &BranchTarget{Target: b1}
-	termID := f.AddNode(Node{Op: OpBranch, Aux: bt, Block: b0})
+	termID := f.AddNode(Inst{Op: OpBranch, Aux: bt, Block: b0})
 	f.SetTerminator(b0, termID)
 	f.AddPred(b1, b0)
 
 	// b1: returns v0 directly — a cross-block Refs use. This is what we
 	// expect Lower to reject.
-	retID := f.AddNode(Node{Op: OpReturn, Refs: []NodeID{v0}, Block: b1})
+	retID := f.AddNode(Inst{Op: OpReturn, Refs: []InstId{v0}, Block: b1})
 	f.SetTerminator(b1, retID)
 
 	_, err := Lower(f)
@@ -68,17 +68,17 @@ func TestLower_CrossBlockSingleUse_Errors(t *testing.T) {
 	b0 := f.Entry
 	b1 := f.AddBlock()
 
-	v0 := f.AddNode(Node{Op: OpLoadArg, Aux: 0, Block: b0})
+	v0 := f.AddNode(Inst{Op: OpLoadArg, Aux: 0, Block: b0})
 	f.AppendToBlock(b0, v0)
 
 	// b0 terminator: Branch to b1 with no args.
 	bt := &BranchTarget{Target: b1}
-	termID := f.AddNode(Node{Op: OpBranch, Aux: bt, Block: b0})
+	termID := f.AddNode(Inst{Op: OpBranch, Aux: bt, Block: b0})
 	f.SetTerminator(b0, termID)
 	f.AddPred(b1, b0)
 
 	// b1 returns v0 — v0's only use, and it's cross-block Refs.
-	retID := f.AddNode(Node{Op: OpReturn, Refs: []NodeID{v0}, Block: b1})
+	retID := f.AddNode(Inst{Op: OpReturn, Refs: []InstId{v0}, Block: b1})
 	f.SetTerminator(b1, retID)
 
 	_, err := Lower(f)
@@ -99,19 +99,19 @@ func TestLower_LegitimateCrossBlockViaBranchArg(t *testing.T) {
 	b0 := f.Entry
 	b1 := f.AddBlock()
 
-	v0 := f.AddNode(Node{Op: OpLoadArg, Aux: 0, Block: b0})
+	v0 := f.AddNode(Inst{Op: OpLoadArg, Aux: 0, Block: b0})
 	f.AppendToBlock(b0, v0)
 
 	// b0 terminator: Branch to b1, passing v0 as an arg.
-	bt := &BranchTarget{Target: b1, Args: []NodeID{v0}}
-	termID := f.AddNode(Node{Op: OpBranch, Aux: bt, Block: b0})
+	bt := &BranchTarget{Target: b1, Args: []InstId{v0}}
+	termID := f.AddNode(Inst{Op: OpBranch, Aux: bt, Block: b0})
 	f.SetTerminator(b0, termID)
 	f.AddPred(b1, b0)
 
 	// b1 declares one BlockArg and returns it.
-	argID := f.AddNode(Node{Op: OpBlockArg, Aux: 0, Block: b1})
-	f.Blocks[b1].Params = []NodeID{argID}
-	retID := f.AddNode(Node{Op: OpReturn, Refs: []NodeID{argID}, Block: b1})
+	argID := f.AddNode(Inst{Op: OpBlockArg, Aux: 0, Block: b1})
+	f.Blocks[b1].Params = []InstId{argID}
+	retID := f.AddNode(Inst{Op: OpReturn, Refs: []InstId{argID}, Block: b1})
 	f.SetTerminator(b1, retID)
 
 	// We don't necessarily expect Lower to succeed (the spike has other
@@ -129,17 +129,17 @@ func TestLower_InBlockMultiUse_NotRejectedByCrossBlockCheck(t *testing.T) {
 	consts := vm.NewConsts()
 	f := NewFunction("inblock", 1, false, consts)
 	b0 := f.Entry
-	v0 := f.AddNode(Node{Op: OpLoadArg, Aux: 0, Block: b0})
+	v0 := f.AddNode(Inst{Op: OpLoadArg, Aux: 0, Block: b0})
 	f.AppendToBlock(b0, v0)
 
 	// Two in-block uses of v0.
-	inc1 := f.AddNode(Node{Op: OpInc, Refs: []NodeID{v0}, Block: b0})
+	inc1 := f.AddNode(Inst{Op: OpInc, Refs: []InstId{v0}, Block: b0})
 	f.AppendToBlock(b0, inc1)
-	inc2 := f.AddNode(Node{Op: OpInc, Refs: []NodeID{v0}, Block: b0})
+	inc2 := f.AddNode(Inst{Op: OpInc, Refs: []InstId{v0}, Block: b0})
 	f.AppendToBlock(b0, inc2)
 
 	// Return one of them so the function is well-formed.
-	retID := f.AddNode(Node{Op: OpReturn, Refs: []NodeID{inc2}, Block: b0})
+	retID := f.AddNode(Inst{Op: OpReturn, Refs: []InstId{inc2}, Block: b0})
 	f.SetTerminator(b0, retID)
 
 	// Lower may fail later (spike doesn't yet handle multi-use), but
@@ -161,17 +161,17 @@ func TestLower_MultiUseAdd_DUPNTH(t *testing.T) {
 	// OP_LOAD_ARG bytecode. BlockArg params are treated as "virtually on
 	// stack" by the lowerer but the VM starts with sp=0, so the entry
 	// block's args must be loaded explicitly via OpLoadArg.
-	arg := f.AddNode(Node{Op: OpLoadArg, Aux: 0, Block: b0})
+	arg := f.AddNode(Inst{Op: OpLoadArg, Aux: 0, Block: b0})
 	f.AppendToBlock(b0, arg)
-	c1 := f.AddNode(Node{Op: OpConst, Aux: vm.Int(1), Block: b0})
+	c1 := f.AddNode(Inst{Op: OpConst, Aux: vm.Int(1), Block: b0})
 	f.AppendToBlock(b0, c1)
 	// shared = arg + 1
-	shared := f.AddNode(Node{Op: OpAdd, Refs: []NodeID{arg, c1}, Block: b0})
+	shared := f.AddNode(Inst{Op: OpAdd, Refs: []InstId{arg, c1}, Block: b0})
 	f.AppendToBlock(b0, shared)
 	// result = shared + shared
-	result := f.AddNode(Node{Op: OpAdd, Refs: []NodeID{shared, shared}, Block: b0})
+	result := f.AddNode(Inst{Op: OpAdd, Refs: []InstId{shared, shared}, Block: b0})
 	f.AppendToBlock(b0, result)
-	ret := f.AddNode(Node{Op: OpReturn, Refs: []NodeID{result}, Block: b0})
+	ret := f.AddNode(Inst{Op: OpReturn, Refs: []InstId{result}, Block: b0})
 	f.SetTerminator(b0, ret)
 
 	chunk, err := Lower(f)
@@ -216,11 +216,11 @@ func TestLower_MultiUseConst(t *testing.T) {
 	f := NewFunction("twoones", 0, false, consts)
 	// %0 = Const 1; result = Add %0 %0; Return
 	b0 := f.Entry
-	c1 := f.AddNode(Node{Op: OpConst, Aux: vm.Int(1), Block: b0})
+	c1 := f.AddNode(Inst{Op: OpConst, Aux: vm.Int(1), Block: b0})
 	f.AppendToBlock(b0, c1)
-	add := f.AddNode(Node{Op: OpAdd, Refs: []NodeID{c1, c1}, Block: b0})
+	add := f.AddNode(Inst{Op: OpAdd, Refs: []InstId{c1, c1}, Block: b0})
 	f.AppendToBlock(b0, add)
-	ret := f.AddNode(Node{Op: OpReturn, Refs: []NodeID{add}, Block: b0})
+	ret := f.AddNode(Inst{Op: OpReturn, Refs: []InstId{add}, Block: b0})
 	f.SetTerminator(b0, ret)
 
 	chunk, err := Lower(f)

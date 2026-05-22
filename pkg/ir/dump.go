@@ -48,7 +48,7 @@ func writeBlock(b *strings.Builder, f *Function, blk *Block) {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		fmt.Fprintf(b, "v%d: %s", p, f.Node(p).Type)
+		fmt.Fprintf(b, "v%d: %s", p, f.Inst(p).Type)
 	}
 	b.WriteString("):")
 	if len(blk.Preds) > 0 {
@@ -63,20 +63,20 @@ func writeBlock(b *strings.Builder, f *Function, blk *Block) {
 	b.WriteString("\n")
 
 	// Body nodes.
-	for _, id := range blk.Nodes {
-		n := f.Node(id)
+	for _, id := range blk.Insts {
+		n := f.Inst(id)
 		writeNode(b, f, id, n)
 	}
 
 	// Terminator.
-	if blk.Term != 0 || (len(blk.Nodes) > 0) {
-		n := f.Node(blk.Term)
+	if blk.Term != 0 || (len(blk.Insts) > 0) {
+		n := f.Inst(blk.Term)
 		writeNode(b, f, blk.Term, n)
 	}
 	b.WriteString("\n")
 }
 
-func writeNode(b *strings.Builder, f *Function, id NodeID, n *Node) {
+func writeNode(b *strings.Builder, f *Function, id InstId, n *Inst) {
 	if n.Op.IsTerminator() {
 		fmt.Fprintf(b, "    %s", n.Op)
 		// Refs (e.g. condition for BranchIf, value for Return).

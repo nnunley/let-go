@@ -170,7 +170,7 @@ func TestCSE_FoldThenCSE(t *testing.T) {
 
 func countOp(f *ir.Function, op ir.Op) int {
 	n := 0
-	for _, node := range f.Nodes {
+	for _, node := range f.Insts {
 		if node.Op == op {
 			n++
 		}

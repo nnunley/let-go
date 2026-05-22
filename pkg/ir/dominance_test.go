@@ -24,16 +24,16 @@ func TestDominators_StraightLine(t *testing.T) {
 	b1 := f.AddBlock()
 	b2 := f.AddBlock()
 	// Add a sentinel node first so subsequent NodeIDs are non-zero.
-	// (The IR uses NodeID(0) as "no terminator" sentinel.)
-	_ = f.AddNode(Node{Op: OpInvalid, Block: b0})
+	// (The IR uses InstId(0) as "no terminator" sentinel.)
+	_ = f.AddNode(Inst{Op: OpInvalid, Block: b0})
 	// b0 -> b1 -> b2
-	br0 := f.AddNode(Node{Op: OpBranch, Aux: &BranchTarget{Target: b1}, Block: b0})
+	br0 := f.AddNode(Inst{Op: OpBranch, Aux: &BranchTarget{Target: b1}, Block: b0})
 	f.SetTerminator(b0, br0)
 	f.AddPred(b1, b0)
-	br1 := f.AddNode(Node{Op: OpBranch, Aux: &BranchTarget{Target: b2}, Block: b1})
+	br1 := f.AddNode(Inst{Op: OpBranch, Aux: &BranchTarget{Target: b2}, Block: b1})
 	f.SetTerminator(b1, br1)
 	f.AddPred(b2, b1)
-	ret := f.AddNode(Node{Op: OpReturn, Block: b2})
+	ret := f.AddNode(Inst{Op: OpReturn, Block: b2})
 	f.SetTerminator(b2, ret)
 
 	idom := f.Dominators()
@@ -58,12 +58,12 @@ func TestDominators_IfElseJoin(t *testing.T) {
 	b2 := f.AddBlock()
 	b3 := f.AddBlock()
 
-	// Sentinel: NodeID(0) reserved as "no terminator".
-	_ = f.AddNode(Node{Op: OpInvalid, Block: b0})
+	// Sentinel: InstId(0) reserved as "no terminator".
+	_ = f.AddNode(Inst{Op: OpInvalid, Block: b0})
 	// b0: BranchIf cond -> b1 : b2
-	cond := f.AddNode(Node{Op: OpConst, Aux: vm.Boolean(true), Block: b0})
+	cond := f.AddNode(Inst{Op: OpConst, Aux: vm.Boolean(true), Block: b0})
 	f.AppendToBlock(b0, cond)
-	br0 := f.AddNode(Node{Op: OpBranchIf, Refs: []NodeID{cond}, Aux: &CondTarget{
+	br0 := f.AddNode(Inst{Op: OpBranchIf, Refs: []InstId{cond}, Aux: &CondTarget{
 		True:  &BranchTarget{Target: b1},
 		False: &BranchTarget{Target: b2},
 	}, Block: b0})
@@ -72,17 +72,17 @@ func TestDominators_IfElseJoin(t *testing.T) {
 	f.AddPred(b2, b0)
 
 	// b1 -> b3
-	br1 := f.AddNode(Node{Op: OpBranch, Aux: &BranchTarget{Target: b3}, Block: b1})
+	br1 := f.AddNode(Inst{Op: OpBranch, Aux: &BranchTarget{Target: b3}, Block: b1})
 	f.SetTerminator(b1, br1)
 	f.AddPred(b3, b1)
 
 	// b2 -> b3
-	br2 := f.AddNode(Node{Op: OpBranch, Aux: &BranchTarget{Target: b3}, Block: b2})
+	br2 := f.AddNode(Inst{Op: OpBranch, Aux: &BranchTarget{Target: b3}, Block: b2})
 	f.SetTerminator(b2, br2)
 	f.AddPred(b3, b2)
 
 	// b3: return
-	ret := f.AddNode(Node{Op: OpReturn, Block: b3})
+	ret := f.AddNode(Inst{Op: OpReturn, Block: b3})
 	f.SetTerminator(b3, ret)
 
 	idom := f.Dominators()
@@ -187,15 +187,15 @@ func TestDominators_Unreachable(t *testing.T) {
 	b1 := f.AddBlock()
 	b2 := f.AddBlock() // unreachable
 
-	// Sentinel: NodeID(0) reserved.
-	_ = f.AddNode(Node{Op: OpInvalid, Block: b0})
+	// Sentinel: InstId(0) reserved.
+	_ = f.AddNode(Inst{Op: OpInvalid, Block: b0})
 	// b0 -> b1 directly. b2 has no preds (unreachable).
-	br := f.AddNode(Node{Op: OpBranch, Aux: &BranchTarget{Target: b1}, Block: b0})
+	br := f.AddNode(Inst{Op: OpBranch, Aux: &BranchTarget{Target: b1}, Block: b0})
 	f.SetTerminator(b0, br)
 	f.AddPred(b1, b0)
-	ret1 := f.AddNode(Node{Op: OpReturn, Block: b1})
+	ret1 := f.AddNode(Inst{Op: OpReturn, Block: b1})
 	f.SetTerminator(b1, ret1)
-	ret2 := f.AddNode(Node{Op: OpReturn, Block: b2})
+	ret2 := f.AddNode(Inst{Op: OpReturn, Block: b2})
 	f.SetTerminator(b2, ret2)
 
 	idom := f.Dominators()

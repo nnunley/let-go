@@ -155,7 +155,7 @@ func (f *Function) Successors(bid BlockID) []BlockID {
 	if blk.Term == 0 {
 		return nil
 	}
-	term := &f.Nodes[blk.Term]
+	term := &f.Insts[blk.Term]
 	switch t := term.Aux.(type) {
 	case *BranchTarget:
 		if t == nil {

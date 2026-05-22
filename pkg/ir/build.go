@@ -93,7 +93,7 @@ type builder struct {
 	f            *Function
 	ipToBlock    map[int]BlockID  // bytecode IP → block (for leaders)
 	blockIPs     []int            // sorted leader IPs; index = blockID
-	exitStack    [][]NodeID       // exit-stack per block (set during buildBlocks)
+	exitStack    [][]InstId       // exit-stack per block (set during buildBlocks)
 	reachable    map[BlockID]bool // reachable[bid] = true iff bid is forward-reachable from Entry
 	entryHeights []int            // entryHeights[bid] = value-stack depth at block entry; -1 = unreachable
 }
@@ -338,7 +338,7 @@ func stackEffect(op int32, code []int32, ip int) int {
 // Records exit-stack per block for the block-arg phase.
 func (b *builder) buildBlocks() error {
 	code := b.chunk.Code()
-	b.exitStack = make([][]NodeID, len(b.f.Blocks))
+	b.exitStack = make([][]InstId, len(b.f.Blocks))
 
 	for bi, leaderIP := range b.blockIPs {
 		blockID := b.ipToBlock[leaderIP]
@@ -361,12 +361,12 @@ func (b *builder) buildBlocks() error {
 		// BlockArgs on underflow — their content is dead, but we still
 		// translate them so all blocks have a terminator.
 		entryH := b.entryHeights[blockID]
-		var stack []NodeID
+		var stack []InstId
 		if entryH > 0 {
-			stack = make([]NodeID, 0, entryH)
-			params := make([]NodeID, 0, entryH)
+			stack = make([]InstId, 0, entryH)
+			params := make([]InstId, 0, entryH)
 			for i := 0; i < entryH; i++ {
-				pid := b.f.AddNode(Node{Op: OpBlockArg, Aux: i, Block: blockID})
+				pid := b.f.AddNode(Inst{Op: OpBlockArg, Aux: i, Block: blockID})
 				params = append(params, pid)
 				stack = append(stack, pid)
 			}
@@ -389,7 +389,7 @@ func (b *builder) buildBlocks() error {
 		// an explicit JUMP/BRANCH/RETURN/TAIL_CALL), it falls through
 		// to the next block. Synthesize an OpBranch terminator.
 		if b.f.Blocks[blockID].Term == 0 && bi+1 < len(b.blockIPs) {
-			// Special case: NodeID 0 is the entry block's first node;
+			// Special case: InstId 0 is the entry block's first node;
 			// any other block's Term==0 means "no terminator set".
 			nextLeaderIP := b.blockIPs[bi+1]
 			nextBlock := b.ipToBlock[nextLeaderIP]
@@ -398,7 +398,7 @@ func (b *builder) buildBlocks() error {
 			// Use stackSnapshot to ensure a non-nil slice (even for an
 			// empty stack) so branchArgsAlreadySet can detect it.
 			bt := &BranchTarget{Target: nextBlock, Args: stackSnapshot(stack)}
-			termID := b.f.AddNode(Node{Op: OpBranch, Aux: bt, Block: blockID})
+			termID := b.f.AddNode(Inst{Op: OpBranch, Aux: bt, Block: blockID})
 			b.f.SetTerminator(blockID, termID)
 			b.f.AddPred(nextBlock, blockID)
 		}
@@ -413,8 +413,8 @@ func (b *builder) buildBlocks() error {
 // stack-shape pre-pass guarantees every block enters with the right
 // number of slots); any underflow here is a builder bug and surfaces
 // as a hard error.
-func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, stack *[]NodeID) error {
-	push := func(n Node) NodeID {
+func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, stack *[]InstId) error {
+	push := func(n Inst) InstId {
 		n.Block = blockID
 		if si := b.chunk.LookupSource(ip); si != nil && len(n.SourceInfos) == 0 {
 			n.SourceInfos = []vm.SourceInfo{*si}
@@ -424,7 +424,7 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		*stack = append(*stack, id)
 		return id
 	}
-	pushNoStack := func(n Node) NodeID {
+	pushNoStack := func(n Inst) InstId {
 		// For terminators (no stack output).
 		n.Block = blockID
 		if si := b.chunk.LookupSource(ip); si != nil && len(n.SourceInfos) == 0 {
@@ -433,7 +433,7 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		id := b.f.AddNode(n)
 		return id
 	}
-	pop := func() (NodeID, error) {
+	pop := func() (InstId, error) {
 		if len(*stack) == 0 {
 			// Stack underflow. For unreachable blocks the abstract
 			// interpretation didn't compute an entry-height, so we
@@ -442,7 +442,7 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 			// executed; insertBlockArgs skips unreachable preds).
 			if !b.reachable[blockID] {
 				idx := len(b.f.Blocks[blockID].Params)
-				id := b.f.AddNode(Node{Op: OpBlockArg, Aux: idx, Block: blockID})
+				id := b.f.AddNode(Inst{Op: OpBlockArg, Aux: idx, Block: blockID})
 				b.f.Blocks[blockID].Params = append(b.f.Blocks[blockID].Params, id)
 				return id, nil
 			}
@@ -452,8 +452,8 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		*stack = (*stack)[:len(*stack)-1]
 		return v, nil
 	}
-	popN := func(n int) ([]NodeID, error) {
-		out := make([]NodeID, n)
+	popN := func(n int) ([]InstId, error) {
+		out := make([]InstId, n)
 		for i := n - 1; i >= 0; i-- {
 			v, err := pop()
 			if err != nil {
@@ -472,18 +472,18 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 	case vm.OP_LOAD_CONST:
 		idx := int(code[ip+1])
 		val := b.chunk.Consts().AllValues()[idx]
-		push(Node{Op: OpConst, Aux: val})
+		push(Inst{Op: OpConst, Aux: val})
 		return nil
 
 	case vm.OP_LOAD_ARG:
 		idx := int(code[ip+1])
-		push(Node{Op: OpLoadArg, Aux: idx})
+		push(Inst{Op: OpLoadArg, Aux: idx})
 		return nil
 
 	case vm.OP_LOAD_VAR:
 		idx := int(code[ip+1])
 		val := b.chunk.Consts().AllValues()[idx]
-		push(Node{Op: OpLoadVar, Aux: val})
+		push(Inst{Op: OpLoadVar, Aux: val})
 		return nil
 
 	case vm.OP_SET_VAR:
@@ -502,13 +502,13 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		}
 		// Look up the var's *vm.Var via the LoadVar node's Aux.
 		var targetVar vm.Value
-		if int(varRef) < len(b.f.Nodes) {
-			vn := &b.f.Nodes[varRef]
+		if int(varRef) < len(b.f.Insts) {
+			vn := &b.f.Insts[varRef]
 			if vn.Op == OpLoadVar {
 				targetVar, _ = vn.Aux.(vm.Value)
 			}
 		}
-		push(Node{Op: OpSetVar, Refs: []NodeID{varRef, val}, Aux: targetVar})
+		push(Inst{Op: OpSetVar, Refs: []InstId{varRef, val}, Aux: targetVar})
 		return nil
 
 	case vm.OP_ADD, vm.OP_SUB, vm.OP_MUL,
@@ -517,7 +517,7 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		if err != nil {
 			return err
 		}
-		push(Node{Op: bytecodeToIROp(op), Refs: args})
+		push(Inst{Op: bytecodeToIROp(op), Refs: args})
 		return nil
 
 	case vm.OP_INC, vm.OP_DEC:
@@ -525,7 +525,7 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		if err != nil {
 			return err
 		}
-		push(Node{Op: bytecodeToIROp(op), Refs: []NodeID{v}})
+		push(Inst{Op: bytecodeToIROp(op), Refs: []InstId{v}})
 		return nil
 
 	case vm.OP_INVOKE:
@@ -538,10 +538,10 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		if err != nil {
 			return err
 		}
-		refs := make([]NodeID, 0, arity+1)
+		refs := make([]InstId, 0, arity+1)
 		refs = append(refs, fn)
 		refs = append(refs, args...)
-		push(Node{Op: OpCall, Refs: refs, Aux: arity})
+		push(Inst{Op: OpCall, Refs: refs, Aux: arity})
 		return nil
 
 	case vm.OP_TAIL_CALL:
@@ -554,11 +554,11 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		if err != nil {
 			return err
 		}
-		refs := make([]NodeID, 0, arity+1)
+		refs := make([]InstId, 0, arity+1)
 		refs = append(refs, fn)
 		refs = append(refs, args...)
 		// TailCall is a terminator.
-		termID := pushNoStack(Node{Op: OpTailCall, Refs: refs, Aux: arity})
+		termID := pushNoStack(Inst{Op: OpTailCall, Refs: refs, Aux: arity})
 		b.f.SetTerminator(blockID, termID)
 		return nil
 
@@ -590,7 +590,7 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 
 	case vm.OP_DUP_NTH:
 		// Duplicate the Nth-from-top value back onto the stack. In SSA,
-		// this is just reusing an existing NodeID — no new node. The
+		// this is just reusing an existing InstId — no new node. The
 		// stack-shape pre-pass guarantees enough depth for reachable
 		// blocks; unreachable blocks get synthesized placeholder
 		// BlockArgs (dead content).
@@ -601,9 +601,9 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 				// stack to satisfy the DUP.
 				for len(*stack) < n+1 {
 					idx := len(b.f.Blocks[blockID].Params)
-					id := b.f.AddNode(Node{Op: OpBlockArg, Aux: idx, Block: blockID})
+					id := b.f.AddNode(Inst{Op: OpBlockArg, Aux: idx, Block: blockID})
 					b.f.Blocks[blockID].Params = append(b.f.Blocks[blockID].Params, id)
-					*stack = append([]NodeID{id}, (*stack)...)
+					*stack = append([]InstId{id}, (*stack)...)
 				}
 			} else {
 				return fmt.Errorf("ir.Build: DUP_NTH %d in block %d at ip %d would underflow (stack depth %d)", n, blockID, ip, len(*stack))
@@ -618,7 +618,7 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		if err != nil {
 			return err
 		}
-		termID := pushNoStack(Node{Op: OpReturn, Refs: []NodeID{v}})
+		termID := pushNoStack(Inst{Op: OpReturn, Refs: []InstId{v}})
 		b.f.SetTerminator(blockID, termID)
 		return nil
 
@@ -630,7 +630,7 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		// be wired up by insertBlockArgs. branchArgsAlreadySet will see
 		// len(Args) == n and skip this predecessor on the next phase.
 		bt := &BranchTarget{Target: target, Args: stackSnapshot(*stack)}
-		termID := pushNoStack(Node{Op: OpBranch, Aux: bt})
+		termID := pushNoStack(Inst{Op: OpBranch, Aux: bt})
 		b.f.SetTerminator(blockID, termID)
 		b.f.AddPred(target, blockID)
 		return nil
@@ -650,7 +650,7 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		}
 		target := b.ipToBlock[ip-offset]
 		bt := &BranchTarget{Target: target, Args: args}
-		termID := pushNoStack(Node{Op: OpBranch, Aux: bt})
+		termID := pushNoStack(Inst{Op: OpBranch, Aux: bt})
 		b.f.SetTerminator(blockID, termID)
 		b.f.AddPred(target, blockID)
 		return nil
@@ -661,12 +661,12 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		if err != nil {
 			return err
 		}
-		push(Node{Op: OpMakeClosure, Refs: []NodeID{fn}})
+		push(Inst{Op: OpMakeClosure, Refs: []InstId{fn}})
 		return nil
 
 	case vm.OP_LOAD_CLOSEDOVER:
 		idx := int(code[ip+1])
-		push(Node{Op: OpLoadClosed, Aux: idx})
+		push(Inst{Op: OpLoadClosed, Aux: idx})
 		return nil
 
 	case vm.OP_PUSH_CLOSEDOVER:
@@ -679,7 +679,7 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		if err != nil {
 			return err
 		}
-		push(Node{Op: OpPushClosed, Refs: []NodeID{cls, val}})
+		push(Inst{Op: OpPushClosed, Refs: []InstId{cls, val}})
 		return nil
 
 	case vm.OP_BRANCH_FALSE, vm.OP_BRANCH_TRUE:
@@ -701,7 +701,7 @@ func (b *builder) translateOp(blockID BlockID, op int32, code []int32, ip int, s
 		trueT := &BranchTarget{Target: b.ipToBlock[trueIP]}
 		falseT := &BranchTarget{Target: b.ipToBlock[falseIP]}
 		ct := &CondTarget{True: trueT, False: falseT}
-		termID := pushNoStack(Node{Op: OpBranchIf, Refs: []NodeID{cond}, Aux: ct})
+		termID := pushNoStack(Inst{Op: OpBranchIf, Refs: []InstId{cond}, Aux: ct})
 		b.f.SetTerminator(blockID, termID)
 		b.f.AddPred(trueT.Target, blockID)
 		b.f.AddPred(falseT.Target, blockID)
@@ -738,7 +738,7 @@ func (b *builder) insertBlockArgs() error {
 				continue
 			}
 			termID := b.f.Blocks[p].Term
-			term := b.f.Node(termID)
+			term := b.f.Inst(termID)
 
 			if branchArgsAlreadySet(term, bid, required) {
 				continue
@@ -751,7 +751,7 @@ func (b *builder) insertBlockArgs() error {
 					bid, required, p, len(predStack))
 			}
 			start := len(predStack) - required
-			passed := make([]NodeID, required)
+			passed := make([]InstId, required)
 			copy(passed, predStack[start:])
 			setBranchArgs(term, bid, passed)
 		}
@@ -762,7 +762,7 @@ func (b *builder) insertBlockArgs() error {
 // pruneUnreachable removes blocks not reachable from Entry. It
 // compacts f.Blocks (no gaps) and remaps all BlockID references —
 // f.Entry, each block's Preds, each terminator's BranchTarget/CondTarget
-// targets, and each Node's Block field — through the old→new ID map.
+// targets, and each Inst's Block field — through the old→new ID map.
 //
 // Reachable blocks retain their relative order. Branch targets pointing
 // at a pruned block would represent dynamically unreachable code (the
@@ -803,8 +803,8 @@ func (b *builder) pruneUnreachable() {
 	}
 
 	// Rewrite each surviving node's Block + branch-target IDs.
-	for i := range b.f.Nodes {
-		n := &b.f.Nodes[i]
+	for i := range b.f.Insts {
+		n := &b.f.Insts[i]
 		if newID, ok := remap[n.Block]; ok {
 			n.Block = newID
 		}
@@ -832,7 +832,7 @@ func (b *builder) pruneUnreachable() {
 }
 
 // setBranchArgs replaces term's branch args for the edge to bid.
-func setBranchArgs(term *Node, bid BlockID, args []NodeID) {
+func setBranchArgs(term *Inst, bid BlockID, args []InstId) {
 	switch t := term.Aux.(type) {
 	case *BranchTarget:
 		if t.Target == bid {
@@ -855,7 +855,7 @@ func setBranchArgs(term *Node, bid BlockID, args []NodeID) {
 // We use len(t.Args) == n (not t.Args != nil) so that a stale or
 // incorrectly-populated Args slice does not silently pass. The strong
 // invariant: "wired" means "wired with the exact right count".
-func branchArgsAlreadySet(term *Node, bid BlockID, n int) bool {
+func branchArgsAlreadySet(term *Inst, bid BlockID, n int) bool {
 	switch t := term.Aux.(type) {
 	case *BranchTarget:
 		return t.Target == bid && len(t.Args) == n
@@ -898,8 +898,8 @@ func instStride(op int32) int {
 // Used when storing exit-stack values in BranchTarget.Args so that
 // branchArgsAlreadySet can distinguish "not yet set" (nil) from "empty
 // block had nothing to pass" (non-nil empty slice).
-func stackSnapshot(s []NodeID) []NodeID {
-	out := make([]NodeID, len(s))
+func stackSnapshot(s []InstId) []InstId {
+	out := make([]InstId, len(s))
 	copy(out, s)
 	return out
 }

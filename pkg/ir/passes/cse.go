@@ -32,7 +32,7 @@ import (
 //
 // Cross-block CSE would need dominance — defer to a later pass.
 func CSE(f *ir.Function) (changed bool) {
-	redirect := make(map[ir.NodeID]ir.NodeID, len(f.Nodes))
+	redirect := make(map[ir.InstId]ir.InstId, len(f.Insts))
 
 	// Flow analysis: which vars are mutated anywhere in this function?
 	// LoadVar nodes targeting stable (non-mutated) vars can be merged
@@ -42,13 +42,13 @@ func CSE(f *ir.Function) (changed bool) {
 	for bid := range f.Blocks {
 		blk := &f.Blocks[bid]
 
-		// key → first NodeID that computed this value (in this block).
+		// key → first InstId that computed this value (in this block).
 		// Key is a string built from Op + redirected Refs + Aux.
-		seen := map[string]ir.NodeID{}
+		seen := map[string]ir.InstId{}
 
-		kept := blk.Nodes[:0]
-		for _, nid := range blk.Nodes {
-			n := f.Node(nid)
+		kept := blk.Insts[:0]
+		for _, nid := range blk.Insts {
+			n := f.Inst(nid)
 			if !n.Op.IsPure() && !cseSafeImpureLoadVar(n, mutatedVars, allMutated) {
 				kept = append(kept, nid)
 				continue
@@ -58,16 +58,16 @@ func CSE(f *ir.Function) (changed bool) {
 			key := nodeKey(n, redirect)
 			if prev, ok := seen[key]; ok {
 				// Duplicate. Inherit its spans into the survivor before marking dead.
-				f.Nodes[prev].SourceInfos = ir.MergeSourceInfo(f.Nodes[prev].SourceInfos, f.Nodes[nid].SourceInfos...)
+				f.Insts[prev].SourceInfos = ir.MergeSourceInfo(f.Insts[prev].SourceInfos, f.Insts[nid].SourceInfos...)
 				redirect[nid] = prev
-				f.Nodes[nid].Op = ir.OpInvalid
+				f.Insts[nid].Op = ir.OpInvalid
 				changed = true
 				continue
 			}
 			seen[key] = nid
 			kept = append(kept, nid)
 		}
-		blk.Nodes = kept
+		blk.Insts = kept
 	}
 
 	if !changed {
@@ -76,8 +76,8 @@ func CSE(f *ir.Function) (changed bool) {
 
 	// Final pass: rewrite all Refs to follow redirects. Includes
 	// terminator Refs and branch-target Args.
-	for i := range f.Nodes {
-		n := &f.Nodes[i]
+	for i := range f.Insts {
+		n := &f.Insts[i]
 		for j, r := range n.Refs {
 			if final, ok := follow(redirect, r); ok {
 				n.Refs[j] = final
@@ -104,7 +104,7 @@ func CSE(f *ir.Function) (changed bool) {
 
 // nodeKey computes a canonical key for n. Two nodes with equal keys
 // compute the same value. Refs are normalized via the redirect table.
-func nodeKey(n *ir.Node, redirect map[ir.NodeID]ir.NodeID) string {
+func nodeKey(n *ir.Inst, redirect map[ir.InstId]ir.InstId) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%d|", n.Op)
 	for _, r := range n.Refs {
@@ -153,8 +153,8 @@ func nodeKey(n *ir.Node, redirect map[ir.NodeID]ir.NodeID) string {
 // across the function without risk of a stale read.
 func computeMutatedVars(f *ir.Function) (mutated map[*vm.Var]bool, allMutated bool) {
 	mutated = make(map[*vm.Var]bool)
-	for i := range f.Nodes {
-		n := &f.Nodes[i]
+	for i := range f.Insts {
+		n := &f.Insts[i]
 		switch n.Op {
 		case ir.OpSetVar:
 			// Aux holds the target Var (set by Build).
@@ -172,7 +172,7 @@ func computeMutatedVars(f *ir.Function) (mutated map[*vm.Var]bool, allMutated bo
 			if len(n.Refs) == 0 {
 				continue
 			}
-			fnNode := &f.Nodes[n.Refs[0]]
+			fnNode := &f.Insts[n.Refs[0]]
 			if fnNode.Op != ir.OpLoadVar {
 				continue
 			}
@@ -216,7 +216,7 @@ var knownMutatingBuiltins = map[string]bool{
 // constant from this function's perspective.
 //
 // Caller pre-computes the mutated set via computeMutatedVars.
-func cseSafeImpureLoadVar(n *ir.Node, mutated map[*vm.Var]bool, allMutated bool) bool {
+func cseSafeImpureLoadVar(n *ir.Inst, mutated map[*vm.Var]bool, allMutated bool) bool {
 	if allMutated {
 		return false
 	}
@@ -235,8 +235,8 @@ func cseSafeImpureLoadVar(n *ir.Node, mutated map[*vm.Var]bool, allMutated bool)
 }
 
 // follow walks the redirect chain to its terminus. Returns the final
-// NodeID and whether any redirect was followed.
-func follow(redirect map[ir.NodeID]ir.NodeID, id ir.NodeID) (ir.NodeID, bool) {
+// InstId and whether any redirect was followed.
+func follow(redirect map[ir.InstId]ir.InstId, id ir.InstId) (ir.InstId, bool) {
 	final := id
 	moved := false
 	for {
@@ -249,7 +249,7 @@ func follow(redirect map[ir.NodeID]ir.NodeID, id ir.NodeID) (ir.NodeID, bool) {
 	}
 }
 
-func rewriteArgs(args []ir.NodeID, redirect map[ir.NodeID]ir.NodeID) {
+func rewriteArgs(args []ir.InstId, redirect map[ir.InstId]ir.InstId) {
 	for i, a := range args {
 		if final, ok := follow(redirect, a); ok {
 			args[i] = final

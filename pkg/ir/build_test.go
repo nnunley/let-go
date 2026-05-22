@@ -55,8 +55,8 @@ func TestBuildFib(t *testing.T) {
 	if len(irFn.Blocks) < 2 {
 		t.Errorf("expected at least 2 blocks (if/else), got %d", len(irFn.Blocks))
 	}
-	if len(irFn.Nodes) < 10 {
-		t.Errorf("expected at least 10 nodes for fib, got %d", len(irFn.Nodes))
+	if len(irFn.Insts) < 10 {
+		t.Errorf("expected at least 10 nodes for fib, got %d", len(irFn.Insts))
 	}
 
 	// Dump for visual inspection (visible with go test -v).
@@ -282,7 +282,7 @@ func TestBuild_FallThroughExitStack(t *testing.T) {
 	}
 	// Entry block's terminator should be OpBranch with len(Args) >= 2
 	// (the two loop-binding initializers).
-	entryTerm := irFn.Node(irFn.Blocks[irFn.Entry].Term)
+	entryTerm := irFn.Inst(irFn.Blocks[irFn.Entry].Term)
 	if entryTerm.Op != OpBranch {
 		t.Fatalf("expected entry block terminator OpBranch, got %s", entryTerm.Op)
 	}
@@ -333,8 +333,8 @@ func TestBuild_LoopHeaderParamsMatchPreds(t *testing.T) {
 		// Skip unreachable preds (the dead fall-through after RECUR).
 		// We don't have direct access to b.reachable here, but we can check
 		// the pred has a real terminator and is in the function's block list.
-		predTerm := irFn.Node(irFn.Blocks[predID].Term)
-		var args []NodeID
+		predTerm := irFn.Inst(irFn.Blocks[predID].Term)
+		var args []InstId
 		matched := false
 		switch t := predTerm.Aux.(type) {
 		case *BranchTarget:

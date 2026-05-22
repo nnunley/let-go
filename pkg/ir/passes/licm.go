@@ -32,7 +32,7 @@ import (
 //
 // Operates in-place; doesn't remove the original node's slot — moves
 // the node by changing its Block and re-appending to the pre-header's
-// body list. Original block's Nodes list is rebuilt without it.
+// body list. Original block's Insts list is rebuilt without it.
 //
 // Returns true if any node was hoisted.
 //
@@ -163,16 +163,16 @@ func hoistInvariants(
 	// nodes; a node is invariant if all its operands are invariant.
 	// "Invariant" for a node means: defined outside the loop body, OR
 	// pure/constant with all-invariant operands.
-	invariant := make(map[ir.NodeID]bool)
+	invariant := make(map[ir.InstId]bool)
 
 	// Seed: any node defined OUTSIDE the loop body is invariant.
-	for i := range f.Nodes {
-		n := &f.Nodes[i]
+	for i := range f.Insts {
+		n := &f.Insts[i]
 		if n.Op == ir.OpInvalid {
 			continue
 		}
 		if !loop.body[n.Block] {
-			invariant[ir.NodeID(i)] = true
+			invariant[ir.InstId(i)] = true
 		}
 	}
 
@@ -183,11 +183,11 @@ func hoistInvariants(
 		progress = false
 		for bid := range loop.body {
 			blk := &f.Blocks[bid]
-			for _, nid := range blk.Nodes {
+			for _, nid := range blk.Insts {
 				if invariant[nid] {
 					continue
 				}
-				n := f.Node(nid)
+				n := f.Inst(nid)
 				if !nodeHoistable(n, mutatedVars, allMutated) {
 					continue
 				}
@@ -207,28 +207,28 @@ func hoistInvariants(
 	}
 
 	// Now move the hoistable body nodes to the pre-header. Walk each
-	// body block, filter its Nodes list, and append hoisted ones to
+	// body block, filter its Insts list, and append hoisted ones to
 	// the pre-header (in the order they were encountered to preserve
 	// def-before-use within the pre-header).
-	var hoisted []ir.NodeID
+	var hoisted []ir.InstId
 	for bid := range loop.body {
 		blk := &f.Blocks[bid]
-		kept := blk.Nodes[:0]
-		for _, nid := range blk.Nodes {
-			if !invariant[nid] || f.Nodes[nid].Block == loop.preheader {
+		kept := blk.Insts[:0]
+		for _, nid := range blk.Insts {
+			if !invariant[nid] || f.Insts[nid].Block == loop.preheader {
 				kept = append(kept, nid)
 				continue
 			}
 			// Confirm this node was defined inside the loop body — we
 			// only hoist body-defined nodes, not nodes that were seeded
 			// as invariant because they're already outside.
-			if loop.body[f.Nodes[nid].Block] {
+			if loop.body[f.Insts[nid].Block] {
 				hoisted = append(hoisted, nid)
 				continue
 			}
 			kept = append(kept, nid)
 		}
-		blk.Nodes = kept
+		blk.Insts = kept
 	}
 	if len(hoisted) == 0 {
 		return false
@@ -236,11 +236,11 @@ func hoistInvariants(
 
 	// Re-block hoisted nodes to the pre-header. Insert them BEFORE the
 	// pre-header's terminator (since we don't want to break terminator
-	// position). Since blk.Nodes excludes the terminator, we append.
+	// position). Since blk.Insts excludes the terminator, we append.
 	preBlock := &f.Blocks[loop.preheader]
 	for _, nid := range hoisted {
-		f.Nodes[nid].Block = loop.preheader
-		preBlock.Nodes = append(preBlock.Nodes, nid)
+		f.Insts[nid].Block = loop.preheader
+		preBlock.Insts = append(preBlock.Insts, nid)
 	}
 
 	// CRITICAL: hoisted values are now defined in the pre-header but
@@ -262,7 +262,7 @@ func hoistInvariants(
 // branches entering the header — both the pre-header→header edge and
 // any back-edges from within the loop — must also pass the hoisted
 // value (it's loop-invariant so it's the same value on every iteration).
-func threadHoistedThroughHeader(f *ir.Function, loop loopInfo, hoisted []ir.NodeID) {
+func threadHoistedThroughHeader(f *ir.Function, loop loopInfo, hoisted []ir.InstId) {
 	if len(hoisted) == 0 {
 		return
 	}
@@ -271,15 +271,15 @@ func threadHoistedThroughHeader(f *ir.Function, loop loopInfo, hoisted []ir.Node
 	// just been DCE'd; but it's still legal to leave it.)
 	header := &f.Blocks[loop.header]
 	type threading struct {
-		hoistedID ir.NodeID // original hoisted node, in pre-header
-		paramID   ir.NodeID // new BlockArg in header that receives hoistedID
+		hoistedID ir.InstId // original hoisted node, in pre-header
+		paramID   ir.InstId // new BlockArg in header that receives hoistedID
 	}
 	var threads []threading
 
 	for _, hID := range hoisted {
 		usedInLoop := false
-		for i := range f.Nodes {
-			n := &f.Nodes[i]
+		for i := range f.Insts {
+			n := &f.Insts[i]
 			if n.Op == ir.OpInvalid {
 				continue
 			}
@@ -300,7 +300,7 @@ func threadHoistedThroughHeader(f *ir.Function, loop loopInfo, hoisted []ir.Node
 			continue
 		}
 		// Create a new BlockArg in the header.
-		paramID := f.AddNode(ir.Node{
+		paramID := f.AddNode(ir.Inst{
 			Op:    ir.OpBlockArg,
 			Aux:   len(header.Params),
 			Block: loop.header,
@@ -319,13 +319,13 @@ func threadHoistedThroughHeader(f *ir.Function, loop loopInfo, hoisted []ir.Node
 	// arg, it should now reference the corresponding param (which
 	// holds the same value as the hoisted def).
 	for _, t := range threads {
-		for i := range f.Nodes {
-			n := &f.Nodes[i]
+		for i := range f.Insts {
+			n := &f.Insts[i]
 			if n.Op == ir.OpInvalid {
 				continue
 			}
 			// Skip the hoisted node itself.
-			if ir.NodeID(i) == t.hoistedID {
+			if ir.InstId(i) == t.hoistedID {
 				continue
 			}
 			// Only rewrite uses inside the loop.
@@ -376,7 +376,7 @@ func threadHoistedThroughHeader(f *ir.Function, loop loopInfo, hoisted []ir.Node
 	// back-edges (defined inside loop), the value flowing back is the
 	// header's own param — it's loop-invariant.
 	for _, p := range header.Preds {
-		predTerm := &f.Nodes[f.Blocks[p].Term]
+		predTerm := &f.Insts[f.Blocks[p].Term]
 		isFromLoop := loop.body[p]
 		switch ta := predTerm.Aux.(type) {
 		case *ir.BranchTarget:
@@ -420,7 +420,7 @@ func threadHoistedThroughHeader(f *ir.Function, loop loopInfo, hoisted []ir.Node
 // isn't mutated anywhere in the function.
 //
 // OpCall, OpTailCall, OpSetVar, and terminators are never hoisted.
-func nodeHoistable(n *ir.Node, mutatedVars map[*vm.Var]bool, allMutated bool) bool {
+func nodeHoistable(n *ir.Inst, mutatedVars map[*vm.Var]bool, allMutated bool) bool {
 	if n.Op.IsTerminator() {
 		return false
 	}

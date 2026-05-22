@@ -8,20 +8,20 @@ package ir
 
 import "github.com/nooga/let-go/pkg/vm"
 
-// NodeID is an index into Function.Nodes — the identity of an SSA value.
-// Zero is a valid id; the first emitted node is NodeID(0).
-type NodeID int32
+// InstId is an index into Function.Insts — the identity of an SSA value.
+// Zero is a valid id; the first emitted node is InstId(0).
+type InstId int32
 
 // BlockID is an index into Function.Blocks.
 type BlockID int32
 
-// Node is one IR value or terminator. The flat-array layout means every
-// node has a stable index referenced by other nodes via NodeID. There
+// Inst is one IR value or terminator. The flat-array layout means every
+// node has a stable index referenced by other nodes via InstId. There
 // are no Go pointers between nodes; just integer references. This
 // keeps the IR cache-friendly and easy to serialize / mutate / dump.
-type Node struct {
+type Inst struct {
 	Op    Op       // kind
-	Refs  []NodeID // operands; semantics depend on Op
+	Refs  []InstId // operands; semantics depend on Op
 	Aux   any      // op-specific payload (const value, var ref, branch target)
 	Block BlockID  // which block this node lives in
 	Type  Type     // result type; Unknown until type inference runs
@@ -73,7 +73,7 @@ func (t Type) String() string {
 // block-arg semantics; replaces phi nodes.
 type BranchTarget struct {
 	Target BlockID
-	Args   []NodeID // one per Block.Params; positional
+	Args   []InstId // one per Block.Params; positional
 }
 
 // CondTarget is the payload for OpBranchIf: two BranchTargets, one
@@ -85,9 +85,9 @@ type CondTarget struct {
 // Block is a sequence of straight-line nodes ending in a terminator.
 type Block struct {
 	ID     BlockID
-	Params []NodeID // OpBlockArg nodes, declared at block entry
-	Nodes  []NodeID // body nodes, in execution order (excluding terminator)
-	Term   NodeID   // terminator (Op.IsTerminator())
+	Params []InstId // OpBlockArg nodes, declared at block entry
+	Insts  []InstId // body nodes, in execution order (excluding terminator)
+	Term   InstId   // terminator (Op.IsTerminator())
 	Preds  []BlockID
 }
 
@@ -97,7 +97,7 @@ type Function struct {
 	Arity      int
 	IsVariadic bool
 
-	Nodes  []Node  // all nodes, indexed by NodeID
+	Insts  []Inst  // all nodes, indexed by InstId
 	Blocks []Block // basic blocks, Block.ID == index
 	Entry  BlockID
 
@@ -115,7 +115,7 @@ type Function struct {
 // in f.args[] at runtime, not on the value stack, so they don't fit the
 // BlockArg model (which represents values supplied by a predecessor's
 // branch-with-args). Callers that need a fn-arg reference should
-// f.AddNode(Node{Op: OpLoadArg, Aux: i, Block: someBlock}) explicitly.
+// f.AddNode(Inst{Op: OpLoadArg, Aux: i, Block: someBlock}) explicitly.
 func NewFunction(name string, arity int, variadic bool, consts *vm.Consts) *Function {
 	f := &Function{
 		Name:         name,
@@ -135,27 +135,27 @@ func (f *Function) AddBlock() BlockID {
 }
 
 // AddNode appends a node, returns its ID.
-func (f *Function) AddNode(n Node) NodeID {
-	id := NodeID(len(f.Nodes))
-	f.Nodes = append(f.Nodes, n)
+func (f *Function) AddNode(n Inst) InstId {
+	id := InstId(len(f.Insts))
+	f.Insts = append(f.Insts, n)
 	return id
 }
 
 // AppendToBlock adds an existing node ID to the block's body.
-func (f *Function) AppendToBlock(b BlockID, id NodeID) {
-	f.Blocks[b].Nodes = append(f.Blocks[b].Nodes, id)
+func (f *Function) AppendToBlock(b BlockID, id InstId) {
+	f.Blocks[b].Insts = append(f.Blocks[b].Insts, id)
 }
 
 // SetTerminator sets the block's terminator. Called once per block.
-func (f *Function) SetTerminator(b BlockID, id NodeID) {
+func (f *Function) SetTerminator(b BlockID, id InstId) {
 	f.Blocks[b].Term = id
 }
 
-// Node returns a pointer into the flat array. Stable across Function
+// Inst returns a pointer into the flat array. Stable across Function
 // lifetime as long as no node is added (which would grow the slice
 // and invalidate pointers — callers must re-fetch after AddNode).
-func (f *Function) Node(id NodeID) *Node {
-	return &f.Nodes[id]
+func (f *Function) Inst(id InstId) *Inst {
+	return &f.Insts[id]
 }
 
 // AddPred records that `pred` branches into `b`.

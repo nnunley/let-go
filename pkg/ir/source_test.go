@@ -48,16 +48,16 @@ func TestSourceMap_RoundTrip(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	// Spot-check: at least one IR Node should have SourceInfo set.
+	// Spot-check: at least one IR Inst should have SourceInfo set.
 	hasNodeSI := false
-	for _, n := range irFn.Nodes {
+	for _, n := range irFn.Insts {
 		if len(n.SourceInfos) > 0 {
 			hasNodeSI = true
 			break
 		}
 	}
 	if !hasNodeSI {
-		t.Error("expected at least one IR Node with SourceInfo after Build, got none")
+		t.Error("expected at least one IR Inst with SourceInfo after Build, got none")
 	}
 
 	loweredChunk, err := Lower(irFn)
@@ -76,7 +76,7 @@ func TestSourceMap_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestSourceMap_HandSetRoundTrip confirms that a hand-constructed IR Node
+// TestSourceMap_HandSetRoundTrip confirms that a hand-constructed IR Inst
 // with SourceInfo set will have its SourceInfo present in the lowered chunk.
 // This test is unconditional and does not depend on the compiler emitting
 // source info.
@@ -85,9 +85,9 @@ func TestSourceMap_HandSetRoundTrip(t *testing.T) {
 	f := NewFunction("manual", 0, false, consts)
 	b0 := f.Entry
 	si := vm.SourceInfo{File: "manual.lg", Line: 4, Column: 12}
-	c := f.AddNode(Node{Op: OpConst, Aux: vm.Int(42), Block: b0, SourceInfos: []vm.SourceInfo{si}})
+	c := f.AddNode(Inst{Op: OpConst, Aux: vm.Int(42), Block: b0, SourceInfos: []vm.SourceInfo{si}})
 	f.AppendToBlock(b0, c)
-	ret := f.AddNode(Node{Op: OpReturn, Refs: []NodeID{c}, Block: b0})
+	ret := f.AddNode(Inst{Op: OpReturn, Refs: []InstId{c}, Block: b0})
 	f.SetTerminator(b0, ret)
 
 	chunk, err := Lower(f)

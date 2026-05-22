@@ -42,14 +42,14 @@ func TestConstFoldSimple(t *testing.T) {
 	t.Logf("after:\n%s", ir.Dump(irFn))
 
 	// Verify the Add node is now a Const with value 5.
-	for _, n := range irFn.Nodes {
+	for _, n := range irFn.Insts {
 		if n.Op == ir.OpAdd {
 			t.Errorf("expected no Add nodes after fold, found one")
 		}
 	}
 	// And check there's a Const(5) somewhere.
 	foundFive := false
-	for _, n := range irFn.Nodes {
+	for _, n := range irFn.Insts {
 		if n.Op == ir.OpConst {
 			if v, ok := n.Aux.(vm.Int); ok && int(v) == 5 {
 				foundFive = true
@@ -140,8 +140,8 @@ func TestConstFoldDCE(t *testing.T) {
 
 	// Count live (non-dead, non-terminator) nodes in entry block.
 	live := 0
-	for _, nid := range irFn.Blocks[irFn.Entry].Nodes {
-		n := irFn.Node(nid)
+	for _, nid := range irFn.Blocks[irFn.Entry].Insts {
+		n := irFn.Inst(nid)
 		if n.Op != ir.OpInvalid {
 			live++
 		}
@@ -173,7 +173,7 @@ func TestConstFoldChained(t *testing.T) {
 	t.Logf("after:\n%s", ir.Dump(irFn))
 
 	// Want a Const(11) somewhere.
-	for _, n := range irFn.Nodes {
+	for _, n := range irFn.Insts {
 		if n.Op == ir.OpConst {
 			if v, ok := n.Aux.(vm.Int); ok && int(v) == 11 {
 				return // success

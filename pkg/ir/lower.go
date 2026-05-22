@@ -57,16 +57,16 @@ func Lower(f *Function) (*vm.CodeChunk, error) {
 		if len(us) == 0 {
 			continue
 		}
-		defBlock := f.Nodes[nid].Block
+		defBlock := f.Insts[nid].Block
 		for _, userID := range us {
-			userBlock := f.Nodes[userID].Block
+			userBlock := f.Insts[userID].Block
 			if userBlock == defBlock {
 				continue
 			}
 			// Cross-block use is only legitimate as a branch-target arg
 			// (BlockArgs are how SSA crosses blocks). Direct Refs uses
 			// can't be expressed by the spike's stack-based lowering.
-			if isTerminatorBranchArgUse(&f.Nodes[userID], NodeID(nid)) {
+			if isTerminatorBranchArgUse(&f.Insts[userID], InstId(nid)) {
 				continue
 			}
 			return nil, fmt.Errorf("ir.Lower: cross-block use of value %%%d via direct Refs (defined in block %d, used in block %d) — only branch-target args may cross blocks; see follow-up issue D", nid, defBlock, userBlock)
@@ -77,15 +77,15 @@ func Lower(f *Function) (*vm.CodeChunk, error) {
 		f:             f,
 		chunk:         vm.NewCodeChunk(f.SourceConsts),
 		blockIPs:      make([]int, len(f.Blocks)),
-		nodeSlot:      map[NodeID]int{},
-		useCount:      make(map[NodeID]int),
-		valueStackPos: make(map[NodeID]int),
+		nodeSlot:      map[InstId]int{},
+		useCount:      make(map[InstId]int),
+		valueStackPos: make(map[InstId]int),
 		uses:          uses,
 	}
 	// Seed useCount from the def→use index (reuse the already-computed uses).
 	for id, us := range uses {
 		if len(us) > 0 {
-			l.useCount[NodeID(id)] = len(us)
+			l.useCount[InstId(id)] = len(us)
 		}
 	}
 
@@ -112,12 +112,12 @@ type lowerer struct {
 	f        *Function
 	chunk    *vm.CodeChunk
 	blockIPs []int          // block ID → starting IP in emitted chunk
-	nodeSlot map[NodeID]int // (unused; reserved for future local-slot allocator)
+	nodeSlot map[InstId]int // (unused; reserved for future local-slot allocator)
 	patches  []branchPatch  // pending offset patches
 	stackSP  int            // current stack depth (logical, for SP encoding)
 
-	useCount      map[NodeID]int // total use count per node; decremented by the materializer as consumers are emitted
-	valueStackPos map[NodeID]int // absolute stack-depth index (0 = bottom) of values currently on stack
+	useCount      map[InstId]int // total use count per node; decremented by the materializer as consumers are emitted
+	valueStackPos map[InstId]int // absolute stack-depth index (0 = bottom) of values currently on stack
 	uses          Uses           // def→use index (set once at Lower-time)
 }
 
@@ -134,7 +134,7 @@ type branchPatch struct {
 // about to be written. Multiple spans at the same IP are stored as
 // separate entries; SourceMap.Lookup returns the most recent (the last
 // span added), which gives a deterministic answer.
-func (l *lowerer) recordSourceInfo(n *Node) {
+func (l *lowerer) recordSourceInfo(n *Inst) {
 	if n == nil {
 		return
 	}
@@ -178,8 +178,8 @@ func (l *lowerer) lowerBlock(bid BlockID) error {
 	// stack slot at its definition site. Multi-use values are reused
 	// from that slot via DUP_NTH; single-use values feed the next op
 	// directly.
-	for _, nid := range blk.Nodes {
-		n := l.f.Node(nid)
+	for _, nid := range blk.Insts {
+		n := l.f.Inst(nid)
 		// Skip dead nodes (left over from CSE/DCE).
 		if n.Op == OpInvalid {
 			continue
@@ -258,7 +258,7 @@ func (l *lowerer) lowerBlock(bid BlockID) error {
 	}
 	if blk.Term != 0 {
 		// Materialize terminator operands.
-		term := l.f.Node(blk.Term)
+		term := l.f.Inst(blk.Term)
 		// Direct Refs (e.g., OpReturn's value, OpBranchIf's cond,
 		// OpTailCall's fn + args, OpCall's fn + args). The same
 		// "already at top in correct order" fast path applies as for
@@ -342,7 +342,7 @@ func (l *lowerer) lowerBlock(bid BlockID) error {
 // argsAtTop reports whether the given args occupy the top
 // len(args) stack slots in order: args[0] at stackSP-len(args),
 // args[len-1] at stackSP-1.
-func (l *lowerer) argsAtTop(args []NodeID) bool {
+func (l *lowerer) argsAtTop(args []InstId) bool {
 	n := len(args)
 	if n == 0 {
 		return true
@@ -373,7 +373,7 @@ func (l *lowerer) argsAtTop(args []NodeID) bool {
 //
 // Otherwise defer: the consumer's materialize will re-LOAD inline,
 // which is exactly what the source compiler emits for the same expr.
-func (l *lowerer) shouldBodyEmitCheap(nid NodeID) bool {
+func (l *lowerer) shouldBodyEmitCheap(nid InstId) bool {
 	uc := l.useCount[nid]
 	if uc == 0 {
 		// Dead; don't bother emitting.
@@ -401,7 +401,7 @@ func (l *lowerer) shouldBodyEmitCheap(nid NodeID) bool {
 	if len(us) != 1 {
 		return false
 	}
-	user := l.f.Node(us[0])
+	user := l.f.Inst(us[0])
 	if len(user.Refs) == 0 {
 		// Used only as a branch-target arg (no direct Refs); body
 		// emit so the branch's arg-materialize sees a stable position.
@@ -414,7 +414,7 @@ func (l *lowerer) shouldBodyEmitCheap(nid NodeID) bool {
 // len(refs) stack slots in order AND each is at its last use. When
 // true, the consuming op can pop them in place without any
 // materialization.
-func (l *lowerer) refsAtTopLastUse(refs []NodeID) bool {
+func (l *lowerer) refsAtTopLastUse(refs []InstId) bool {
 	n := len(refs)
 	if n == 0 {
 		return true
@@ -439,8 +439,8 @@ func (l *lowerer) refsAtTopLastUse(refs []NodeID) bool {
 	return true
 }
 
-func (l *lowerer) lowerNode(nid NodeID) error {
-	n := l.f.Node(nid)
+func (l *lowerer) lowerNode(nid InstId) error {
+	n := l.f.Inst(nid)
 	switch n.Op {
 
 	case OpBlockArg:
@@ -644,7 +644,7 @@ func (l *lowerer) patchBranches() error {
 // isTerminatorBranchArgUse reports whether a terminator node references
 // target via a branch-target Args slot (the legitimate SSA cross-block
 // channel). Direct Refs uses are not cross-block-safe.
-func isTerminatorBranchArgUse(term *Node, target NodeID) bool {
+func isTerminatorBranchArgUse(term *Inst, target InstId) bool {
 	if !term.Op.IsTerminator() {
 		return false
 	}
@@ -696,8 +696,8 @@ func isTerminatorBranchArgUse(term *Node, target NodeID) bool {
 //
 // Caller is responsible for decrementing useCount[nid] after the
 // consuming op finishes.
-func (l *lowerer) materialize(nid NodeID) error {
-	n := l.f.Node(nid)
+func (l *lowerer) materialize(nid InstId) error {
+	n := l.f.Inst(nid)
 	// Last-use-at-top optimization: if the value is already on top of
 	// the stack and this is its last remaining use, just leave it there.
 	// The upcoming consuming op will pop it directly.

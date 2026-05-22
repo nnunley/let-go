@@ -150,8 +150,8 @@ func blocksInLoop(f *ir.Function, idom []ir.BlockID, header ir.BlockID) map[ir.B
 func countOpInBlocks(f *ir.Function, blocks map[ir.BlockID]bool, op ir.Op) int {
 	n := 0
 	for bid := range blocks {
-		for _, nid := range f.Blocks[bid].Nodes {
-			if f.Nodes[nid].Op == op {
+		for _, nid := range f.Blocks[bid].Insts {
+			if f.Insts[nid].Op == op {
 				n++
 			}
 		}

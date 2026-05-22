@@ -41,8 +41,8 @@ import (
 func ConstFold(f *ir.Function) (changed bool) {
 	for {
 		anyChange := false
-		for id := range f.Nodes {
-			n := &f.Nodes[id]
+		for id := range f.Insts {
+			n := &f.Insts[id]
 			if n.Op == ir.OpConst || n.Op == ir.OpInvalid {
 				continue
 			}
@@ -62,7 +62,7 @@ func ConstFold(f *ir.Function) (changed bool) {
 			// Pure-op constant folding.
 			if n.Op.IsPure() {
 				if folded, ok := tryFold(f, n); ok {
-					applyFold(f, ir.NodeID(id), folded)
+					applyFold(f, ir.InstId(id), folded)
 					anyChange = true
 					changed = true
 					continue
@@ -71,7 +71,7 @@ func ConstFold(f *ir.Function) (changed bool) {
 			// Known-pure function-call folding.
 			if n.Op == ir.OpCall {
 				if folded, ok := tryFoldCall(f, n); ok {
-					applyFold(f, ir.NodeID(id), folded)
+					applyFold(f, ir.InstId(id), folded)
 					anyChange = true
 					changed = true
 					continue
@@ -79,7 +79,7 @@ func ConstFold(f *ir.Function) (changed bool) {
 			}
 			// Algebraic identities.
 			if simpler, ok := tryIdentity(f, n); ok {
-				redirectTo(f, ir.NodeID(id), simpler)
+				redirectTo(f, ir.InstId(id), simpler)
 				anyChange = true
 				changed = true
 				continue
@@ -108,14 +108,14 @@ func ConstFold(f *ir.Function) (changed bool) {
 // Skip when both operands are Const (folding will collapse the whole
 // expression) or when neither is Const (no canonical order without
 // more sophisticated value-numbering).
-func canonicalizeCommutative(f *ir.Function, n *ir.Node) bool {
+func canonicalizeCommutative(f *ir.Function, n *ir.Inst) bool {
 	switch n.Op {
 	case ir.OpAdd, ir.OpMul, ir.OpEq:
 		if len(n.Refs) != 2 {
 			return false
 		}
-		lhsConst := f.Nodes[n.Refs[0]].Op == ir.OpConst
-		rhsConst := f.Nodes[n.Refs[1]].Op == ir.OpConst
+		lhsConst := f.Insts[n.Refs[0]].Op == ir.OpConst
+		rhsConst := f.Insts[n.Refs[1]].Op == ir.OpConst
 		if lhsConst && !rhsConst {
 			n.Refs[0], n.Refs[1] = n.Refs[1], n.Refs[0]
 			return true
@@ -126,7 +126,7 @@ func canonicalizeCommutative(f *ir.Function, n *ir.Node) bool {
 		if len(n.Refs) != 3 {
 			return false
 		}
-		fnNode := &f.Nodes[n.Refs[0]]
+		fnNode := &f.Insts[n.Refs[0]]
 		if fnNode.Op != ir.OpLoadVar {
 			return false
 		}
@@ -141,8 +141,8 @@ func canonicalizeCommutative(f *ir.Function, n *ir.Node) bool {
 		if !commutativeBuiltins[v.VarName()] {
 			return false
 		}
-		lhsConst := f.Nodes[n.Refs[1]].Op == ir.OpConst
-		rhsConst := f.Nodes[n.Refs[2]].Op == ir.OpConst
+		lhsConst := f.Insts[n.Refs[1]].Op == ir.OpConst
+		rhsConst := f.Insts[n.Refs[2]].Op == ir.OpConst
 		if lhsConst && !rhsConst {
 			n.Refs[1], n.Refs[2] = n.Refs[2], n.Refs[1]
 			return true
@@ -165,11 +165,11 @@ var commutativeBuiltins = map[string]bool{
 
 // applyFold rewrites node nid in-place to an OpConst holding val, and
 // unions operand spans into the rewritten node's SourceInfos.
-func applyFold(f *ir.Function, nid ir.NodeID, val vm.Value) {
-	n := &f.Nodes[nid]
+func applyFold(f *ir.Function, nid ir.InstId, val vm.Value) {
+	n := &f.Insts[nid]
 	var operandSpans []vm.SourceInfo
 	for _, ref := range n.Refs {
-		operandSpans = ir.MergeSourceInfo(operandSpans, f.Nodes[ref].SourceInfos...)
+		operandSpans = ir.MergeSourceInfo(operandSpans, f.Insts[ref].SourceInfos...)
 	}
 	n.Op = ir.OpConst
 	n.Refs = nil
@@ -181,23 +181,23 @@ func applyFold(f *ir.Function, nid ir.NodeID, val vm.Value) {
 // algebraic identities like (+ x 0) → x where we don't compute a new
 // value, just collapse the chain to an existing one. Unions spans into
 // the surviving node.
-func redirectTo(f *ir.Function, from, to ir.NodeID) {
+func redirectTo(f *ir.Function, from, to ir.InstId) {
 	// Carry source spans along: the `from` node's spans (and its operands')
 	// flow into the `to` node so a runtime error attributes to all
 	// originating locations.
 	var operandSpans []vm.SourceInfo
-	for _, ref := range f.Nodes[from].Refs {
-		operandSpans = ir.MergeSourceInfo(operandSpans, f.Nodes[ref].SourceInfos...)
+	for _, ref := range f.Insts[from].Refs {
+		operandSpans = ir.MergeSourceInfo(operandSpans, f.Insts[ref].SourceInfos...)
 	}
-	operandSpans = ir.MergeSourceInfo(operandSpans, f.Nodes[from].SourceInfos...)
-	f.Nodes[to].SourceInfos = ir.MergeSourceInfo(f.Nodes[to].SourceInfos, operandSpans...)
+	operandSpans = ir.MergeSourceInfo(operandSpans, f.Insts[from].SourceInfos...)
+	f.Insts[to].SourceInfos = ir.MergeSourceInfo(f.Insts[to].SourceInfos, operandSpans...)
 
 	// Mark `from` invalid so DCE removes it; rewrite any node that
 	// references `from` to reference `to` instead.
-	f.Nodes[from].Op = ir.OpInvalid
-	f.Nodes[from].Refs = nil
-	for i := range f.Nodes {
-		nn := &f.Nodes[i]
+	f.Insts[from].Op = ir.OpInvalid
+	f.Insts[from].Refs = nil
+	for i := range f.Insts {
+		nn := &f.Insts[i]
 		for j, r := range nn.Refs {
 			if r == from {
 				nn.Refs[j] = to
@@ -236,7 +236,7 @@ func redirectTo(f *ir.Function, from, to ir.NodeID) {
 
 // tryFold attempts primitive-op constant folding via the runtime
 // numeric tower. Returns (foldedValue, true) on success.
-func tryFold(f *ir.Function, n *ir.Node) (vm.Value, bool) {
+func tryFold(f *ir.Function, n *ir.Inst) (vm.Value, bool) {
 	switch n.Op {
 	case ir.OpAdd, ir.OpSub, ir.OpMul,
 		ir.OpLt, ir.OpLte, ir.OpGt, ir.OpGte, ir.OpEq:
@@ -263,8 +263,8 @@ func tryFold(f *ir.Function, n *ir.Node) (vm.Value, bool) {
 }
 
 // constValueOf returns (vm.Value, true) if nid resolves to an OpConst node.
-func constValueOf(f *ir.Function, nid ir.NodeID) (vm.Value, bool) {
-	n := f.Node(nid)
+func constValueOf(f *ir.Function, nid ir.InstId) (vm.Value, bool) {
+	n := f.Inst(nid)
 	if n.Op != ir.OpConst {
 		return nil, false
 	}
@@ -353,7 +353,7 @@ func foldUnary(op ir.Op, a vm.Value) (vm.Value, bool) {
 // builtin and whose args are all constants. Covers division, modulo,
 // and the bitwise op suite — operations that don't have primitive IR
 // opcodes (so primitive-op folding can't reach them).
-func tryFoldCall(f *ir.Function, n *ir.Node) (vm.Value, bool) {
+func tryFoldCall(f *ir.Function, n *ir.Inst) (vm.Value, bool) {
 	if n.Op != ir.OpCall {
 		return nil, false
 	}
@@ -361,7 +361,7 @@ func tryFoldCall(f *ir.Function, n *ir.Node) (vm.Value, bool) {
 	if len(n.Refs) < 1 {
 		return nil, false
 	}
-	fnNode := f.Node(n.Refs[0])
+	fnNode := f.Inst(n.Refs[0])
 	if fnNode.Op != ir.OpLoadVar {
 		return nil, false
 	}
@@ -583,15 +583,15 @@ func foldUnsignedBitShiftRight(args []vm.Value) (vm.Value, bool) {
 	return vm.MakeInt(int(uint(int(a)) >> uint(int(b)))), true
 }
 
-// tryIdentity matches algebraic identities and returns (simpler-nodeID, true)
+// tryIdentity matches algebraic identities and returns (simpler-instId, true)
 // if the result can be replaced by an existing node (vs. a fresh constant).
 // For identities that produce a NEW constant (like (* x 0) → 0), the
 // caller is expected to fold via applyFold; this function returns the
-// surviving operand's NodeID directly only for "identity" cases where
+// surviving operand's InstId directly only for "identity" cases where
 // the result IS an existing node.
 //
-// Returns (NodeID, true) for cases like (+ x 0) → x; the caller redirects.
-func tryIdentity(f *ir.Function, n *ir.Node) (ir.NodeID, bool) {
+// Returns (InstId, true) for cases like (+ x 0) → x; the caller redirects.
+func tryIdentity(f *ir.Function, n *ir.Inst) (ir.InstId, bool) {
 	switch n.Op {
 	case ir.OpAdd:
 		if id, ok := matchAddIdentity(f, n); ok {
@@ -610,7 +610,7 @@ func tryIdentity(f *ir.Function, n *ir.Node) (ir.NodeID, bool) {
 }
 
 // matchAddIdentity: (+ x 0) → x, (+ 0 x) → x.
-func matchAddIdentity(f *ir.Function, n *ir.Node) (ir.NodeID, bool) {
+func matchAddIdentity(f *ir.Function, n *ir.Inst) (ir.InstId, bool) {
 	if len(n.Refs) != 2 {
 		return 0, false
 	}
@@ -624,8 +624,8 @@ func matchAddIdentity(f *ir.Function, n *ir.Node) (ir.NodeID, bool) {
 }
 
 // matchSubIdentity: (- x 0) → x. (Note: (- 0 x) does NOT simplify to x;
-// it would be -x. Same NodeID is unsafe.)
-func matchSubIdentity(f *ir.Function, n *ir.Node) (ir.NodeID, bool) {
+// it would be -x. Same InstId is unsafe.)
+func matchSubIdentity(f *ir.Function, n *ir.Inst) (ir.InstId, bool) {
 	if len(n.Refs) != 2 {
 		return 0, false
 	}
@@ -633,9 +633,9 @@ func matchSubIdentity(f *ir.Function, n *ir.Node) (ir.NodeID, bool) {
 		return n.Refs[0], true
 	}
 	// (- x x) → 0 is handled by primitive fold when both args are equal
-	// Const nodes; structural equality (same NodeID) is also a match.
+	// Const nodes; structural equality (same InstId) is also a match.
 	if n.Refs[0] == n.Refs[1] {
-		// Emit a Const 0; can't return an existing NodeID for "zero".
+		// Emit a Const 0; can't return an existing InstId for "zero".
 		// Let primitive fold handle this via redirectTo+inline Const?
 		// Simpler: skip here, let CSE merge duplicate computes and then
 		// primitive fold catches (- C C). For now, return false.
@@ -647,7 +647,7 @@ func matchSubIdentity(f *ir.Function, n *ir.Node) (ir.NodeID, bool) {
 // matchMulIdentity: (* x 1) → x, (* 1 x) → x.
 // (* x 0) → 0 needs a new Const node; handled by tryFold's primitive
 // path when both args are Const. Identity-only here.
-func matchMulIdentity(f *ir.Function, n *ir.Node) (ir.NodeID, bool) {
+func matchMulIdentity(f *ir.Function, n *ir.Inst) (ir.InstId, bool) {
 	if len(n.Refs) != 2 {
 		return 0, false
 	}
@@ -663,7 +663,7 @@ func matchMulIdentity(f *ir.Function, n *ir.Node) (ir.NodeID, bool) {
 // isNumericZero reports whether nid resolves to a Const node whose
 // value is numerically zero (any of Int(0), Float(0.0), or a BigInt
 // holding zero).
-func isNumericZero(f *ir.Function, nid ir.NodeID) bool {
+func isNumericZero(f *ir.Function, nid ir.InstId) bool {
 	v, ok := constValueOf(f, nid)
 	if !ok {
 		return false
@@ -681,7 +681,7 @@ func isNumericZero(f *ir.Function, nid ir.NodeID) bool {
 
 // isNumericOne reports whether nid resolves to a Const whose value
 // is numerically one.
-func isNumericOne(f *ir.Function, nid ir.NodeID) bool {
+func isNumericOne(f *ir.Function, nid ir.InstId) bool {
 	v, ok := constValueOf(f, nid)
 	if !ok {
 		return false
