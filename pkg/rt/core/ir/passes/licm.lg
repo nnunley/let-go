@@ -217,10 +217,21 @@
                                   :branch
                                     (let [new-args (conj (vec (ir/branch-target-args src-aux))
                                                          prev-param)
-                                          new-bt   (ir/new-branch-target
-                                                     (ir/branch-target-target src-aux)
-                                                     new-args)]
-                                      (ir/set-aux! f src-term new-bt))
+                                          target   (ir/branch-target-target src-aux)
+                                          new-bt   (ir/new-branch-target target new-args)]
+                                      (ir/set-aux! f src-term new-bt)
+                                      ;; If target (e.g. an inner loop header) has other
+                                      ;; preds in the loop body, they must also pass the
+                                      ;; new param so arg/parity stays balanced.
+                                      (doseq [other-pred (ir/block-preds target f)
+                                              :when (and (body other-pred)
+                                                         (not= other-pred src-blk))]
+                                        (let [term (ir/block-term other-pred f)
+                                              aux  (ir/aux term f)]
+                                          (when (= :branch (ir/op term f))
+                                            (ir/set-aux! f term
+                                              (ir/new-branch-target target
+                                                (conj (vec (ir/branch-target-args aux)) new-pid)))))))
                                   :branch-if
                                     ;; Symmetric invariant (validate.lg's
                                     ;; check-branch-if-symmetric-args!): both
