@@ -2,7 +2,7 @@
 ;;
 ;; `(optimize-fn f)` runs the enabled Lisp passes in a sensible order:
 ;;   1. constfold   — fold Const arithmetic, identities, canonicalize
-;;   2. cse         — same-block common-subexpression elimination
+;;   2. cse         — same-block pure-op common-subexpression elimination
 ;;   3. constfold   — again; CSE may expose new fold opportunities
 ;;   4. licm        — hoist loop-invariant Insts to pre-headers
 ;;   5. constfold   — again; LICM may rearrange uses such that more
@@ -12,8 +12,9 @@
 ;; Build (Phase 3) now emits BlockArg params proactively for all cross-block
 ;; captures, eliminating the need for post-pass threading.
 ;;
-;; CSE remains intentionally narrow: same-block pure ops plus stable
-;; LoadVar values only. Dominance/GVN-style cross-block CSE is deferred.
+;; CSE Phase 1 is intentionally narrow: same-block pure ops only. LoadVar
+;; flow analysis is deferred to Phase 2; dominance/GVN-style cross-block
+;; CSE is deferred to Phase 3. Do not add generic thread_block_args here.
 ;;
 ;; Returns f (same object — passes mutate in place).
 
@@ -29,7 +30,6 @@
 (defn optimize-fn [f]
   (validate-fn! f "build")
   (constfold f)           (validate-fn! f "constfold-1")
-  ;; LICM is now re-enabled with full threadHoistedThroughHeader ported.
   (cse f)                 (validate-fn! f "cse")
   (constfold f)           (validate-fn! f "constfold-2")
   (licm f)                (validate-fn! f "licm")
