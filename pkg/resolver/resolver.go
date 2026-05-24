@@ -203,6 +203,8 @@ func (r *NSResolver) loadEmbedded(name string) *vm.Namespace {
 		src = rt.ZipSrc
 	case "data":
 		src = rt.DataSrc
+	case "ir.data":
+		src = rt.IRDataSrc
 	case "check":
 		src = rt.CheckSrc
 	case "term":
