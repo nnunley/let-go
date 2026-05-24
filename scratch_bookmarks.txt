@@ -1,0 +1,31 @@
+canonicalize: rztuttxm b2f4eb19 feat(ir/passes): commutative canonicalization in ConstFold
+closure-build: mkylowmu bf538d12 feat(ir): closure support — OpMakeClosure, OpLoadClosed, OpPushClosed
+constfold-numeric: lrttrmzx c911bd85 feat(ir/passes): ConstFold over full numeric tower + builtin calls + algebraic i...
+cse-flow: ynwoxxro 0d703287 feat(ir/passes): flow-analysis-based CSE for non-pure LoadVar
+dominance: pmmosrpl 756cd2cb feat(ir): dominance analysis pass
+examples-ys-on-let-go: swroqyqw bd0b5277 examples: ys-on-let-go — run yamlscript compiled output on let-go
+fix-recur-slot-count: vssoxstu/1 ea0cd23b (divergent) fix(compiler): recurCompiler must count slots, not distinct nam...
+fix-underscore-params: plnmvwqv/1 330a6732 (divergent) fix(compiler): allow multiple _ parameters in fn arg lists
+fix/ns-loader-require-semantics: pxonokpz bf741058 runtime: enforce ns load semantics for require and qualified lookup
+  @origin (ahead by 1 commits, behind by 1 commits): pxonokpz/1 e7957662 (hidden) runtime: enforce ns load semantics ...
+  @upstream (ahead by 2 commits, behind by 1 commits): pxonokpz/2 baba711c (hidden) runtime: enforce ns load semantic...
+fix/pod-shutdown-without-op: pommkulx 16753331 fix(pods): kill pods without shutdown op
+format-go-files: rmnynxoy/1 b49da7fc (divergent) style: apply gofmt -s and golangci-lint fixes to existing files
+fusion-load-arg-const: ouvytvzx/2 23d146ad (divergent) (empty) feat(vm): fused OP_LOAD_ARG_CONST opcode + compiler pe...
+gogen-v1: ytxlultr/1 496c6396 (divergent) feat(gogen): Clojure-to-Go AST codegen library
+gogen-v2 (deleted)
+  @origin: qxqwqzrk/1 d067f872 (hidden) feat(gogen): add func-lit, switch, composite-lit
+in-ns-auto-refer: qswllntv/1 555e7731 (divergent) fix: RegisterNS auto-refers CoreNS so (in-ns 'foo) preserves core m...
+ir-tooling: mxpovksx 5476bea6 feat(ir): SSA IR + optimization passes (ConstFold, CSE, DCE, block-DCE) + IR tooling
+lgb-merge-driver: msmnxlos/1 36ce55d6 (divergent) chore(tooling): git merge driver for core_compiled.lgb
+licm: mxomvpou 8f47d53c feat(ir/passes): LICM — loop-invariant code motion
+lisp-ir-pipeline: lunutrls 72a1ea3d resolver: source-load all ir.* namespaces in bootstrap mode
+  @origin (ahead by 1 commits, behind by 4 commits): lunutrls/5 5cece356 (hidden) resolver: source-load all ir.* name...
+main: qzqqttzy ecc05849 resolver: deps.edn source path support + runtime deps-paths fn (#83)
+  @origin (behind by 3 commits): sqxyqyml 5f7556c6 fix(compiler): in-ns compile-time hook must not trigger ns reload ...
+mandelbrot-e2e: ukmplulx 3e651dcf test(ir): e2e mandelbrot Build+Lower coverage
+migrate-homebrew-cask: nytxxnlo 2adde8c9 Migrate Homebrew release to casks
+numeric-handlers-integration: xprolult c4c0103a (conflict) feat(vm): type-specialized numeric handlers via gogen
+prek-hooks: lznnwxxw/1 5e2f0985 (divergent) ci: add prek-compatible pre-commit hooks mirroring CI
+  @upstream (not created yet)
+... (22 lines truncated)
