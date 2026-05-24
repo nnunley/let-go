@@ -46,7 +46,8 @@ func ensureLoader() {
 		}
 		for _, ns := range []string{
 			"ir.zipper", "ir.passes",
-			"ir.passes.dce", "ir.passes.constfold", "ir.passes.cse",
+			"ir.passes.dce", "ir.passes.constfold",
+			"ir.passes.mutability", "ir.passes.cse",
 			"ir.passes.licm",
 			"ir.passes.pipeline", "ir.dump", "ir.dominance"} {
 			if res.Load(ns) == nil {

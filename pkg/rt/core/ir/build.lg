@@ -51,6 +51,20 @@
         top (nth stack top-idx)]
     (reset! ctx (assoc s :locals (assoc stack top-idx (assoc top sym inst-id))))))
 
+(defn rebind-local! [ctx sym inst-id]
+  "Find the nearest frame containing sym and update it there;
+   if not found anywhere, bind in the top frame."
+  (let [s @ctx
+        stack (get s :locals)]
+    (loop [i (dec (count stack))]
+      (cond
+        (< i 0) (bind-local! ctx sym inst-id)
+        (contains? (nth stack i) sym)
+          (let [updated-frame (assoc (nth stack i) sym inst-id)
+                new-stack (assoc stack i updated-frame)]
+            (reset! ctx (assoc s :locals new-stack)))
+        :else (recur (dec i))))))
+
 (defn lookup-local [ctx sym]
   (loop [i (dec (count (get @ctx :locals)))]
     (cond
@@ -63,6 +77,18 @@
   "Flatten the locals scope stack into a single sym→InstId map.
    Inner scopes shadow outer."
   (reduce merge {} (get @ctx :locals)))
+(defn- binding-syms [sym]
+  (cond
+    (symbol? sym) #{sym}
+    (vector? sym) (into #{} (filter symbol? (flatten sym)))
+    (map? sym)    (let [keys-syms (when-let [ks (:keys sym)]
+                                    (into #{} (map (fn [x] (if (keyword? x) (symbol (name x)) x)) ks)))
+                        strs-syms (when-let [ss (:strs sym)]
+                                    (into #{} (map symbol ss)))
+                        as-sym (when-let [as (:as sym)] #{as})
+                        other-syms (into #{} (filter symbol? (keys (dissoc sym :keys :strs :as :or))))]
+                    (into #{} (concat keys-syms strs-syms as-sym other-syms)))
+    :else #{}))
 
 (defn captures-of [form known-locals]
   "Return the SET of symbols `form` references that are bound in
@@ -90,18 +116,24 @@
         (cond
           (= head 'quote) #{}
           (= head 'fn*)   #{}
-          (= head 'let)
+          (or (= head 'let) (= head 'let*) (= head 'loop) (= head 'loop*))
             (let [bindings (nth form 1)
                   pairs    (partition 2 bindings)
-                  [used new-locals]
-                    (reduce (fn [[caps locs] [sym init]]
-                              [(into caps (captures-of init locs))
-                               (conj locs sym)])
-                            [#{} known-locals]
-                            pairs)
-                  body     (drop 2 form)
-                  body-captures (into #{} (mapcat #(captures-of % new-locals) body))
-                  let-bound-set (into #{} (map first pairs))]
+                  acc-res  (reduce (fn [acc pair]
+                                     (let [caps (nth acc 0)
+                                           shadowed (nth acc 1)
+                                           sym  (first pair)
+                                           init (second pair)
+                                           locs (difference known-locals shadowed)]
+                                       [(into caps (captures-of init locs))
+                                        (into shadowed (binding-syms sym))]))
+                                   [#{} #{}]
+                                   pairs)
+                  used          (nth acc-res 0)
+                  let-bound-set (nth acc-res 1)
+                  new-locals    (into known-locals let-bound-set)
+                  body          (drop 2 form)
+                  body-captures (into #{} (mapcat #(captures-of % new-locals) body))]
               (into used (difference body-captures let-bound-set)))
           :else
             (into #{} (mapcat #(captures-of % known-locals) form))))
@@ -121,20 +153,42 @@
 
 (defn terminated? [v] (= v TERMINATED))
 
+(defn- add-inst! [ctx block op-kw refs aux]
+  (let [f (ctx-fn ctx)
+        nid (ir/add-inst f block op-kw refs aux)
+        si (get @ctx :source-info)]
+    (when si
+      (ir/add-source-info! f nid si))
+    nid))
+
+(defn- add-terminator! [ctx bid op-kw refs aux]
+  (let [f (ctx-fn ctx)
+        nid (ir/add-terminator! f bid op-kw refs aux)
+        si (get @ctx :source-info)]
+    (when si
+      (ir/add-source-info! f nid si))
+    nid))
+
 (defn build-form [form ctx]
   "Build IR for one form; return the InstId of its result value."
-  (cond
-    (nil?     form)  (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] nil)
-    (integer? form)  (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] form)
-    (float?   form)  (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] form)
-    (string?  form)  (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] form)
-    (keyword? form)  (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] form)
-    (boolean? form)  (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] form)
-    (symbol?  form)  (build-symbol form ctx)
-    (vector?  form)  (build-vector form ctx)
-    (map?     form)  (build-map form ctx)
-    (list?    form)  (build-list form ctx)
-    :else (throw (str "build-form: unrecognized form " form))))
+  (let [si (ir/form-source-info form)
+        old-si (get @ctx :source-info)
+        _ (when si (swap! ctx assoc :source-info si))
+        nid (cond
+              (nil?     form)  (add-inst! ctx (ctx-block ctx) :const [] nil)
+              (integer? form)  (add-inst! ctx (ctx-block ctx) :const [] form)
+              (float?   form)  (add-inst! ctx (ctx-block ctx) :const [] form)
+              (string?  form)  (add-inst! ctx (ctx-block ctx) :const [] form)
+              (keyword? form)  (add-inst! ctx (ctx-block ctx) :const [] form)
+              (boolean? form)  (add-inst! ctx (ctx-block ctx) :const [] form)
+              (symbol?  form)  (build-symbol form ctx)
+              (vector?  form)  (build-vector form ctx)
+              (map?     form)  (build-map form ctx)
+              (list?    form)  (build-list form ctx)
+              :else (throw (str "build-form: unrecognized form " form)))]
+    (when si
+      (swap! ctx assoc :source-info old-si))
+    nid))
 
 (defn build-symbol [sym ctx]
   (let [local (lookup-local ctx sym)]
@@ -143,9 +197,7 @@
       (let [v (resolve sym)]
         (if (nil? v)
           (throw (str "ir/build: unresolved symbol " sym))
-          (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :load-var [] v))))))
-
-;; --- free-variable analysis for closures --------------------------------
+          (add-inst! ctx (ctx-block ctx) :load-var [] v))))))
 
 (defn- free-vars [form bound]
   "Return the set of symbols in form that are not bound locally.
@@ -167,13 +219,13 @@
                               (conj (into #{} args-vec) name-sym)
                               (into #{} args-vec))]
               (into #{} (mapcat #(free-vars % arg-set) body)))
-          (or (= head 'let) (= head 'let*))
+          (or (= head 'let) (= head 'let*) (= head 'loop) (= head 'loop*))
             (let [bindings (nth form 1)
                   pairs    (partition 2 bindings)
                   [used new-bound]
                     (reduce (fn [[caps b] [sym init]]
                               [(into caps (free-vars init b))
-                               (conj b sym)])
+                               (into b (binding-syms sym))])
                             [#{} bound]
                             pairs)
                   body     (drop 2 form)]
@@ -236,14 +288,27 @@
       (pop-locals! ctx)
       threaded)))
 
+(defn- build-call-with-head [fn-id args-forms ctx]
+  "Helper to build call arguments while threading the function head ID
+   through any potential branch joins inside build-args. Prevents cross-block refs."
+  (push-locals! ctx)
+  (let [head-sym (gensym "head__")
+        _        (bind-local! ctx head-sym fn-id)
+        arg-ids  (build-args args-forms ctx)
+        threaded (lookup-local ctx head-sym)]
+    (pop-locals! ctx)
+    (add-inst! ctx (ctx-block ctx) :call
+                 (vec (cons threaded arg-ids))
+                 (count arg-ids))))
+
 (defn fold-binary-chain [op-kw args ctx]
   "Build a left-leaning chain of binary Insts: [a b c d] → (((a op b) op c) op d)."
-  (loop [acc (ir/add-inst (ctx-fn ctx) (ctx-block ctx)
+  (loop [acc (add-inst! ctx (ctx-block ctx)
                           op-kw [(nth args 0) (nth args 1)] nil)
          i   2]
     (if (>= i (count args))
       acc
-      (recur (ir/add-inst (ctx-fn ctx) (ctx-block ctx)
+      (recur (add-inst! ctx (ctx-block ctx)
                           op-kw [acc (nth args i)] nil)
              (inc i)))))
 
@@ -254,11 +319,11 @@
       ;; Unary: (- x) → (sub 0 x); (+ x), (* x), comparisons → identity.
       (= 1 (count args))
         (if (= op-kw :sub)
-          (let [zero-id (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] 0)]
-            (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :sub [zero-id (nth args 0)] nil))
+          (let [zero-id (add-inst! ctx (ctx-block ctx) :const [] 0)]
+            (add-inst! ctx (ctx-block ctx) :sub [zero-id (nth args 0)] nil))
           (nth args 0))
       (= 2 (count args))
-        (ir/add-inst (ctx-fn ctx) (ctx-block ctx) op-kw args nil)
+        (add-inst! ctx (ctx-block ctx) op-kw args nil)
       :else
         (fold-binary-chain op-kw args ctx))))
 
@@ -269,11 +334,8 @@
   (let [head    (first form)
         fn-id   (if (symbol? head)
                   (build-symbol head ctx)
-                  (build-form head ctx))
-        arg-ids (build-args (rest form) ctx)]
-    (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :call
-                 (vec (cons fn-id arg-ids))
-                 (count arg-ids))))
+                  (build-form head ctx))]
+    (build-call-with-head fn-id (rest form) ctx)))
 
 (defn build-list [form ctx]
   (let [head    (first form)
@@ -285,37 +347,32 @@
       (= head 'do)    (build-do form ctx)
       (= head 'quote) (build-quote form ctx)
       (= head 'loop)  (build-loop form ctx)
+      (= head 'loop*) (build-loop form ctx)
       (= head 'recur) (build-recur form ctx)
       (= head 'fn*)   (build-fn* form ctx)
       builtin         (build-builtin-op builtin form ctx)
       ;; Keywords, numbers, strings are callable (implement IFn in Clojure).
       ;; Treat them as Const values, build as generic call with const head.
       (or (keyword? head) (number? head) (string? head))
-        (let [fn-id   (build-form head ctx)
-              arg-ids (build-args (rest form) ctx)]
-          (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :call
-                       (vec (cons fn-id arg-ids))
-                       (count arg-ids)))
+        (let [fn-id   (build-form head ctx)]
+          (build-call-with-head fn-id (rest form) ctx))
       :else           (build-call form ctx))))
 
 ;; --- special forms -------------------------------------------------------
 
 (defn build-quote [form ctx]
   "(quote x) emits a Const Inst with x as the Aux."
-  (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] (nth form 1)))
+  (add-inst! ctx (ctx-block ctx) :const [] (nth form 1)))
 
 (defn build-vector [form ctx]
   "[a b c] → (vector a b c). Empty vector → Const literal.
    Each element flows through build-form so sub-expressions IR-build
    correctly; build-args handles cross-block threading."
   (if (zero? (count form))
-    (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] form)
-    (let [fn-id   (ir/add-inst (ctx-fn ctx) (ctx-block ctx)
-                               :load-var [] (resolve 'vector))
-          arg-ids (build-args (seq form) ctx)]
-      (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :call
-                   (vec (cons fn-id arg-ids))
-                   (count arg-ids)))))
+    (add-inst! ctx (ctx-block ctx) :const [] form)
+    (let [fn-id   (add-inst! ctx (ctx-block ctx)
+                               :load-var [] (resolve 'vector))]
+      (build-call-with-head fn-id (seq form) ctx))))
 
 (defn is-literal? [v]
   "Check if v is a literal value (not a symbol or expression)."
@@ -325,7 +382,7 @@
   "{:a 1 :b 2} → Const if all keys/values are literals; else (array-map :a 1 :b 2).
    array-map preserves insertion order. Empty map → Const literal."
   (if (zero? (count form))
-    (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] form)
+    (add-inst! ctx (ctx-block ctx) :const [] form)
     ;; Check if all keys and values are literals (not symbols/expressions).
     ;; If so, emit as a constant.
     (let [all-const? (every? (fn [e]
@@ -333,13 +390,10 @@
                              (seq form))
           pairs      (vec (mapcat (fn [e] [(first e) (second e)]) (seq form)))]
       (if all-const?
-        (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] form)
-        (let [fn-id   (ir/add-inst (ctx-fn ctx) (ctx-block ctx)
-                                   :load-var [] (resolve 'array-map))
-              arg-ids (build-args pairs ctx)]
-          (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :call
-                       (vec (cons fn-id arg-ids))
-                       (count arg-ids)))))))
+        (add-inst! ctx (ctx-block ctx) :const [] form)
+        (let [fn-id   (add-inst! ctx (ctx-block ctx)
+                                   :load-var [] (resolve 'array-map))]
+          (build-call-with-head fn-id pairs ctx))))))
 
 (defn build-do [form ctx]
   "do evaluates each form sequentially; result is the last one."
@@ -395,7 +449,7 @@
    TERMINATED without entering the join block."
   (let [test-form (nth form 1)
         then-form (nth form 2)
-        else-form (nth form 3)
+        else-form (nth form 3 nil)
         f         (ctx-fn ctx)
         entry-blk (ctx-block ctx)
         ;; Pass ALL current locals as branch-target args (symmetric).
@@ -422,12 +476,12 @@
         ;; Emit one BlockArg per capture in each child block — identical
         ;; shape across both branches.
         then-params (mapv (fn [_sym]
-                            (let [pid (ir/add-inst f then-blk :block-arg [] (count (ir/block-params then-blk f)))]
+                            (let [pid (add-inst! ctx then-blk :block-arg [] (count (ir/block-params then-blk f)))]
                               (ir/add-block-param! f then-blk pid)
                               pid))
                           all-caps)
         else-params (mapv (fn [_sym]
-                            (let [pid (ir/add-inst f else-blk :block-arg [] (count (ir/block-params else-blk f)))]
+                            (let [pid (add-inst! ctx else-blk :block-arg [] (count (ir/block-params else-blk f)))]
                               (ir/add-block-param! f else-blk pid)
                               pid))
                           all-caps)
@@ -445,7 +499,7 @@
         true-bt   (ir/new-branch-target then-blk bt-args)
         false-bt  (ir/new-branch-target else-blk bt-args)
         cond-aux  (ir/new-cond-target true-bt false-bt)
-        _         (ir/add-terminator! f entry-blk :branch-if [test-id] cond-aux)
+        _         (add-terminator! ctx entry-blk :branch-if [test-id] cond-aux)
         _         (ir/add-pred! f then-blk entry-blk)
         _         (ir/add-pred! f else-blk entry-blk)]
     ;; --- then branch ---
@@ -462,7 +516,7 @@
                           (mapv (fn [sym] (lookup-local ctx sym)) all-caps))]
       (pop-locals! ctx)
       (when-not then-terminated?
-        (ir/add-terminator! f then-end :branch []
+        (add-terminator! ctx then-end :branch []
                             (ir/new-branch-target join-blk
                                                   (vec (cons then-val then-cap-vals))))
         (ir/add-pred! f join-blk then-end))
@@ -478,7 +532,7 @@
                             (mapv (fn [sym] (lookup-local ctx sym)) all-caps))]
         (pop-locals! ctx)
         (when-not else-terminated?
-          (ir/add-terminator! f else-end :branch []
+          (add-terminator! ctx else-end :branch []
                               (ir/new-branch-target join-blk
                                                     (vec (cons else-val else-cap-vals))))
           (ir/add-pred! f join-blk else-end))
@@ -488,17 +542,17 @@
           :else
             (do (ctx-set-block! ctx join-blk)
                 ;; Slot 0 = merged result. Slots 1..N = re-bound captures.
-                (let [merged (ir/add-inst f join-blk :block-arg [] 0)
+                (let [merged (add-inst! ctx join-blk :block-arg [] 0)
                       _      (ir/add-block-param! f join-blk merged)
                       cap-pids (mapv (fn [i]
-                                       (let [pid (ir/add-inst f join-blk :block-arg [] (inc i))]
+                                       (let [pid (add-inst! ctx join-blk :block-arg [] (inc i))]
                                          (ir/add-block-param! f join-blk pid)
                                          pid))
                                      (range (count all-caps)))]
                   ;; Rebind in the CURRENT top scope so future lookup-local
                   ;; in this lexical scope finds the join's BlockArg first.
                   (doseq [[sym pid] (map vector all-caps cap-pids)]
-                    (bind-local! ctx sym pid))
+                    (rebind-local! ctx sym pid))
                   merged)))))))
 
 (defn build-loop [form ctx]
@@ -507,11 +561,13 @@
    captures, and builds the body in that header. Recur branches back
    to the header carrying new loop-var values and self-passing the
    captures (loop-invariant pass-through)."
-  (let [bindings (nth form 1)
-        body     (drop 2 form)
-        f        (ctx-fn ctx)
-        entry    (ctx-block ctx)
-        n-slots  (/ (count bindings) 2)
+  (let [bindings   (nth form 1)
+        body       (drop 2 form)
+        f          (ctx-fn ctx)
+        entry      (ctx-block ctx)
+        n-slots    (/ (count bindings) 2)
+        old-header (get @ctx :loop-header)
+        old-caps   (get @ctx :loop-capture-syms)
         ;; Loop pushes its own scope AFTER this captures pass, so the
         ;; parent locals don't include the loop vars yet — captures-of
         ;; over `known` naturally excludes them.
@@ -524,13 +580,13 @@
         header    (ir/add-block f)
         ;; Emit BlockArg + Param for each loop-var slot (positions 0..n-slots-1).
         loop-param-ids (mapv (fn [i]
-                               (let [pid (ir/add-inst f header :block-arg [] i)]
+                               (let [pid (add-inst! ctx header :block-arg [] i)]
                                  (ir/add-block-param! f header pid)
                                  pid))
                              (range n-slots))
         ;; Emit BlockArg + Param for each capture (positions n-slots..n-slots+n-caps-1).
         cap-param-ids  (mapv (fn [i]
-                               (let [pid (ir/add-inst f header :block-arg [] (+ n-slots i))]
+                               (let [pid (add-inst! ctx header :block-arg [] (+ n-slots i))]
                                  (ir/add-block-param! f header pid)
                                  pid))
                              (range n-caps))
@@ -541,7 +597,7 @@
         cap-vals  (mapv (fn [sym] (lookup-local ctx sym)) body-caps)
         ;; Branch entry → header(init-vals ++ cap-vals).
         bt        (ir/new-branch-target header (vec (concat init-vals cap-vals)))
-        _         (ir/add-terminator! f entry :branch [] bt)
+        _         (add-terminator! ctx entry :branch [] bt)
         _         (ir/add-pred! f header entry)]
     ;; Switch to header.
     (ctx-set-block! ctx header)
@@ -552,7 +608,7 @@
     ;; Bind each capture symbol to its capture-param. (So body code
     ;; references the header's BlockArg, not the parent's InstId.)
     (doseq [[sym pid] (map vector body-caps cap-param-ids)]
-      (bind-local! ctx sym pid))
+      (rebind-local! ctx sym pid))
     ;; Stash :loop-header + capture metadata so recur can find them.
     ;; We stash the SYMBOLS (not their header-param InstIds) so that
     ;; build-recur looks them up against the CURRENT lexical scope —
@@ -568,17 +624,18 @@
                      (recur (rest fs) (build-form (first fs) ctx))
                      last-val))]
       (pop-locals! ctx)
-      (reset! ctx (-> @ctx (dissoc :loop-header) (dissoc :loop-capture-syms)))
+      (reset! ctx (-> @ctx
+                      (assoc :loop-header old-header)
+                      (assoc :loop-capture-syms old-caps)))
       result)))
 
 (defn build-recur [form ctx]
   "recur emits Branch back to the current loop header with new loop-var
-   args plus the captures (which loop-invariantly pass-through via the
+   args plus the captures (which loop-invariynchronously pass-through via the
    header's own cap-param-ids)."
   (let [header (get @ctx :loop-header)
         _      (when (nil? header) (throw "recur outside of loop"))
         f      (ctx-fn ctx)
-        cur    (ctx-block ctx)
         ;; Symbols stashed by build-loop. Look each up against the
         ;; current lexical scope so we find the *enclosing block's*
         ;; binding (e.g., an if-else's BlockArg after build-if rebound
@@ -588,8 +645,9 @@
         ;; Build new loop-var values.
         loop-arg-ids (mapv (fn [a] (build-form a ctx)) (rest form))
         all-args (vec (concat loop-arg-ids cap-vals))
-        bt       (ir/new-branch-target header all-args)]
-    (ir/add-terminator! f cur :branch [] bt)
+        bt       (ir/new-branch-target header all-args)
+        cur      (ctx-block ctx)]
+    (add-terminator! ctx cur :branch [] bt)
     (ir/add-pred! f header cur)
     TERMINATED))
 
@@ -605,13 +663,13 @@
     (loop [i 0]
       (when (< i (count args-vec))
         (bind-local! inner-ctx (nth args-vec i)
-                     (ir/add-inst inner entry :load-arg [] i))
+                     (add-inst! inner-ctx entry :load-arg [] i))
         (recur (inc i))))
     ;; Bind captures as LoadClosed in inner function entry block.
     (loop [i 0]
       (when (< i (count captures))
         (bind-local! inner-ctx (nth captures i)
-                     (ir/add-inst inner entry :load-closed [] i))
+                     (add-inst! inner-ctx entry :load-closed [] i))
         (recur (inc i))))
     ;; Build body in inner context
     (let [last-val (loop [fs body-forms last-id nil]
@@ -620,16 +678,16 @@
                        last-id))
           final-blk (ctx-block inner-ctx)]
       (when-not (terminated? last-val)
-        (ir/add-terminator! inner final-blk :return
+        (add-terminator! inner-ctx final-blk :return
                             (if (nil? last-val) [] [last-val])
                             nil)))
     ;; Lower inner function to bytecode chunk, wrap in *Func
     (let [chunk  (lower/lower inner)
           fn-val (chunk->fn (count args-vec) false chunk)]
       ;; In outer context: emit const, make-closure, push captures
-      (let [const-id (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] fn-val)
+      (let [const-id (add-inst! ctx (ctx-block ctx) :const [] fn-val)
             closure-id (if (seq captures)
-                         (ir/add-inst (ctx-fn ctx) (ctx-block ctx)
+                         (add-inst! ctx (ctx-block ctx)
                                       :make-closure [const-id] nil)
                          const-id)]
         (loop [cls closure-id
@@ -637,7 +695,7 @@
           (if (seq caps)
             (let [cap-sym (first caps)
                   cap-val (build-symbol cap-sym ctx)
-                  push-id (ir/add-inst (ctx-fn ctx) (ctx-block ctx)
+                  push-id (add-inst! ctx (ctx-block ctx)
                                        :push-closed [cls cap-val] nil)]
               (recur push-id (rest caps)))
             cls))))))
@@ -661,56 +719,84 @@
         (build-single-fn* name-sym args-vec body-forms ctx))
       ;; Multi-arity path: build each arity standalone at compile time.
       (let [arities rest-forms
-            all-caps (atom #{})]
-        ;; First pass: detect captures (not yet supported in multi-arity)
-        (doseq [arity-form arities]
-          (let [args-vec   (first arity-form)
-                body-forms (rest arity-form)
-                arg-set    (into #{} args-vec)
-                frees      (free-vars (cons 'do body-forms) arg-set)]
-            (swap! all-caps into (filter #(lookup-local ctx %) frees))))
-        (when (seq @all-caps)
-          (throw "ir/build: multi-arity fn* with captures is not yet supported"))
-        ;; No captures: build each arity as a standalone inner function at
-        ;; compile time, wrap, combine into a multi-arity value, and emit a
-        ;; single :const in the outer context.
-        (let [real-fns (mapv (fn [arity-form]
-                               (let [args-vec   (first arity-form)
-                                     body-forms (rest arity-form)
-                                     inner      (ir/new-fn (str name-sym) (count args-vec) false)
-                                     entry      (ir/entry-block inner)
-                                     inner-ctx2 (new-context inner)]
-                                 (loop [i 0]
-                                   (when (< i (count args-vec))
-                                     (bind-local! inner-ctx2 (nth args-vec i)
-                                                  (ir/add-inst inner entry :load-arg [] i))
-                                     (recur (inc i))))
-                                 (let [last-val (loop [fs body-forms last-id nil]
-                                                  (if (seq fs)
-                                                    (recur (rest fs) (build-form (first fs) inner-ctx2))
-                                                    last-id))
-                                       final-blk (ctx-block inner-ctx2)]
-                                   (when-not (terminated? last-val)
-                                     (ir/add-terminator! inner final-blk :return
-                                                         (if (nil? last-val) [] [last-val])
-                                                         nil)))
-                                 (let [chunk (lower/lower inner)]
-                                   (chunk->fn (count args-vec) false chunk))))
-                             arities)
-              multi-val (make-multi-arity (apply list real-fns))]
-          (ir/add-inst (ctx-fn ctx) (ctx-block ctx) :const [] multi-val))))))
+            all-frees (loop [as arities acc #{}]
+                        (if (seq as)
+                          (let [arity-form (first as)
+                                args-vec   (first arity-form)
+                                body-forms (rest arity-form)
+                                arg-set    (into #{} args-vec)
+                                frees      (free-vars (cons 'do body-forms) arg-set)]
+                            (recur (rest as) (into acc frees)))
+                          acc))
+            captures  (vec (filter #(lookup-local ctx %) all-frees))
+            real-fns (mapv (fn [arity-form]
+                             (let [args-vec   (first arity-form)
+                                   body-forms (rest arity-form)
+                                   inner      (ir/new-fn (str name-sym) (count args-vec) false)
+                                   entry      (ir/entry-block inner)
+                                   inner-ctx2 (new-context inner)]
+                               ;; Bind args as LoadArg in inner function
+                               (loop [i 0]
+                                 (when (< i (count args-vec))
+                                   (bind-local! inner-ctx2 (nth args-vec i)
+                                                (add-inst! inner-ctx2 entry :load-arg [] i))
+                                   (recur (inc i))))
+                               ;; Bind captures as LoadClosed in inner function entry block.
+                               (loop [i 0]
+                                 (when (< i (count captures))
+                                   (bind-local! inner-ctx2 (nth captures i)
+                                                (add-inst! inner-ctx2 entry :load-closed [] i))
+                                   (recur (inc i))))
+                               ;; Build body
+                               (let [last-val (loop [fs body-forms last-id nil]
+                                                (if (seq fs)
+                                                  (recur (rest fs) (build-form (first fs) inner-ctx2))
+                                                  last-id))
+                                     final-blk (ctx-block inner-ctx2)]
+                                 (when-not (terminated? last-val)
+                                   (add-terminator! inner-ctx2 final-blk :return
+                                                       (if (nil? last-val) [] [last-val])
+                                                       nil)))
+                               (let [chunk (lower/lower inner)]
+                                 (chunk->fn (count args-vec) false chunk))))
+                           arities)
+            multi-val (make-multi-arity (apply list real-fns))
+            const-id (add-inst! ctx (ctx-block ctx) :const [] multi-val)
+            closure-id (if (seq captures)
+                         (add-inst! ctx (ctx-block ctx)
+                                      :make-closure [const-id] nil)
+                         const-id)]
+        (loop [cls closure-id
+               caps captures]
+          (if (seq caps)
+            (let [cap-sym (first caps)
+                  cap-val (build-symbol cap-sym ctx)
+                  push-id (add-inst! ctx (ctx-block ctx)
+                                       :push-closed [cls cap-val] nil)]
+              (recur push-id (rest caps)))
+            cls))))))
 
 ;; --- entry point ---------------------------------------------------------
 
+(defn parse-defn-args-body [form]
+  (let [x2 (nth form 2 nil)
+        x3 (nth form 3 nil)
+        x4 (nth form 4 nil)]
+    (cond
+      (string? x2)
+        (if (map? x3)
+          [x4 (drop 5 form)]
+          [x3 (drop 4 form)])
+      (map? x2)
+        [x3 (drop 4 form)]
+      :else
+        [x2 (drop 3 form)])))
+
 (defn build-fn [defn-form]
   "Build an IR Function from a (defn name [args] body...) form.
-   Handles optional docstring. Returns a boxed *ir.Function.
-   Body's last form's value is Returned."
+   Returns a boxed *ir.Function. Body's last form's value is Returned."
   (let [name-sym   (nth defn-form 1)
-        maybe-doc  (nth defn-form 2)
-        has-doc?   (string? maybe-doc)
-        args-vec   (if has-doc? (nth defn-form 3) maybe-doc)
-        body-forms (drop (if has-doc? 4 3) defn-form)
+        [args-vec body-forms] (parse-defn-args-body defn-form)
         arity      (count args-vec)
         f          (ir/new-fn (str name-sym) arity false)
         entry-blk  (ir/entry-block f)
@@ -718,7 +804,7 @@
     ;; Bind each f arg to a LoadArg Inst.
     (loop [i 0]
       (when (< i arity)
-        (let [arg-id (ir/add-inst f entry-blk :load-arg [] i)]
+        (let [arg-id (add-inst! ctx entry-blk :load-arg [] i)]
           (bind-local! ctx (nth args-vec i) arg-id)
           (recur (inc i)))))
     ;; Build the body — capture the last result.
@@ -731,7 +817,7 @@
       ;; terminated the current block (e.g. its tail is a recur, or
       ;; an if where both branches recur).
       (when-not (terminated? last-val)
-        (ir/add-terminator! f final-blk :return
+        (add-terminator! ctx final-blk :return
                             (if (nil? last-val) [] [last-val])
                             nil)))
     f))

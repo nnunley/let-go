@@ -1,19 +1,14 @@
-;; IR-pipeline coverage stress test against xsofy.
+;; IR-pipeline coverage stress test against let-go core and compiler code.
 ;;
-;; For each listed xsofy .lg file, read its top-level (defn ...) forms
-;; and attempt (ir.passes.pipeline/compile-form form). Print per-file
-;; pass rate and a tally of the most common error-message prefixes.
-;;
-;; Skips cleanly if xsofy isn't checked out at the expected path.
-;;
-;; Usage:  LG_SOURCE_PATHS=/path/to/xsofy go run . scripts/ir-stress.lg
+;; Usage: rtk go run . scripts/ir-stress-core.lg
 (require 'ir.data)
 (require 'ir.passes.pipeline)
 
-(def xsofy-dir "/Users/ndn/development/xsofy/xsofy/")
-(def files ["util.lg" "combat.lg" "ai.lg" "items.lg" "fov.lg" "fire.lg"
-            "effects.lg" "bestiary.lg" "input.lg" "lighting.lg"
-            "runes.lg" "sound.lg" "det.lg" "entities.lg" "check.lg" "terrain.lg"])
+(def core-dir "/Users/ndn/development/let-go/pkg/rt/core/")
+(def files ["core.lg" "data.lg" "string.lg" "walk.lg" "set.lg" "zip.lg" "pprint.lg" "test.lg" "check.lg" "io.lg" "edn.lg" "async.lg"
+            "ir/data.lg" "ir/data_generated.lg" "ir/zipper.lg" "ir/dominance.lg" "ir/build.lg" "ir/validate.lg" "ir/dump.lg" "ir/passes.lg"
+            "ir/passes/constfold.lg" "ir/passes/cse.lg" "ir/passes/dce.lg" "ir/passes/licm.lg" "ir/passes/typeinfer.lg" "ir/passes/pipeline.lg"
+            "ir/lower.lg"])
 
 (defn read-all [path]
   (try
@@ -87,14 +82,14 @@
            :classes (take 8 (reverse (sort-by val classes)))})))))
 
 (defn run []
-  (println "=== IR-pipeline coverage stress test ===")
-  (let [results (mapv (fn [f] (stress-file (str xsofy-dir f))) files)
+  (println "=== IR-pipeline coverage stress test (Core & Compiler) ===")
+  (let [results (mapv (fn [f] (stress-file (str core-dir f))) files)
         total   (reduce + 0 (map (fn [r] (or (:total r) 0)) results))
         oks     (reduce + 0 (map (fn [r] (or (:ok r) 0)) results))
         agg     (apply merge-with + (map (fn [r] (into {} (:classes r))) results))]
     (doseq [r results]
       (if (:read-error r)
-        (println (str (:file r) ": READ-ERROR (xsofy not checked out?)"))
+        (println (str (:file r) ": READ-ERROR (file missing?)"))
         (println (str (:file r) ": " (:ok r) "/" (:total r) " ok"))))
     (println (str "\nTOTAL: " oks "/" total " ok"))
     (println "\nTop error classes:")

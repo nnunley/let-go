@@ -1,0 +1,24 @@
+(require 'ir.data)
+(require 'ir.passes.pipeline)
+
+(def path "/Users/ndn/development/xsofy/xsofy/fire.lg")
+
+(let [src-form (try
+                 (let [src (slurp path)]
+                   (read-string (str "(do " src ")")))
+                 (catch e nil))]
+  (if (nil? src-form)
+    (println "Could not read file")
+    (let [ns-form (first (filter (fn [f] (and (seq? f) (= (first f) 'ns))) (rest src-form)))
+          ns-name (second ns-form)
+          _       (when ns-name (require ns-name) (in-ns ns-name))
+          defns (filter (fn [f] (and (seq? f) (or (= (first f) 'defn) (= (first f) 'defn-)))) (rest src-form))]
+      (doseq [d defns]
+        (let [name (nth d 1)
+              res (try
+                    (ir.passes.pipeline/compile-form d)
+                    :ok
+                    (catch e (str e)))]
+          (when (not= res :ok)
+            (println (str "Function: " name))
+            (println (str "  Error: " res))))))))

@@ -303,10 +303,7 @@ func releaseFrame(f *Frame) {
 
 func NewFrame(code *CodeChunk, args []Value) *Frame {
 	f := acquireFrame()
-	needed := code.maxStack
-	if needed < 4 {
-		needed = 4
-	}
+	needed := max(code.maxStack, 4)
 	if cap(f.stack) >= needed {
 		f.stack = f.stack[:needed]
 	} else {
@@ -796,7 +793,10 @@ func (f *Frame) Run() (Value, error) {
 			if idx < 0 {
 				return NIL, NewExecutionError("MAKE_CLOSURE stack underflow")
 			}
-			fn, ok := f.stack[idx].(*Func)
+			type closureCreator interface {
+				MakeClosure() Fn
+			}
+			fn, ok := f.stack[idx].(closureCreator)
 			if !ok {
 				return NIL, NewExecutionError("MAKE_CLOSURE invalid func on stack")
 			}

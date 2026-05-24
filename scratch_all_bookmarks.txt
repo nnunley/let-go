@@ -1,0 +1,144 @@
+canonicalize: rztuttxm b2f4eb19 feat(ir/passes): commutative canonicalization in ConstFold
+  @git: rztuttxm b2f4eb19 feat(ir/passes): commutative canonicalization in ConstFold
+  @origin: rztuttxm b2f4eb19 feat(ir/passes): commutative canonicalization in ConstFold
+closure-build: mkylowmu bf538d12 feat(ir): closure support — OpMakeClosure, OpLoadClosed, OpPushClosed
+  @git: mkylowmu bf538d12 feat(ir): closure support — OpMakeClosure, OpLoadClosed, OpPushClosed
+  @origin: mkylowmu bf538d12 feat(ir): closure support — OpMakeClosure, OpLoadClosed, OpPushClosed
+constfold-numeric: lrttrmzx c911bd85 feat(ir/passes): ConstFold over full numeric tower + builtin calls + algebraic identities
+  @git: lrttrmzx c911bd85 feat(ir/passes): ConstFold over full numeric tower + builtin calls + algebraic identities
+  @origin: lrttrmzx c911bd85 feat(ir/passes): ConstFold over full numeric tower + builtin calls + algebraic identities
+cse-flow: ynwoxxro 0d703287 feat(ir/passes): flow-analysis-based CSE for non-pure LoadVar
+  @git: ynwoxxro 0d703287 feat(ir/passes): flow-analysis-based CSE for non-pure LoadVar
+  @origin: ynwoxxro 0d703287 feat(ir/passes): flow-analysis-based CSE for non-pure LoadVar
+delint-golangci-v2@upstream: vovrnxtx 57ee8403 chore: migrate golangci-lint to v2
+disasm-primitives@origin: msmnxlos/0 5a63816d (divergent) chore(tooling): git merge driver for core_compiled.lgb
+dominance: pmmosrpl 756cd2cb feat(ir): dominance analysis pass
+  @git: pmmosrpl 756cd2cb feat(ir): dominance analysis pass
+  @origin: pmmosrpl 756cd2cb feat(ir): dominance analysis pass
+examples-ys-on-let-go: swroqyqw bd0b5277 examples: ys-on-let-go — run yamlscript compiled output on let-go
+  @git: swroqyqw bd0b5277 examples: ys-on-let-go — run yamlscript compiled output on let-go
+  @origin: swroqyqw bd0b5277 examples: ys-on-let-go — run yamlscript compiled output on let-go
+fast-yet@origin: rztuttxm b2f4eb19 feat(ir/passes): commutative canonicalization in ConstFold
+fix-in-ns-double-load@origin: oykokowk 96b49de0 fix(compiler): in-ns compile-time hook must not trigger ns reload
+fix-recur-slot-count: vssoxstu/1 ea0cd23b (divergent) fix(compiler): recurCompiler must count slots, not distinct names — fixes loop+shadow stack overflow
+  @git: vssoxstu/1 ea0cd23b (divergent) fix(compiler): recurCompiler must count slots, not distinct names — fixes loop+shadow stack overflow
+  @origin: vssoxstu/1 ea0cd23b (divergent) fix(compiler): recurCompiler must count slots, not distinct names — fixes loop+shadow stack overflow
+fix-underscore-params: plnmvwqv/1 330a6732 (divergent) fix(compiler): allow multiple _ parameters in fn arg lists
+  @git: plnmvwqv/1 330a6732 (divergent) fix(compiler): allow multiple _ parameters in fn arg lists
+  @origin: plnmvwqv/1 330a6732 (divergent) fix(compiler): allow multiple _ parameters in fn arg lists
+fix/ns-loader-require-semantics: pxonokpz bf741058 runtime: enforce ns load semantics for require and qualified lookup
+  @git: pxonokpz bf741058 runtime: enforce ns load semantics for require and qualified lookup
+  @origin (ahead by 1 commits, behind by 1 commits): pxonokpz/1 e7957662 (hidden) runtime: enforce ns load semantics for require and qualified lookup
+  @upstream (ahead by 2 commits, behind by 1 commits): pxonokpz/2 baba711c (hidden) runtime: enforce ns load semantics for require and qualified lookup
+fix/pod-shutdown-without-op: pommkulx 16753331 fix(pods): kill pods without shutdown op
+  @git: pommkulx 16753331 fix(pods): kill pods without shutdown op
+  @upstream: pommkulx 16753331 fix(pods): kill pods without shutdown op
+fix/pod-shutdown-without-op@origin: pommkulx 16753331 fix(pods): kill pods without shutdown op
+fix/source-bootstrap-lgbgen@upstream: uuxxkszm e3faecd0 fix: bootstrap stdlib lgb generation from source
+format-go-files: rmnynxoy/1 b49da7fc (divergent) style: apply gofmt -s and golangci-lint fixes to existing files
+  @git: rmnynxoy/1 b49da7fc (divergent) style: apply gofmt -s and golangci-lint fixes to existing files
+  @origin: rmnynxoy/1 b49da7fc (divergent) style: apply gofmt -s and golangci-lint fixes to existing files
+fusion-load-arg-const: ouvytvzx/2 23d146ad (divergent) (empty) feat(vm): fused OP_LOAD_ARG_CONST opcode + compiler peephole
+  @git: ouvytvzx/2 23d146ad (divergent) (empty) feat(vm): fused OP_LOAD_ARG_CONST opcode + compiler peephole
+  @origin: ouvytvzx/2 23d146ad (divergent) (empty) feat(vm): fused OP_LOAD_ARG_CONST opcode + compiler peephole
+fusion-spike@origin: ntvmntol c7724e7d (empty) wip: prototype OP_SUB_ARG_CONST fusion
+gogen-v1: ytxlultr/1 496c6396 (divergent) feat(gogen): Clojure-to-Go AST codegen library
+  @git: ytxlultr/1 496c6396 (divergent) feat(gogen): Clojure-to-Go AST codegen library
+  @origin: ytxlultr/1 496c6396 (divergent) feat(gogen): Clojure-to-Go AST codegen library
+gogen-v2 (deleted)
+  @origin: qxqwqzrk/1 d067f872 (hidden) feat(gogen): add func-lit, switch, composite-lit
+in-ns-auto-refer: qswllntv/1 555e7731 (divergent) fix: RegisterNS auto-refers CoreNS so (in-ns 'foo) preserves core macros
+  @git: qswllntv/1 555e7731 (divergent) fix: RegisterNS auto-refers CoreNS so (in-ns 'foo) preserves core macros
+  @origin: qswllntv/1 555e7731 (divergent) fix: RegisterNS auto-refers CoreNS so (in-ns 'foo) preserves core macros
+ir-tooling: mxpovksx 5476bea6 feat(ir): SSA IR + optimization passes (ConstFold, CSE, DCE, block-DCE) + IR tooling
+  @git: mxpovksx 5476bea6 feat(ir): SSA IR + optimization passes (ConstFold, CSE, DCE, block-DCE) + IR tooling
+  @origin: mxpovksx 5476bea6 feat(ir): SSA IR + optimization passes (ConstFold, CSE, DCE, block-DCE) + IR tooling
+jj-pre-push-keep-CbgxgYEveq@origin: mkylowmu bf538d12 feat(ir): closure support — OpMakeClosure, OpLoadClosed, OpPushClosed
+lazy-seq-pred@origin: knolmyuo/5 3a83a160 (hidden) feat: add lazy-seq? predicate; throw on lazy-seq of non-seq value
+lgb-merge-driver: msmnxlos/1 36ce55d6 (divergent) chore(tooling): git merge driver for core_compiled.lgb
+  @git: msmnxlos/1 36ce55d6 (divergent) chore(tooling): git merge driver for core_compiled.lgb
+  @origin: msmnxlos/1 36ce55d6 (divergent) chore(tooling): git merge driver for core_compiled.lgb
+lgb-v2@origin: tlsxlunz/3 920534fe (hidden) feat(bytecode): LGB v2 format with per-tag versioning and batch decode
+licm: mxomvpou 8f47d53c feat(ir/passes): LICM — loop-invariant code motion
+  @git: mxomvpou 8f47d53c feat(ir/passes): LICM — loop-invariant code motion
+  @origin: mxomvpou 8f47d53c feat(ir/passes): LICM — loop-invariant code motion
+lisp-ir-pipeline: lunutrls 72a1ea3d resolver: source-load all ir.* namespaces in bootstrap mode
+  @git: lunutrls 72a1ea3d resolver: source-load all ir.* namespaces in bootstrap mode
+  @origin (ahead by 1 commits, behind by 4 commits): lunutrls/5 5cece356 (hidden) resolver: source-load all ir.* namespaces in bootstrap mode
+main: qzqqttzy ecc05849 resolver: deps.edn source path support + runtime deps-paths fn (#83)
+  @git: qzqqttzy ecc05849 resolver: deps.edn source path support + runtime deps-paths fn (#83)
+  @origin (behind by 3 commits): sqxyqyml 5f7556c6 fix(compiler): in-ns compile-time hook must not trigger ns reload (#78)
+  @upstream: qzqqttzy ecc05849 resolver: deps.edn source path support + runtime deps-paths fn (#83)
+mandelbrot-e2e: ukmplulx 3e651dcf test(ir): e2e mandelbrot Build+Lower coverage
+  @git: ukmplulx 3e651dcf test(ir): e2e mandelbrot Build+Lower coverage
+  @origin: ukmplulx 3e651dcf test(ir): e2e mandelbrot Build+Lower coverage
+migrate-homebrew-cask: nytxxnlo 2adde8c9 Migrate Homebrew release to casks
+  @git: nytxxnlo 2adde8c9 Migrate Homebrew release to casks
+  @upstream: nytxxnlo 2adde8c9 Migrate Homebrew release to casks
+migrate-homebrew-cask@origin: nytxxnlo 2adde8c9 Migrate Homebrew release to casks
+numeric-handlers-integration: xprolult c4c0103a (conflict) feat(vm): type-specialized numeric handlers via gogen
+  @git: xprolult c4c0103a (conflict) feat(vm): type-specialized numeric handlers via gogen
+opcode-profiler@origin: msmnxlos/0 5a63816d (divergent) chore(tooling): git merge driver for core_compiled.lgb
+prek-hooks: lznnwxxw/1 5e2f0985 (divergent) ci: add prek-compatible pre-commit hooks mirroring CI
+  @git: lznnwxxw/1 5e2f0985 (divergent) ci: add prek-compatible pre-commit hooks mirroring CI
+  @origin: lznnwxxw/1 5e2f0985 (divergent) ci: add prek-compatible pre-commit hooks mirroring CI
+  @upstream (not created yet)
+push-kukrypsuwkqv: kukrypsu/1 76775f07 (divergent) feat: add check ns for property testing
+  @git: kukrypsu/1 76775f07 (divergent) feat: add check ns for property testing
+  @origin: kukrypsu/1 76775f07 (divergent) feat: add check ns for property testing
+push-ursnztlvuoul: ursnztlv/1 7895e49d (divergent) fix: normalize empty Sequable in lazy-seq
+  @git: ursnztlv/1 7895e49d (divergent) fix: normalize empty Sequable in lazy-seq
+  @origin: ursnztlv/1 7895e49d (divergent) fix: normalize empty Sequable in lazy-seq
+push-xmxpzzlnozqy (deleted)
+  @origin: tlzpzkzp/1 9ff0a7af (hidden) feat: preserve laziness via vm.Iter + SeqToSlice + reflect bridge
+reader-hex-bigint-promote: npzkmkwp/1 28191d3e (divergent) feat(reader): promote overflowing hex literals to BigInt — Clojure parity
+  @git: npzkmkwp/1 28191d3e (divergent) feat(reader): promote overflowing hex literals to BigInt — Clojure parity
+  @origin: npzkmkwp/1 28191d3e (divergent) feat(reader): promote overflowing hex literals to BigInt — Clojure parity
+release-brews-arm-linux: puqzwryw e6d902ca Make float to int conversion deterministic
+  @git: puqzwryw e6d902ca Make float to int conversion deterministic
+  @upstream: puqzwryw e6d902ca Make float to int conversion deterministic
+release-brews-arm-linux@origin: puqzwryw e6d902ca Make float to int conversion deterministic
+release-workflow-tag-branch-fix: luypwpzo 724c8e20 Fix Homebrew formula PR merge branch
+  @git: luypwpzo 724c8e20 Fix Homebrew formula PR merge branch
+  @upstream: luypwpzo 724c8e20 Fix Homebrew formula PR merge branch
+release-workflow-tag-branch-fix@origin: luypwpzo 724c8e20 Fix Homebrew formula PR merge branch
+resolver-deps-edn: yyyrutqy 1ad74af8 resolver: deps.edn source path support + runtime deps-paths fn
+  @git: yyyrutqy 1ad74af8 resolver: deps.edn source path support + runtime deps-paths fn
+  @origin: yyyrutqy 1ad74af8 resolver: deps.edn source path support + runtime deps-paths fn
+sem-ir-phase-1: rlwqynuy 5f4bca93 refactor(ir): rename Node → Inst, NodeID → InstId for Carbon SemIR alignment
+  @git: rlwqynuy 5f4bca93 refactor(ir): rename Node → Inst, NodeID → InstId for Carbon SemIR alignment
+  @origin (ahead by 1 commits, behind by 1 commits): rlwqynuy/1 29188e8a (hidden) refactor(ir): rename Node → Inst, NodeID → InstId for Carbon SemIR alignment
+shadow-warn-refer-only@origin: qtsxomyk/0 7127bf5e (divergent) fix(vm): warn-on-core-shadow only fires when name is referred in
+ssa-ir@origin: mxpovksx 5476bea6 feat(ir): SSA IR + optimization passes (ConstFold, CSE, DCE, block-DCE) + IR tooling
+ssa-spike@origin: msmnxlos/0 5a63816d (divergent) chore(tooling): git merge driver for core_compiled.lgb
+string-getbytes-interop: yrsxzxop/1 2b7a3b72 (divergent) feat(vm/string): add .getBytes interop — returns UTF-8 byte-array
+  @git: yrsxzxop/1 2b7a3b72 (divergent) feat(vm/string): add .getBytes interop — returns UTF-8 byte-array
+  @origin: yrsxzxop/1 2b7a3b72 (divergent) feat(vm/string): add .getBytes interop — returns UTF-8 byte-array
+sweep/feature/http-request-function: wwulwmxv 5079ac30 sweep: "Add example program demonstrating use of the `req
+  @git: wwulwmxv 5079ac30 sweep: "Add example program demonstrating use of the `req
+  @upstream: wwulwmxv 5079ac30 sweep: "Add example program demonstrating use of the `req
+sweep/feature/http-request-function@origin: wwulwmxv 5079ac30 sweep: "Add example program demonstrating use of the `req
+sweep/reader-unit-tests: vppszoqy 7c3b8d33 Update pkg/compiler/reader_test.go
+  @git: vppszoqy 7c3b8d33 Update pkg/compiler/reader_test.go
+  @upstream: vppszoqy 7c3b8d33 Update pkg/compiler/reader_test.go
+sweep/reader-unit-tests@origin: vppszoqy 7c3b8d33 Update pkg/compiler/reader_test.go
+tco: skpwoozz 7d846abf Add factorial example
+  @git: skpwoozz 7d846abf Add factorial example
+  @upstream: skpwoozz 7d846abf Add factorial example
+tco@origin: skpwoozz 7d846abf Add factorial example
+unchecked-arith-clj-parity (deleted)
+  @origin: wwqsmqlv/3 6d4403ae (hidden) feat(core): add unchecked-add/-subtract/-multiply/-negate/-inc/-dec/-divide-int for Clojure parity
+unchecked-coercion-family: vvsotoqs/1 04ac66c9 (divergent) feat(rt): unchecked-* coercion family — long/int/short/byte/char/float/double
+  @git: vvsotoqs/1 04ac66c9 (divergent) feat(rt): unchecked-* coercion family — long/int/short/byte/char/float/double
+  @origin: vvsotoqs/1 04ac66c9 (divergent) feat(rt): unchecked-* coercion family — long/int/short/byte/char/float/double
+walk-fix-map-entry: msqrrwvl/1 51a83b24 (divergent) fix: walk handles maps via map-entry? predicate
+  @git: msqrrwvl/1 51a83b24 (divergent) fix: walk handles maps via map-entry? predicate
+  @origin: msqrrwvl/1 51a83b24 (divergent) fix: walk handles maps via map-entry? predicate
+walk-keywordize-stringify: rrtxvwum/1 e6b81cb0 (divergent) feat: add walk/keywordize-keys and walk/stringify-keys
+  @git: rrtxvwum/1 e6b81cb0 (divergent) feat: add walk/keywordize-keys and walk/stringify-keys
+  @origin: rrtxvwum/1 e6b81cb0 (divergent) feat: add walk/keywordize-keys and walk/stringify-keys
+warn-on-core-shadow: rrypqomq/1 af5e3e30 (divergent) feat(vm): warn on def shadowing clojure.core — Clojure JVM parity
+  @git: rrypqomq/1 af5e3e30 (divergent) feat(vm): warn on def shadowing clojure.core — Clojure JVM parity
+  @origin: rrypqomq/1 af5e3e30 (divergent) feat(vm): warn on def shadowing clojure.core — Clojure JVM parity
+worktree-agent-aceca910fe3c30553 (deleted)
+  @origin: msmnxlos/0 5a63816d (divergent) chore(tooling): git merge driver for core_compiled.lgb
