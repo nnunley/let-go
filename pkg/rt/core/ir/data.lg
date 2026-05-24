@@ -62,7 +62,7 @@
          :entry     0
          :consts    (ir/new-consts)
          :insts     []
-         :blocks    [{:id 0 :params [] :insts [] :preds [] :term 0}]
+         :blocks    [{:id 0 :params [] :insts [] :preds [] :term nil}]
          :uses-cache nil
          :uses-dirty? true}))
 
@@ -127,7 +127,7 @@
   "Allocate a new empty Block; return its ID."
   (let [bid (count (:blocks @f))]
     (swap! f update :blocks conj
-           {:id bid :params [] :insts [] :preds [] :term 0})
+           {:id bid :params [] :insts [] :preds [] :term nil})
     bid))
 
 (defn add-inst [f block op-kw refs aux]

@@ -44,5 +44,7 @@ var IRLowerSrc string
 //go:embed core/ir/data.lg
 var IRDataSrc string
 
+// force-rebuild-marker-1
+//
 //go:embed core/ir/validate.lg
 var IRValidateSrc string

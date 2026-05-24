@@ -6373,6 +6373,25 @@ func installLangNS() {
 	})
 	ns.Def("chunk->fn", chunkToFnFn)
 
+	// make-multi-arity — combine a list of *Func/*Closure values into a
+	// *MultiArityFn. Used by the IR pipeline to assemble multi-arity
+	// functions at compile time.
+	makeMultiArityFn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.NIL, fmt.Errorf("make-multi-arity expects 1 arg (list of functions)")
+		}
+		list, ok := vs[0].(*vm.List)
+		if !ok {
+			return vm.NIL, fmt.Errorf("make-multi-arity expects a list, got %s", vs[0].Type().Name())
+		}
+		var fns []vm.Value
+		for e := vm.Seq(list); e != nil; e = e.Next() {
+			fns = append(fns, e.First())
+		}
+		return vm.MakeMultiArity(fns)
+	})
+	ns.Def("make-multi-arity", makeMultiArityFn)
+
 	// sleep — sleep for n milliseconds
 	sleepf, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
