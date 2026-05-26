@@ -119,8 +119,26 @@
 (defn- value-name [nid]
   (str "v" nid))
 
+;; Munge Lisp-idiomatic identifier chars to a valid Go identifier.
+;; Convention is Clojure-flavoured: each unsafe char maps to a distinct
+;; underscore-bracketed token so munged names don't collide with
+;; legitimately-named Go identifiers like `foo_bang` already in source.
+(def go-name-munge-map
+  {\-  "_"
+   \!  "_BANG_"
+   \?  "_QMARK_"
+   \*  "_STAR_"
+   \/  "_SLASH_"
+   \+  "_PLUS_"
+   \=  "_EQ_"
+   \<  "_LT_"
+   \>  "_GT_"})
+
 (defn- go-name [s]
-  (apply str (map (fn [ch] (if (= ch \-) \_ ch)) s)))
+  (apply str
+         (map (fn [ch]
+                (or (get go-name-munge-map ch) ch))
+              s)))
 
 (defn- import-entry [path alias]
   {:path path :alias alias})
