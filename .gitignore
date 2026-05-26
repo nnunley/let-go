@@ -164,3 +164,6 @@ AGENTS.md
 # Local goreleaser / cross-build artifacts
 /dist/
 lg-baseline
+
+# AOT codegen tool — built ad-hoc, not checked in
+/lgbgen
