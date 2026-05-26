@@ -121,6 +121,26 @@
       :else
         (str ":other | " truncated))))
 
+(def per-fixture-timeout-ms
+  (let [v (System/getenv "LG_STRESS_TIMEOUT_MS")]
+    (if (and v (not= v "")) (parse-int v) 5000)))
+
+(defn try-with-timeout [thunk timeout-ms]
+  "Run thunk in a goroutine; return its result (or thrown exception) within
+   timeout-ms, else :stress/timeout. On timeout the goroutine keeps running
+   in the background — acceptable for a one-shot harness, do not reuse in
+   long-lived processes."
+  (let [f (future* thunk)
+        deadline-ns (+ (System/nanoTime) (* timeout-ms 1000000))]
+    (loop []
+      (cond
+        (realized? f)
+          (try (deref f) (catch e e))
+        (> (System/nanoTime) deadline-ns)
+          :stress/timeout
+        :else
+          (do (sleep 10) (recur))))))
+
 (defn try-lower-go [form]
   "Run form through the AOT path: build IR + lower to Go (bridge mode).
    Returns :ok | :fallback-<reason> | error-classification.
@@ -149,15 +169,17 @@
   "Per-fixture measurement, dispatched by measurement-mode.
    :ir-compile  — eval via *ir-compile* (xsofy: measures user-load behavior)
    :lower-go    — lower IR to Go via :bridge mode (ir-stack: AOT pass rate)
+   Wrapped in per-fixture-timeout-ms; runaway fixtures return :stress/timeout.
    Returns [result-key time-ms]."
-  (let [t0 (System/nanoTime)
-        result (if (= measurement-mode :lower-go)
-                 (try-lower-go form)
-                 (try
-                   (binding [*ir-compile* true]
-                     (eval form))
-                   :ok
-                   (catch e (classify-error e))))
+  (let [thunk (if (= measurement-mode :lower-go)
+                (fn [] (try-lower-go form))
+                (fn [] (try
+                         (binding [*ir-compile* true]
+                           (eval form))
+                         :ok
+                         (catch e (classify-error e)))))
+        t0 (System/nanoTime)
+        result (try-with-timeout thunk per-fixture-timeout-ms)
         t1 (System/nanoTime)
         ms (double (/ (- t1 t0) 1000000.0))]
     [result ms]))
