@@ -303,10 +303,7 @@ func releaseFrame(f *Frame) {
 
 func NewFrame(code *CodeChunk, args []Value) *Frame {
 	f := acquireFrame()
-	needed := code.maxStack
-	if needed < 4 {
-		needed = 4
-	}
+	needed := max(code.maxStack, 4)
 	if cap(f.stack) >= needed {
 		f.stack = f.stack[:needed]
 	} else {
@@ -873,7 +870,7 @@ func (f *Frame) Run() (Value, error) {
 			}
 			f.sp -= n
 
-			fn, err := makeMultiArity(fns)
+			fn, err := MakeMultiArity(fns)
 			if err != nil {
 				return NIL, NewExecutionError("MAKE_MULTI_ARITY failed").Wrap(err)
 			}

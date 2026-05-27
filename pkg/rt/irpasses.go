@@ -41,8 +41,13 @@ var IRDominanceSrc string
 //go:embed core/ir/lower.lg
 var IRLowerSrc string
 
+//go:embed core/ir/lower_go.lg
+var IRLowerGoSrc string
+
 //go:embed core/ir/data.lg
 var IRDataSrc string
 
+// force-rebuild-marker-2
+//
 //go:embed core/ir/validate.lg
 var IRValidateSrc string

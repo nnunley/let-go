@@ -286,7 +286,7 @@ func cType(v vm.Value) (vm.Value, error) {
 	return box(expr), nil
 }
 
-// int-lit / float-lit / string-lit
+// int-lit / float-lit / string-lit / char-lit
 func cIntLit(v vm.Value) (vm.Value, error) {
 	switch x := v.(type) {
 	case vm.Int:
@@ -312,6 +312,14 @@ func cStringLit(v vm.Value) (vm.Value, error) {
 		return vm.NIL, err
 	}
 	return box(&ast.BasicLit{Kind: token.STRING, Value: strconv.Quote(s)}), nil
+}
+
+func cCharLit(v vm.Value) (vm.Value, error) {
+	switch x := v.(type) {
+	case vm.Char:
+		return box(&ast.BasicLit{Kind: token.CHAR, Value: strconv.QuoteRune(rune(x))}), nil
+	}
+	return vm.NIL, fmt.Errorf("gogen/char-lit: expected Char, got %s", v.Type().Name())
 }
 
 // binary: (gogen/binary "+" left right)
@@ -617,6 +625,38 @@ func cExprStmt(v vm.Value) (vm.Value, error) {
 	return box(&ast.ExprStmt{X: e}), nil
 }
 
+func cGotoStmt(nameV vm.Value) (vm.Value, error) {
+	name, err := asString(nameV)
+	if err != nil {
+		return vm.NIL, err
+	}
+	if !validIdent(name) {
+		return vm.NIL, fmt.Errorf("gogen/goto-stmt: %q is not a valid identifier", name)
+	}
+	return box(&ast.BranchStmt{Tok: token.GOTO, Label: ast.NewIdent(name)}), nil
+}
+
+func cLabelStmt(nameV, stmtV vm.Value) (vm.Value, error) {
+	name, err := asString(nameV)
+	if err != nil {
+		return vm.NIL, err
+	}
+	if !validIdent(name) {
+		return vm.NIL, fmt.Errorf("gogen/label-stmt: %q is not a valid identifier", name)
+	}
+	var stmt ast.Stmt
+	if stmtV == vm.NIL {
+		stmt = &ast.EmptyStmt{Implicit: true}
+	} else {
+		s, err := unboxStmt(stmtV)
+		if err != nil {
+			return vm.NIL, fmt.Errorf("gogen/label-stmt: stmt: %w", err)
+		}
+		stmt = s
+	}
+	return box(&ast.LabeledStmt{Label: ast.NewIdent(name), Stmt: stmt}), nil
+}
+
 // stmtSlice accepts either a single boxed stmt or a sequable of boxed stmts.
 func stmtSlice(v vm.Value) ([]ast.Stmt, error) {
 	if v == vm.NIL {
@@ -662,6 +702,26 @@ func cParam(nameV, typeV vm.Value) (vm.Value, error) {
 	return box(&ast.Field{
 		Names: []*ast.Ident{ast.NewIdent(name)},
 		Type:  t,
+	}), nil
+}
+
+// variadic-param: (gogen/variadic-param "name" type-expr)
+// Like param but wraps the type in *ast.Ellipsis for Go variadic params (e.g. args ...int).
+func cVariadicParam(nameV, typeV vm.Value) (vm.Value, error) {
+	name, err := asString(nameV)
+	if err != nil {
+		return vm.NIL, err
+	}
+	if !validIdent(name) {
+		return vm.NIL, fmt.Errorf("gogen/variadic-param: %q is not a valid identifier", name)
+	}
+	t, err := unboxExpr(typeV)
+	if err != nil {
+		return vm.NIL, err
+	}
+	return box(&ast.Field{
+		Names: []*ast.Ident{ast.NewIdent(name)},
+		Type:  &ast.Ellipsis{Elt: t},
 	}), nil
 }
 
@@ -1571,8 +1631,10 @@ func installGogenNS() {
 		mk(wrap1Named("int-lit", cIntLit)),
 		mk(wrap1Named("float-lit", cFloatLit)),
 		mk(wrap1Named("string-lit", cStringLit)),
+		mk(wrap1Named("char-lit", cCharLit)),
 		mk(wrap1Named("expr-stmt", cExprStmt)),
 		mk(wrap1Named("return-stmt", cReturn)),
+		mk(wrap1Named("goto-stmt", cGotoStmt)),
 
 		mk(wrap2Named("unary", cUnary)),
 		mk(wrap2Named("index", cIndex)),
@@ -1580,6 +1642,7 @@ func installGogenNS() {
 		mk(wrap2Named("call", cCall)),
 		mk(wrap2Named("cast", cCast)),
 		mk(wrap2Named("param", cParam)),
+		mk(wrap2Named("variadic-param", cVariadicParam)),
 		mk(wrap1Named("result", cResult)),
 		mk(wrap2Named("type-assert", cTypeAssert)),
 		mk(wrap2Named("kv-expr", cKVExpr)),
@@ -1590,6 +1653,7 @@ func installGogenNS() {
 		mk(wrap1Named("struct-type", cStructType)),
 		mk(wrap1Named("const-block", cConstBlock)),
 		mk(wrap2Named("with-doc", cWithDoc)),
+		mk(wrap2Named("label-stmt", cLabelStmt)),
 
 		mk(wrap3Named("binary", cBinary)),
 		mk(wrap3Named("assign", cAssign)),
