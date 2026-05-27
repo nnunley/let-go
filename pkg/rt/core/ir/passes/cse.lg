@@ -21,7 +21,7 @@
    :call (general effects), :branch / :branch-if / :return
    (terminators)."
   #{:const :load-arg :load-closed :block-arg
-    :add :sub :mul :lt :lte :gt :gte :eq :inc :dec})
+    :add :sub :mul :quot :lt :lte :gt :gte :eq :inc :dec})
 
 (defn- inst-key [nid f]
   "Hashable key identifying this Inst's value. Two Insts with the

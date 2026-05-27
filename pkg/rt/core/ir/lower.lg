@@ -326,7 +326,7 @@
           (bump-stack-sp! l 1)
           (bump-max-stack! l))
 
-      (:add :sub :mul :lt :lte :gt :gte :eq)
+      (:add :sub :mul :quot :lt :lte :gt :gte :eq)
         (do (emit! l nid op)
             (bump-stack-sp! l -1))  ; 2→1
 

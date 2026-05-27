@@ -333,7 +333,7 @@
 ;; --- Op-based inference ----------------------------------------------
 
 (def comparison-ops #{:lt :lte :gt :gte :eq})
-(def numeric-ops #{:add :sub :mul :inc :dec})
+(def numeric-ops #{:add :sub :mul :quot :inc :dec})
 
 (defn infer-one [inst f]
   (let [op   (ir/op inst f)

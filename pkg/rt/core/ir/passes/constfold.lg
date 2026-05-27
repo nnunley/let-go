@@ -22,7 +22,7 @@
 
 (def ^:private binop-fn
   "Map IR op-kw → Lisp arithmetic fn for primitive fold."
-  {:add + :sub - :mul * :lt < :lte <= :gt > :gte >= :eq =})
+  {:add + :sub - :mul * :quot quot :lt < :lte <= :gt > :gte >= :eq =})
 
 (def ^:private unary-fn
   {:inc inc :dec dec})

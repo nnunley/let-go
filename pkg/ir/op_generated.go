@@ -39,6 +39,7 @@ const (
 	OpAdd
 	OpSub
 	OpMul
+	OpQuot // integer quotient, truncated toward zero
 	OpLt
 	OpLte
 	OpGt
@@ -76,6 +77,7 @@ var opTable = [...]opInfo{
 	OpAdd:         {"Add", 2, 1, true, false},
 	OpSub:         {"Sub", 2, 1, true, false},
 	OpMul:         {"Mul", 2, 1, true, false},
+	OpQuot:        {"Quot", 2, 1, true, false},
 	OpLt:          {"Lt", 2, 1, true, false},
 	OpLte:         {"Lte", 2, 1, true, false},
 	OpGt:          {"Gt", 2, 1, true, false},
@@ -154,6 +156,8 @@ func irOpToBytecode(op Op) int32 {
 		return vm.OP_SUB
 	case OpMul:
 		return vm.OP_MUL
+	case OpQuot:
+		return vm.OP_QUOT
 	case OpLt:
 		return vm.OP_LT
 	case OpLte:
@@ -205,6 +209,8 @@ func bytecodeToIROp(op int32) Op {
 		return OpSub
 	case vm.OP_MUL:
 		return OpMul
+	case vm.OP_QUOT:
+		return OpQuot
 	case vm.OP_LT:
 		return OpLt
 	case vm.OP_LTE:
