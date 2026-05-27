@@ -94,36 +94,84 @@
     (subs m 0 n)))
 
 (defn classify-error [err-str]
-  "Classify error into bucket: :unresolved-symbol, :unsupported-special-form,
-   :destructure-rejection, or :other (with first 100 chars)."
+  "Classify error into a bucket keyword.
+
+   IMPORTANT: build.lg wraps unresolved-symbol errors as
+   'ir/build: unresolved symbol X' — including special-form heads like
+   set!/var/def/trace when build-list doesn't recognize them and they
+   fall through to build-call → build-symbol. So we must check the
+   special-form patterns BEFORE the generic 'unresolved symbol' regex,
+   otherwise set!/var/def/trace failures get pooled into a single
+   :unresolved-symbol bucket and the real cause is hidden.
+
+   For genuinely-unresolved symbols (not special forms), bucket by the
+   symbol name itself so we see one row per missing dep instead of
+   one giant pile."
   (let [m (str err-str)
         truncated (if (> (count m) 100) (str (subs m 0 100) "...") m)]
     (cond
-      ;; Unresolved symbol errors
-      (or (re-find #"unresolved symbol" m)
-          (re-find #"Can't resolve" m))
-        :unresolved-symbol
+      ;; Special-form heads first — these surface as 'unresolved symbol X'
+      ;; because build-list has no case for them and falls into build-call.
+      (re-find #"unresolved symbol set!" m)    :missing-form/set!
+      (re-find #"unresolved symbol var$" m)    :missing-form/var
+      (re-find #"unresolved symbol var " m)    :missing-form/var
+      (re-find #"unresolved symbol def$" m)    :missing-form/def
+      (re-find #"unresolved symbol def " m)    :missing-form/def
+      (re-find #"unresolved symbol try" m)     :missing-form/try
+      (re-find #"unresolved symbol trace" m)   :missing-form/trace
 
-      ;; Unsupported special forms
-      (or (re-find #"def\s" m)
-          (re-find #"set!" m)
-          (re-find #"\btry\b" m)
-          (re-find #"catch" m)
-          (re-find #"\bvar\b" m)
-          (re-find #"trace" m))
-        :unsupported-special-form
+      ;; Genuinely-unresolved symbol: bucket by the symbol name.
+      (re-find #"unresolved symbol" m)
+        (let [match (re-find #"unresolved symbol ([^\s,)]+)" m)]
+          (if match
+            (keyword "unresolved" (second match))
+            :unresolved-symbol))
+      (re-find #"Can't resolve" m)
+        (let [match (re-find #"Can't resolve ([^\s,)]+)" m)]
+          (if match
+            (keyword "unresolved" (second match))
+            :unresolved-symbol))
 
       ;; Destructuring issues
-      (re-find #"destructur" m)
-        :destructure-rejection
+      (re-find #"destructur" m)  :destructure-rejection
+
+      ;; Build-form errors with structural cause.
+      (re-find #"no :term" m)              :validate/no-term
+      (re-find #"cross-block ref" m)       :validate/cross-block-ref
+      (re-find #"is not a valid i" m)      :gogen/bad-identifier
+      (re-find #"nth index must be an integer" m) :gogen/nth-non-int
+      (re-find #"nested closure" m)        :lower-go/nested-closure
+      (re-find #"unrecognized form" m)     :build/unrecognized-form
 
       ;; Everything else: store the actual error message
-      :else
-        (str ":other | " truncated))))
+      :else (str ":other | " truncated))))
 
 (def per-fixture-timeout-ms
   (let [v (System/getenv "LG_STRESS_TIMEOUT_MS")]
     (if (and v (not= v "")) (parse-int v) 5000)))
+
+;; Number of passes: 2 = cold+warm (default; lets us measure cache effect),
+;; 1 = single pass (faster; sufficient for gap analysis where buckets are
+;; deterministic). Set LG_STRESS_PASSES=1 when iterating on the harness.
+(def stress-passes
+  (let [v (System/getenv "LG_STRESS_PASSES")]
+    (if (and v (not= v "")) (parse-int v) 2)))
+
+;; Optional per-defn analysis log. When LG_STRESS_LOG is set, each defn
+;; produces one TSV row: file<TAB>defn-name<TAB>bucket<TAB>time-ms.
+;; Buckets include :ok and the classify-error keys, so a single grep
+;; like `grep :missing-form ir-stress.log` answers "what's the gap?".
+(def log-path
+  (let [v (System/getenv "LG_STRESS_LOG")]
+    (if (and v (not= v "")) v nil)))
+
+(def log-entries (atom []))
+
+(defn- log! [file-path defn-name bucket time-ms]
+  (when log-path
+    (swap! log-entries conj
+      (str file-path "\t" defn-name "\t" bucket "\t"
+           (format "%.1f" time-ms) "\n"))))
 
 (defn try-with-timeout [thunk timeout-ms]
   "Run thunk in a goroutine; return its result (or thrown exception) within
@@ -152,11 +200,12 @@
           ;; Single-arity success
           (and (map? result) (= :lowered (:status result)))
             :ok
-          ;; Single-arity fallback — capture reason
+          ;; Single-arity fallback — route reason through classify-error so
+          ;; gogen/lower-go fallback reasons land in the same structural
+          ;; buckets as build-side throws (e.g. :gogen/bad-identifier rather
+          ;; than a long unique 'fallback | ...' string per defn).
           (and (map? result) (= :fallback (:status result)))
-            (let [reason (or (:reason result) "no-reason")
-                  short  (if (> (count reason) 60) (str (subs reason 0 60) "...") reason)]
-              (keyword (str "fallback | " short)))
+            (classify-error (or (:reason result) "no-reason"))
           ;; Multi-arity template: succeed if every arity lowered
           (and (map? result) (= :multi-fn-template (:kind result)))
             (if (every? (fn [e] (some? (:fn e))) (:fns result))
@@ -211,7 +260,12 @@
             (eval (list 'in-ns (list 'quote ns-sym)))
             (catch e nil)))
         (require-deps! ns-form-)
-        (let [results (mapv (fn [d] [(nth d 1) (try-ir-timed d)]) defns)
+        (let [results (mapv (fn [d]
+                              (let [name (nth d 1)
+                                    [r ms] (try-ir-timed d)]
+                                (log! path name r ms)
+                                [name [r ms]]))
+                            defns)
               ok     (count (filter (fn [[_ [r _]]] (= :ok r)) results))
               errs   (filter (fn [[_ [r _]]] (not= :ok r)) results)
               times  (map (fn [[_ [_ t]]] t) results)
@@ -249,14 +303,20 @@
         t1 (System/nanoTime)
         cold-ms (double (/ (- t1 t0) 1000000.0))]
 
-    ;; WARM pass: run again
-    (print (format "done in %.0f ms\nWarm pass (second run)... " cold-ms))
-    (let [t0 (System/nanoTime)
-          results2 (mapv (fn [f] (stress-file (str corpus-dir f))) files)
+    ;; WARM pass: run again (unless LG_STRESS_PASSES=1)
+    (let [skip-warm? (<= stress-passes 1)
+          _ (if skip-warm?
+              (print (format "done in %.0f ms\n" cold-ms))
+              (print (format "done in %.0f ms\nWarm pass (second run)... " cold-ms)))
+          t0 (System/nanoTime)
+          results2 (if skip-warm?
+                     []
+                     (mapv (fn [f] (stress-file (str corpus-dir f))) files))
           t1 (System/nanoTime)
           warm-ms (double (/ (- t1 t0) 1000000.0))]
 
-      (println (format "done in %.0f ms\n" warm-ms))
+      (when-not skip-warm?
+        (println (format "done in %.0f ms\n" warm-ms)))
 
       ;; Aggregate both passes
       (let [all-results (concat results results2)
@@ -293,6 +353,12 @@
         ;; Error buckets
         (println (str "\n=== Failure Buckets ==="))
         (doseq [[bucket count] (sort-by val (fn [a b] (compare b a)) all-errs)]
-          (println (format "  %-40s %3d" (str bucket) count)))))))
+          (println (format "  %-50s %3d" (str bucket) count)))
+
+        ;; Per-defn analysis log
+        (when log-path
+          (spit log-path (apply str @log-entries))
+          (println (str "\nPer-defn log: " log-path
+                        " (" (count @log-entries) " rows)")))))))
 
 (run)
