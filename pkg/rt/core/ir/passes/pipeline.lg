@@ -30,13 +30,13 @@
 
 (defn optimize-fn [f]
   (validate-fn! f "build")
-  (constfold f)           (validate-fn! f "constfold-1")
-  ;; LICM is now re-enabled with full threadHoistedThroughHeader ported.
-  (cse f)                 (validate-fn! f "cse")
-  (constfold f)           (validate-fn! f "constfold-2")
-  (licm f)                (validate-fn! f "licm")
-  (constfold f)           (validate-fn! f "constfold-3")
-  (dce f)                 (validate-fn! f "dce")
+  (typeinfer f)
+  (constfold f)        (validate-fn! f "constfold-1")
+  (cse f)              (validate-fn! f "cse")
+  (constfold f)        (validate-fn! f "constfold-2")
+  (licm f)             (validate-fn! f "licm")
+  (constfold f)        (validate-fn! f "constfold-3")
+  (dce f)              (validate-fn! f "dce")
   (typeinfer f)
   f)
 
