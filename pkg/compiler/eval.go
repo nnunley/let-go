@@ -146,6 +146,34 @@ func postCoreInit() {
 	rsVar := coreNS.LookupOrAdd(vm.Symbol("read-string"))
 	rsVar.(*vm.Var).SetRoot(readStringFn)
 
+	// read-all-string: read every top-level form from a string,
+	// return as a vector. Useful for scripts that need to walk a
+	// source file form-by-form (e.g. dependency analysis, codegen).
+	readAllStringFn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.NIL, nil
+		}
+		s, ok := vs[0].(vm.String)
+		if !ok {
+			return vm.NIL, nil
+		}
+		reader := NewLispReader(strings.NewReader(string(s)), "<read-all-string>")
+		forms := []vm.Value{}
+		for {
+			form, err := reader.Read()
+			if err != nil {
+				if strings.Contains(err.Error(), "EOF") {
+					break
+				}
+				return vm.NIL, err
+			}
+			forms = append(forms, form)
+		}
+		return vm.NewPersistentVector(forms), nil
+	})
+	rasVar := coreNS.LookupOrAdd(vm.Symbol("read-all-string"))
+	rasVar.(*vm.Var).SetRoot(readAllStringFn)
+
 	// load-string: compile and evaluate a string of code, returning the last value.
 	loadStringFn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
