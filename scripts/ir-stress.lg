@@ -336,7 +336,16 @@
                              (println (format "      typeinfer: %d analyze-block, %d type-join, %d normalize"
                                               (or (:analyze-block s) 0)
                                               (or (:type-join s) 0)
-                                              (or (:normalize s) 0)))))
+                                              (or (:normalize s) 0)))
+                             (println (format "      worklist: %d inst, %d param, %d changes, %d/%d enqueues"
+                                              (or (:process-inst s) 0)
+                                              (or (:process-param s) 0)
+                                              (or (:type-change s) 0)
+                                              (or (:enqueue s) 0)
+                                              (or (:enqueue-attempt s) 0)))
+                             (println (format "      timing: deps=%d ms, drain=%d ms"
+                                              (or (:deps-ms s) 0)
+                                              (or (:drain-ms s) 0)))))
                          (loop [iter 0]
                            (let [before (ir.passes.trace/live-inst-count ir-fn)]
                              (run-pass! "constfold" iter #(ir.passes.constfold/constfold ir-fn))
@@ -355,7 +364,16 @@
                              (println (format "      typeinfer: %d analyze-block, %d type-join, %d normalize"
                                               (or (:analyze-block s) 0)
                                               (or (:type-join s) 0)
-                                              (or (:normalize s) 0))))))
+                                              (or (:normalize s) 0)))
+                             (println (format "      worklist: %d inst, %d param, %d changes, %d/%d enqueues"
+                                              (or (:process-inst s) 0)
+                                              (or (:process-param s) 0)
+                                              (or (:type-change s) 0)
+                                              (or (:enqueue s) 0)
+                                              (or (:enqueue-attempt s) 0)))
+                             (println (format "      timing: deps=%d ms, drain=%d ms"
+                                              (or (:deps-ms s) 0)
+                                              (or (:drain-ms s) 0))))))
             pt         @pt
             t-opt1     (System/nanoTime)
             _          (println (format "  optimize total: %.1f ms (%d pass rows)"
