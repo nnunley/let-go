@@ -7,9 +7,12 @@ package compiler
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"strings"
 
 	"github.com/nooga/let-go/pkg/bytecode"
+	"github.com/nooga/let-go/pkg/errors"
 	"github.com/nooga/let-go/pkg/rt"
 	"github.com/nooga/let-go/pkg/vm"
 )
@@ -131,14 +134,15 @@ func loadPrecompiledBundle() error {
 }
 
 func postCoreInit() {
-	// Register read-string (needs the reader which lives in the compiler package)
+	// read-string: parse a single form from a string. Errors loudly on
+	// wrong arity, non-string args, or parse failures.
 	readStringFn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
-			return vm.NIL, nil
+			return vm.NIL, fmt.Errorf("read-string: wrong number of arguments %d (expected 1)", len(vs))
 		}
 		s, ok := vs[0].(vm.String)
 		if !ok {
-			return vm.NIL, nil
+			return vm.NIL, fmt.Errorf("read-string: expected String, got %T", vs[0])
 		}
 		return ReadString(string(s))
 	})
@@ -146,25 +150,40 @@ func postCoreInit() {
 	rsVar := coreNS.LookupOrAdd(vm.Symbol("read-string"))
 	rsVar.(*vm.Var).SetRoot(readStringFn)
 
-	// read-all-string: read every top-level form from a string,
-	// return as a vector. Useful for scripts that need to walk a
-	// source file form-by-form (e.g. dependency analysis, codegen).
+	// read-all-string: parse every top-level form from a string,
+	// return as a vector. Useful for scripts that walk source
+	// form-by-form (dependency analysis, codegen). EOF is the only
+	// non-error stop condition; any other reader error is propagated
+	// so callers see partial-stream syntax errors instead of silent
+	// truncation.
 	readAllStringFn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
-			return vm.NIL, nil
+			return vm.NIL, fmt.Errorf("read-all-string: wrong number of arguments %d (expected 1)", len(vs))
 		}
 		s, ok := vs[0].(vm.String)
 		if !ok {
-			return vm.NIL, nil
+			return vm.NIL, fmt.Errorf("read-all-string: expected String, got %T", vs[0])
 		}
 		reader := NewLispReader(strings.NewReader(string(s)), "<read-all-string>")
 		forms := []vm.Value{}
 		for {
-			form, err := reader.Read()
+			// Peek: skip whitespace, then either give up cleanly (EOF
+			// at form boundary) or put the char back so Read can see
+			// the start of the next form. Distinguishes clean EOF
+			// from mid-form EOF — both surface as IsCausedBy(io.EOF)
+			// but only the former is acceptable.
+			_, err := reader.eatWhitespace()
 			if err != nil {
-				if strings.Contains(err.Error(), "EOF") {
+				if errors.IsCausedBy(err, io.EOF) {
 					break
 				}
+				return vm.NIL, err
+			}
+			if err := reader.unread(); err != nil {
+				return vm.NIL, err
+			}
+			form, err := reader.Read()
+			if err != nil {
 				return vm.NIL, err
 			}
 			forms = append(forms, form)
