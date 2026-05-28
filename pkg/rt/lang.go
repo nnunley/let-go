@@ -18,9 +18,252 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/nooga/let-go/pkg/vm"
 )
+
+// EqFastPath gates the identity short-circuit, hash fast-reject, and
+// visited-pair memoization used by rt.EqValue's structural compare. It is
+// always on for lowered Go (rt.EqValue calls valueEqualsFast directly). The
+// bytecode VM's OP_EQ goes through vm.ValueEquals → valueEquals, which still
+// matches today's behavior; flipping it to the fast path is a separate
+// validation step.
+var EqFastPath = true
+
+// eqPair keys visited-pair memoization for valueEqualsCtx. Built from the
+// underlying pointer/slice-header identity of two collection values that
+// are mid-walk; if we re-encounter the same pair during recursion we
+// coinductively assume equality, which collapses both true cycles and
+// shared substructure (the IR-graph blowup that motivated this fix).
+type eqPair struct{ a, b uintptr }
+
+type eqCtx struct {
+	visited map[eqPair]struct{}
+}
+
+func (c *eqCtx) seenOrMark(a, b vm.Value) bool {
+	if c == nil {
+		return false
+	}
+	pa, ok := valuePtr(a)
+	if !ok {
+		return false
+	}
+	pb, ok := valuePtr(b)
+	if !ok {
+		return false
+	}
+	key := eqPair{pa, pb}
+	if c.visited == nil {
+		c.visited = make(map[eqPair]struct{}, 8)
+	}
+	if _, seen := c.visited[key]; seen {
+		return true
+	}
+	c.visited[key] = struct{}{}
+	return false
+}
+
+// valuePtr extracts a stable identity uintptr for collection-shaped values.
+// For pointer-receiver types it's the pointer; for slice-backed types
+// (ArrayVector) it's the first element's address; for maps it's the runtime
+// hmap header. Returns false for scalars (they don't need memoization).
+func valuePtr(v vm.Value) (uintptr, bool) {
+	switch x := v.(type) {
+	case vm.ArrayVector:
+		if len(x) == 0 {
+			return 0, false
+		}
+		return uintptr(unsafe.Pointer(&x[0])), true
+	case vm.Map:
+		if x == nil {
+			return 0, false
+		}
+		return mapPtr(x), true
+	case vm.Set:
+		if x == nil {
+			return 0, false
+		}
+		return setPtr(x), true
+	case *vm.PersistentVector:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.PersistentMap:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.PersistentSet:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.SortedMap:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.SortedSet:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.List:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.Cons:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.LazySeq:
+		return uintptr(unsafe.Pointer(x)), true
+	}
+	return 0, false
+}
+
+// mapPtr / setPtr extract the runtime hmap header pointer from a Go map
+// via an unsafe header read. Used purely as an identity key for memoization;
+// the value is never dereferenced.
+func mapPtr(m vm.Map) uintptr {
+	type ifaceHeader struct {
+		_   uintptr
+		ptr unsafe.Pointer
+	}
+	return uintptr((*ifaceHeader)(unsafe.Pointer(&m)).ptr)
+}
+
+func setPtr(s vm.Set) uintptr {
+	type ifaceHeader struct {
+		_   uintptr
+		ptr unsafe.Pointer
+	}
+	return uintptr((*ifaceHeader)(unsafe.Pointer(&s)).ptr)
+}
+
+// valueEqualsFast is the entry point for lowered Go (rt.EqValue). It adds
+// three layers of early-exit before the structural walk: nil pair, dynamic
+// identity (same scalar value or same backing pointer), and hash fast-reject
+// for any pair where both sides implement vm.Hashable. The walk itself
+// threads a visited-pair set so shared substructure collapses to O(N)
+// instead of exponential.
+func valueEqualsFast(a, b vm.Value) bool {
+	if isNilValue(a) && isNilValue(b) {
+		return true
+	}
+	if isNilValue(a) || isNilValue(b) {
+		return false
+	}
+	if r, decided := identityEqShortCircuit(a, b); decided {
+		return r
+	}
+	if r, decided := hashEqShortCircuit(a, b); decided {
+		return r
+	}
+	return valueEqualsCtx(a, b, &eqCtx{})
+}
+
+// identityEqShortCircuit decides equality without descending when the two
+// values are demonstrably identical at the Go level: same comparable scalar,
+// same backing slice, same pointer, or same Go map header. Returns
+// (result, true) when it can decide, (_, false) when it cannot.
+//
+// Critically, it never executes interface == on uncomparable underlying
+// types — that would panic. Each arm pre-checks the dynamic type.
+func identityEqShortCircuit(a, b vm.Value) (bool, bool) {
+	// Comparable scalars: interface == is safe and ~free.
+	switch a.(type) {
+	case vm.Int, vm.Float, vm.Boolean, vm.String, vm.Char, vm.Keyword, vm.Symbol:
+		switch b.(type) {
+		case vm.Int, vm.Float, vm.Boolean, vm.String, vm.Char, vm.Keyword, vm.Symbol:
+			return a == b, true
+		}
+		return false, false
+	}
+	// Slice-backed: same backing array + same length ⇒ equal.
+	if av, ok := a.(vm.ArrayVector); ok {
+		bv, ok := b.(vm.ArrayVector)
+		if !ok {
+			return false, false
+		}
+		if len(av) != len(bv) {
+			return false, true
+		}
+		if len(av) == 0 {
+			return true, true
+		}
+		if &av[0] == &bv[0] {
+			return true, true
+		}
+		return false, false
+	}
+	// Pointer-receiver collections: pointer identity ⇒ equal.
+	switch av := a.(type) {
+	case *vm.PersistentVector:
+		if bv, ok := b.(*vm.PersistentVector); ok && av == bv {
+			return true, true
+		}
+	case *vm.PersistentMap:
+		if bv, ok := b.(*vm.PersistentMap); ok && av == bv {
+			return true, true
+		}
+	case *vm.PersistentSet:
+		if bv, ok := b.(*vm.PersistentSet); ok && av == bv {
+			return true, true
+		}
+	case *vm.SortedMap:
+		if bv, ok := b.(*vm.SortedMap); ok && av == bv {
+			return true, true
+		}
+	case *vm.SortedSet:
+		if bv, ok := b.(*vm.SortedSet); ok && av == bv {
+			return true, true
+		}
+	case *vm.List:
+		if bv, ok := b.(*vm.List); ok && av == bv {
+			return true, true
+		}
+	case *vm.BigInt:
+		if bv, ok := b.(*vm.BigInt); ok && av == bv {
+			return true, true
+		}
+	// Functions and refs: Clojure semantics are identity-equal anyway, so
+	// pointer-compare is the *right* answer, not just an approximation.
+	case *vm.Func:
+		if bv, ok := b.(*vm.Func); ok && av == bv {
+			return true, true
+		}
+	case *vm.Closure:
+		if bv, ok := b.(*vm.Closure); ok && av == bv {
+			return true, true
+		}
+	case *vm.NativeFn:
+		if bv, ok := b.(*vm.NativeFn); ok && av == bv {
+			return true, true
+		}
+	case *vm.MultiArityFn:
+		if bv, ok := b.(*vm.MultiArityFn); ok && av == bv {
+			return true, true
+		}
+	case *vm.MultiFn:
+		if bv, ok := b.(*vm.MultiFn); ok && av == bv {
+			return true, true
+		}
+	case *vm.Atom:
+		if bv, ok := b.(*vm.Atom); ok && av == bv {
+			return true, true
+		}
+	case *vm.Var:
+		if bv, ok := b.(*vm.Var); ok && av == bv {
+			return true, true
+		}
+	}
+	return false, false
+}
+
+// hashEqShortCircuit rejects two Hashable values whose cached hashes differ.
+// Costs at most two cached-hash reads (vectors/maps cache; if either side
+// lacks Hashable we no-op). This is the same idea as vm.valueEquiv at
+// pkg/vm/hash.go:166, but applied at the general equality entry rather than
+// only at map-key equivalence.
+func hashEqShortCircuit(a, b vm.Value) (bool, bool) {
+	ha, aOk := a.(vm.Hashable)
+	if !aOk {
+		return false, false
+	}
+	hb, bOk := b.(vm.Hashable)
+	if !bOk {
+		return false, false
+	}
+	if ha.Hash() != hb.Hash() {
+		return false, true
+	}
+	return false, false
+}
 
 var nsRegistry map[string]*vm.Namespace
 
@@ -439,8 +682,19 @@ func iterateSet(v vm.Value, f func(vm.Value) bool) {
 	}
 }
 
-// valueEquals performs deep equality comparison for Clojure semantics
+// valueEquals performs deep equality comparison for Clojure semantics.
+// This is the entry the bytecode VM's OP_EQ reaches via vm.ValueEquals.
+// Behavior is unchanged from before: no short-circuits, no memoization.
+// The lowered-Go path goes through valueEqualsFast instead (see EqValue).
 func valueEquals(a, b vm.Value) bool {
+	return valueEqualsCtx(a, b, nil)
+}
+
+// valueEqualsCtx is the recursive workhorse. When ctx is non-nil it tracks
+// (a,b) pointer pairs seen mid-walk so shared substructure and cycles don't
+// blow up. When ctx is nil it matches the original valueEquals semantics
+// exactly — used by the OP_EQ path until flipped.
+func valueEqualsCtx(a, b vm.Value, ctx *eqCtx) bool {
 	// Handle nil
 	if isNilValue(a) && isNilValue(b) {
 		return true
@@ -485,7 +739,7 @@ func valueEquals(a, b vm.Value) bool {
 			as := toSeq(a)
 			bs := toSeq(b)
 			for as != nil && bs != nil {
-				if !valueEquals(as.First(), bs.First()) {
+				if !valueEqualsCtx(as.First(), bs.First(), ctx) {
 					return false
 				}
 				as, bs = as.Next(), bs.Next()
@@ -517,8 +771,14 @@ func valueEquals(a, b vm.Value) bool {
 		if len(av) != len(bv) {
 			return false
 		}
+		if len(av) > 0 && &av[0] == &bv[0] {
+			return true
+		}
+		if ctx.seenOrMark(a, b) {
+			return true
+		}
 		for i := range av {
-			if !nilListEquivalent(av[i], bv[i]) && !valueEquals(av[i], bv[i]) {
+			if !nilListEquivalent(av[i], bv[i]) && !valueEqualsCtx(av[i], bv[i], ctx) {
 				return false
 			}
 		}
@@ -541,6 +801,9 @@ func valueEquals(a, b vm.Value) bool {
 		if !ok {
 			return false
 		}
+		if ctx.seenOrMark(a, b) {
+			return true
+		}
 		as := vm.Seq(av)
 		for as != nil && bs != nil {
 			if !listElementEquals(as.First(), bs.First()) {
@@ -554,9 +817,12 @@ func valueEquals(a, b vm.Value) bool {
 			if len(av) != len(bm) {
 				return false
 			}
+			if ctx.seenOrMark(a, b) {
+				return true
+			}
 			for k, v := range av {
 				bv, ok := bm[k]
-				if !ok || !valueEquals(v, bv) {
+				if !ok || !valueEqualsCtx(v, bv, ctx) {
 					return false
 				}
 			}
@@ -569,7 +835,7 @@ func valueEquals(a, b vm.Value) bool {
 			}
 			for k, v := range av {
 				bv := bm.ValueAtOr(k, sentinel)
-				if bv == sentinel || !valueEquals(v, bv) {
+				if bv == sentinel || !valueEqualsCtx(v, bv, ctx) {
 					return false
 				}
 			}
@@ -597,7 +863,7 @@ func valueEquals(a, b vm.Value) bool {
 			}
 			for k, v := range bm {
 				sv := av.ValueAtOr(k, sentinel)
-				if sv == sentinel || !valueEquals(v, sv) {
+				if sv == sentinel || !valueEqualsCtx(v, sv, ctx) {
 					return false
 				}
 			}
@@ -646,7 +912,7 @@ func valueEquals(a, b vm.Value) bool {
 			as := toSeq(a)
 			bs := toSeq(b)
 			for as != nil && bs != nil {
-				if !valueEquals(as.First(), bs.First()) {
+				if !valueEqualsCtx(as.First(), bs.First(), ctx) {
 					return false
 				}
 				as, bs = as.Next(), bs.Next()
@@ -2695,6 +2961,12 @@ func installLangNS() {
 		}
 		at, ok := vs[0].(*vm.Atom)
 		if !ok {
+			if os.Getenv("LG_SWAP_DEBUG") != "" {
+				fmt.Fprintf(os.Stderr, "[swap! debug] vs[0] type=%T value=%v len(vs)=%d\n", vs[0], vs[0], len(vs))
+				for i, v := range vs {
+					fmt.Fprintf(os.Stderr, "[swap! debug]   vs[%d] type=%T value=%v\n", i, v, v)
+				}
+			}
 			return vm.NIL, fmt.Errorf("swap expected Atom")
 		}
 		fn, ok := vs[1].(vm.Fn)

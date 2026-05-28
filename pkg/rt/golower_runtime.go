@@ -68,6 +68,48 @@ func MakeNativeMultiArity(fns []vm.Value) vm.Value {
 // then vm.Num<X> fallback. NumX errors panic to match bytecode behavior
 // when no error handler is installed.
 
+// EqValue mirrors the bytecode VM's OP_EQ. Used by lower-go when emitting
+// `=` on operands that typeinfer couldn't narrow to a primitive Go-typed
+// pair. Routes the common scalar-comparable case (keywords, ints, floats,
+// bools, strings, chars, symbols, nil) through Go's interface `==`, which
+// is single-instruction-fast. Falls back to vm.ValueEquals only when the
+// dynamic type might be uncomparable (slice/map-backed values like
+// vm.ArrayVector, vm.PersistentMap, vm.PersistentVector — these panic
+// under raw interface ==).
+//
+// The fast path matters because typeinfer compares lattice keywords
+// millions of times per regen; routing every one of those through
+// vm.ValueEquals' full structural comparison framework dominates wall
+// time. Mirrors the LtValue/AddValue/etc. shape but with a switch
+// hoisted in front for the common case.
+func EqValue(a, b vm.Value) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	// Fast path: both args are known-comparable types. Go's interface ==
+	// is safe and ~10x faster than the function-call + type-assertion
+	// chain in vm.ValueEquals.
+	switch a.(type) {
+	case vm.Keyword, vm.Int, vm.Float, vm.Boolean, vm.String, vm.Char, vm.Symbol:
+		switch b.(type) {
+		case vm.Keyword, vm.Int, vm.Float, vm.Boolean, vm.String, vm.Char, vm.Symbol:
+			return a == b
+		}
+	}
+	// Slow path: at least one arg is potentially uncomparable. Route through
+	// valueEqualsFast which adds identity short-circuit (collapses shared
+	// substructure to O(1)), hash fast-reject (cheap negative), and
+	// visited-pair memoization (bounds shared-substructure / cyclic walks).
+	// Falls back to identity equality only during very early rt init.
+	if EqFastPath {
+		return valueEqualsFast(a, b)
+	}
+	if vm.ValueEquals != nil {
+		return vm.ValueEquals(a, b)
+	}
+	return a == b //nolint:govet // intentional fallback path
+}
+
 func LtValue(a, b vm.Value) bool {
 	if ai, ok := a.(vm.Int); ok {
 		if bi, ok := b.(vm.Int); ok {
