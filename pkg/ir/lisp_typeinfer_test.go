@@ -162,3 +162,19 @@ func TestTypeInferRefinesTruthyEdgeForMaybeNilArithmetic(t *testing.T) {
 		t.Fatalf("expected truthy-edge arithmetic to infer int\n--- dump ---\n%s", dump)
 	}
 }
+
+func TestTypeInferRefinesFalseyEdgeForUnionIntBool(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn refine-union [x]
+	                       (if x
+	                         x
+	                         x))`)
+	seedArgTypes(t, fn, "[[:union :int :bool]]")
+	runTypeInfer(t, fn)
+	dump := lispDump(t, fn)
+
+	if strings.Contains(dump, "bottom") {
+		t.Fatalf("expected falsey edge for union{int,bool} to not contain bottom\n--- dump ---\n%s", dump)
+	}
+}

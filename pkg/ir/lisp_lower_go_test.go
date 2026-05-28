@@ -503,3 +503,83 @@ func TestLowerGoStrictNestedDestructureDefn(t *testing.T) {
 		t.Fatalf("expected arithmetic in lowered body\n--- go ---\n%s", rendered)
 	}
 }
+
+func TestLowerGoStrictNumberTypeAccepted(t *testing.T) {
+	// Asserts the post-fix behavior: a defn whose param is typed :number
+	// must lower cleanly (with the param typed as vm.Value in the emitted
+	// Go), not fall back with "unsupported parameter types". The fix is
+	// adding a `:number → vm.Value` case in ir.lower-go/go-type-spec.
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn identity-num [x] x)`)
+	seedArgTypes(t, fn, "[:number]")
+	optimizeLispIR(t, fn)
+
+	passVarCounter++
+	varName := fmt.Sprintf("*lower-go-fn-%d*", passVarCounter)
+	rt.NS(rt.NameCoreNS).Def(varName, fn)
+	v := runLispExpr(t, fmt.Sprintf(`(try (ir.lower-go/lower %s :strict) (catch e {:status :error :reason (str e)}))`, varName))
+	m, ok := v.(*vm.PersistentMap)
+	if !ok {
+		t.Fatalf("expected map, got %T", v)
+	}
+
+	status := m.ValueAt(vm.Keyword("status"))
+	if status != vm.Keyword("lowered") {
+		reason := m.ValueAt(vm.Keyword("reason"))
+		t.Fatalf("expected :lowered status, got status=%v reason=%v", status, reason)
+	}
+}
+
+func TestLowerGoEqOnVmValueRoutesThroughHelper(t *testing.T) {
+	// When `(= a b)` is lowered and both operands are vm.Value-typed
+	// (i.e. typeinfer couldn't narrow them), the emitted Go MUST NOT use
+	// the raw `==` operator. Go's interface equality panics at runtime
+	// when the dynamic type is uncomparable (slices/maps), which
+	// vm.ArrayVector, vm.PersistentMap, and vm.PersistentVector all are.
+	// The fix routes through a polymorphic helper (rt.EqValue) the same
+	// way ordering/arithmetic ops already route through
+	// rt.LtValue/rt.AddValue/etc. when any operand is vm.Value.
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn eq-vectors [a b] (= a b))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v", got)
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+	if strings.Contains(rendered, "a_0 == b_1") || strings.Contains(rendered, "b_1 == a_0") {
+		t.Fatalf("raw Go == on two vm.Value operands — panics at runtime when dynamic type is uncomparable.\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestLowerGoDirectSelfCallInsteadOfVarLookup(t *testing.T) {
+	// When a defn calls itself by name (non-tail), the lowered Go MUST emit
+	// a direct function call rather than rt.LookupVar(NS, NAME).Deref()
+	// + rt.InvokeValue. The dynamic-var path is correct but ~100x slower
+	// per call than a direct Go call — and recursive Lisp functions
+	// repeatedly pay that cost per recursion level, dominating regen time.
+	//
+	// Lowering knows at compile time that the callee is the function
+	// being lowered (the IR's :load-var op resolves to a symbol matching
+	// (ir/fn-name f)), so the static dispatch is safe and correct.
+	ensureLoader()
+
+	// Declare first so build-fn can resolve the self-reference.
+	runLispExpr(t, `(declare fact)`)
+	fn := buildLispIR(t, `(defn fact [n] (if (<= n 1) 1 (* n (fact (- n 1)))))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("expected :lowered status, got %v (reason: %v)", got, result.ValueAt(vm.Keyword("reason")))
+	}
+	rendered := bindAndRenderGoDecl(t, result)
+
+	// Bug: var dispatch for known self-call
+	if strings.Contains(rendered, `LookupVar("`) && strings.Contains(rendered, `"fact")`) {
+		t.Fatalf("self-recursive call should NOT go through rt.LookupVar dispatch.\n--- go ---\n%s", rendered)
+	}
+}

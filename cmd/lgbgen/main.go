@@ -13,6 +13,9 @@
 package main
 
 import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +26,74 @@ import (
 	"github.com/nooga/let-go/pkg/rt"
 	"github.com/nooga/let-go/pkg/vm"
 )
+
+// pipelineSourceFingerprint hashes every embedded .lg file that participates
+// in the Go-lowering pipeline. Any change here invalidates the cache for
+// every generated file (a pipeline change affects all lowerings).
+func pipelineSourceFingerprint() string {
+	h := sha256.New()
+	srcs := []*string{
+		&rt.CoreSrc, // build/optimize/lower live here via macroexpansion
+		&rt.IRZipperSrc, &rt.IRPassesSrc, &rt.IRDominanceSrc,
+		&rt.IRLowerSrc, &rt.IRLowerGoSrc,
+		&rt.IRPassDCESrc, &rt.IRPassConstFoldSrc, &rt.IRPassMutabilitySrc,
+		&rt.IRPassCSESrc, &rt.IRPassTypeInferSrc, &rt.IRPassLICMSrc,
+		&rt.IRPassInferArgTypesSrc, &rt.IRBuildSrc, &rt.IRValidateSrc,
+		&rt.IRPassPipelineSrc, &rt.IRDumpSrc, &rt.IRPassTraceSrc,
+		&rt.GraphSrc, &rt.IRDataSrc,
+	}
+	for _, s := range srcs {
+		if s != nil && *s != "" {
+			h.Write([]byte(*s))
+			h.Write([]byte{0}) // separator so concatenation can't collide
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// sha256Hex returns the hex-encoded SHA-256 of s.
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// headerHashes captures the cache fingerprint a generated file declares
+// in its leading comments. A successful parse + match against the current
+// inputs lets the generator skip lowering entirely.
+type headerHashes struct {
+	nsHash       string
+	pipelineHash string
+}
+
+// readHeaderHashes parses the cache header from an existing generated file.
+// Returns nil when the file doesn't exist, can't be read, or doesn't carry
+// both expected gogen.* lines within the first handful of lines.
+func readHeaderHashes(path string) *headerHashes {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	var h headerHashes
+	for i := 0; i < 16 && scanner.Scan(); i++ {
+		line := scanner.Text()
+		switch {
+		case strings.HasPrefix(line, "// gogen.nsHash:"):
+			h.nsHash = strings.TrimSpace(strings.TrimPrefix(line, "// gogen.nsHash:"))
+		case strings.HasPrefix(line, "// gogen.pipelineHash:"):
+			h.pipelineHash = strings.TrimSpace(strings.TrimPrefix(line, "// gogen.pipelineHash:"))
+		case strings.HasPrefix(line, "package "):
+			// Header section ended; stop scanning even if we haven't found
+			// both hashes (older files predate the header — treat as miss).
+			i = 16
+		}
+	}
+	if h.nsHash == "" || h.pipelineHash == "" {
+		return nil
+	}
+	return &h
+}
 
 // embeddedNS lists all embedded namespaces in compilation order.
 // Dependencies must come before dependents (test depends on walk).
@@ -120,10 +191,27 @@ func main() {
 		}
 		nsChunks[ns.name] = chunk
 		nsOrder = append(nsOrder, ns.name)
+		// Meta-circular self-hosting (LGGOIR_SELFHOST=1) clobbers the
+		// just-replayed Lisp vars with their NativeFn counterparts so
+		// subsequent --target=go pipeline invocations run native. Disabled
+		// by default while the underlying gogen-emitted dispatch path
+		// still has pre-existing bugs (nil-pointer chains via reflective
+		// BoxNativeFn closures inside toposort-by → reduce → native fn).
+		// See task tracking for the parity hunt.
+		if os.Getenv("LGGOIR_SELFHOST") != "" {
+			if targetNS := rt.LookupNS(ns.name); targetNS != nil {
+				rt.ApplyGoOverrides(targetNS)
+			}
+		}
 		if targetGo {
 			fmt.Printf("  compiled %-20s (%d bytecode + lowering to Go)\n", ns.name, len(chunk.Code())*4)
 		} else {
 			fmt.Printf("  compiled %-10s (%d bytes bytecode)\n", ns.name, len(chunk.Code())*4)
+		}
+	}
+	if targetGo && os.Getenv("LGGOIR_SELFHOST") != "" {
+		if coreNS := rt.LookupNS(rt.NameCoreNS); coreNS != nil {
+			rt.ApplyGoOverrides(coreNS)
 		}
 	}
 
@@ -150,12 +238,28 @@ func main() {
 		outPath, fi.Size(), len(consts.Values()), len(nsChunks))
 }
 
-// nsToGoPkgName converts a let-go namespace name to a valid Go package name.
-// Dots become underscores (ir.zipper → ir_zipper), hyphens become underscores.
+// nsToGoPkgName returns the Go package name for a namespace — the LAST
+// dotted segment, with hyphens replaced. ir.dominance → "dominance",
+// ir.passes.dce → "dce". This mirrors Go's convention of one short
+// package name per directory.
 func nsToGoPkgName(nsName string) string {
-	s := strings.ReplaceAll(nsName, ".", "_")
-	s = strings.ReplaceAll(s, "-", "_")
-	return s
+	last := nsName
+	if i := strings.LastIndex(nsName, "."); i >= 0 {
+		last = nsName[i+1:]
+	}
+	return strings.ReplaceAll(last, "-", "_")
+}
+
+// nsToGoPkgPath returns the directory path components for a namespace.
+// ir.dominance → ["ir", "dominance"], ir.passes.dce → ["ir", "passes", "dce"].
+// Each component has hyphens replaced with underscores.
+func nsToGoPkgPath(nsName string) []string {
+	parts := strings.Split(nsName, ".")
+	out := make([]string, len(parts))
+	for i, p := range parts {
+		out[i] = strings.ReplaceAll(p, "-", "_")
+	}
+	return out
 }
 
 // runGoTarget re-pipelines each namespace's defn forms through the Go
@@ -171,6 +275,13 @@ func runGoTarget(outDir string) {
 		fmt.Fprintf(os.Stderr, "create output dir %s: %v\n", outDir, err)
 		os.Exit(1)
 	}
+
+	// Each generated file carries its own input fingerprint in leading
+	// comments — no external manifest file. On regen, parse the existing
+	// file's header; if both hashes match, skip the lowering pipeline
+	// entirely. Self-describing files survive moves, renames, and partial
+	// deletions without a separate index getting out of sync.
+	pipelineFP := pipelineSourceFingerprint()
 
 	for _, ns := range embeddedNS {
 		src := *ns.src
@@ -202,12 +313,27 @@ func runGoTarget(outDir string) {
 			continue
 		}
 
-		// Each namespace maps to its own Go package in a subdirectory.
+		// Each namespace maps to its own Go package — directory mirrors the
+		// dotted ns path, package name is the last segment. ir.passes.dce
+		// becomes outDir/ir/passes/dce/ with package dce.
 		pkgName := nsToGoPkgName(ns.name)
-		pkgDir := filepath.Join(outDir, pkgName)
+		pathParts := nsToGoPkgPath(ns.name)
+		pkgDir := filepath.Join(append([]string{outDir}, pathParts...)...)
 		if err := os.MkdirAll(pkgDir, 0755); err != nil {
 			fmt.Fprintf(os.Stderr, "create pkg dir %s: %v\n", pkgDir, err)
 			os.Exit(1)
+		}
+		filename := filepath.Join(pkgDir, pkgName+".go")
+
+		// Cache check: skip lowering when the existing file's header records
+		// the same nsHash AND pipelineHash. The Go lowering pipeline is the
+		// slow part (>10s per heavy ns), so this is the single biggest
+		// dev-loop speedup.
+		nsHash := sha256Hex(src)
+		if existing := readHeaderHashes(filename); existing != nil &&
+			existing.nsHash == nsHash && existing.pipelineHash == pipelineFP {
+			fmt.Printf("  cache %-40s (unchanged)\n", filename)
+			continue
 		}
 
 		// Batch all forms into one namespace file.
@@ -227,8 +353,13 @@ func runGoTarget(outDir string) {
 			fmt.Fprintf(os.Stderr, "%s: expected string result, got %T\n", ns.name, result)
 			continue
 		}
-		filename := filepath.Join(pkgDir, pkgName+".go")
-		if err := os.WriteFile(filename, []byte(goSrc), 0644); err != nil {
+		// Header carries: build tag, generator marker, and the input/pipeline
+		// hashes — read by the cache check above on subsequent runs.
+		header := "//go:build gogen_ir\n\n" +
+			"// Code generated by lgbgen --target=go. DO NOT EDIT.\n" +
+			"// gogen.nsHash:       " + nsHash + "\n" +
+			"// gogen.pipelineHash: " + pipelineFP + "\n\n"
+		if err := os.WriteFile(filename, []byte(header+string(goSrc)), 0644); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: write %s: %v\n", ns.name, filename, err)
 			os.Exit(1)
 		}

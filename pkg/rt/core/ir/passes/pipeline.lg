@@ -122,16 +122,25 @@
       ;; Multi-arity: build each arity separately, combine
       (let [arities   (drop (if has-doc? 3 2) form)]
         (if go-target?
-          (let [fn-templates (mapv (fn [arity-form]
-                                    (let [args-vec   (first arity-form)
-                                          body-forms (map expand-all (rest arity-form))
-                                          expanded   (apply list 'defn name-sym args-vec body-forms)
-                                          ir-fn      (-> expanded ir.build/build-fn optimize-fn)
-                                          result     (lower-go/lower ir-fn :bridge)]
-                                      (if (= :lowered (:status result))
-                                        {:fn (:decl result)}
-                                        result)))
-                                  arities)]
+          ;; Multi-arity: each arity must get a unique Go function name —
+          ;; the gogen flattening below emits all decls as siblings and Go
+          ;; rejects duplicate identifiers in the same package. Per-arity
+          ;; suffix `__a<idx>` keeps them distinct. These flattened defns
+          ;; lack :fn-name in the result map so the Register-block filter
+          ;; in lower-ns-to-go skips them — multi-arity dispatch needs
+          ;; its own NativeFn wrapper, deferred.
+          (let [fn-templates (vec (map-indexed
+                                    (fn [idx arity-form]
+                                      (let [args-vec   (first arity-form)
+                                            body-forms (map expand-all (rest arity-form))
+                                            uniq-name  (symbol (str name-sym "__a" idx))
+                                            expanded   (apply list 'defn uniq-name args-vec body-forms)
+                                            ir-fn      (-> expanded ir.build/build-fn optimize-fn)
+                                            result     (lower-go/lower ir-fn :bridge)]
+                                        (if (= :lowered (:status result))
+                                          {:fn (:decl result)}
+                                          result)))
+                                    arities))]
             {:kind :multi-fn-template :fns fn-templates})
           (let [fn-vals   (mapv (fn [arity-form]
                                   (let [args-vec   (first arity-form)
@@ -256,6 +265,91 @@
         non-defn (vec (remove (fn [f] (some? (defn-key f))) forms))]
     (into ordered non-defn)))
 
+;; --- register block emission ----------------------------------------
+;; All AST below uses gogen primitives (gogen/func-decl, kv-expr,
+;; composite-lit-multi, …) instead of string concat. The previous
+;; string-based emitter was fragile around indentation, comma placement,
+;; and Go syntax — every escape change risked a parse error in the
+;; generated file. The AST path delegates printing to gogen/render, which
+;; handles formatting once.
+
+(defn- wrapper-fn-lit [entry]
+  "Build the per-defn `func(args []vm.Value) (vm.Value, error) { ... }`
+   adapter as a gogen func-lit. The body checks arity, then calls the
+   generated typed function, supplying `, nil` when the typed fn doesn't
+   itself return an error."
+  (let [arity        (:arity entry)
+        go-name      (:go-name entry)
+        fn-name      (:fn-name entry)
+        needs-error? (:needs-error? entry)
+        args-id      (gogen/ident "args")
+        len-call     (gogen/call (gogen/ident "len") [args-id])
+        msg          (str fn-name ": wrong number of arguments %d (expected " arity ")")
+        arity-mismatch
+          (gogen/return-stmt
+            [(gogen/ident "nil")
+             (gogen/call
+               (gogen/field-sel (gogen/ident "fmt") "Errorf")
+               [(gogen/string-lit msg) len-call])])
+        len-check    (gogen/if-stmt
+                       nil
+                       (gogen/binary "!=" len-call (gogen/int-lit arity))
+                       [arity-mismatch]
+                       nil)
+        arg-exprs    (mapv (fn [i] (gogen/index args-id (gogen/int-lit i)))
+                           (range arity))
+        inner-call   (gogen/call (gogen/ident go-name) arg-exprs)
+        ret-stmt     (if needs-error?
+                       (gogen/return-stmt [inner-call])
+                       (gogen/return-stmt [inner-call (gogen/ident "nil")]))]
+    (gogen/func-lit
+      [(gogen/param "args" (gogen/type "[]vm.Value"))]
+      [(gogen/result (gogen/type "vm.Value"))
+       (gogen/result (gogen/type "error"))]
+      [len-check ret-stmt])))
+
+(defn- register-helper-decl []
+  "Build the package-local `__gogen_wrap` helper:
+     func __gogen_wrap(fn func(args []vm.Value) (vm.Value, error)) vm.Value {
+       v, _ := vm.NativeFnType.Wrap(fn)
+       return v
+     }"
+  (let [wrap-call (gogen/call
+                    (gogen/field-sel
+                      (gogen/field-sel (gogen/ident "vm") "NativeFnType")
+                      "Wrap")
+                    [(gogen/ident "fn")])
+        assign    (gogen/multi-assign ":="
+                    [(gogen/ident "v") (gogen/ident "_")]
+                    [wrap-call])
+        ret       (gogen/return-stmt [(gogen/ident "v")])]
+    (gogen/func-decl
+      "__gogen_wrap"
+      [(gogen/param "fn" (gogen/type "func(args []vm.Value) (vm.Value, error)"))]
+      [(gogen/result (gogen/type "vm.Value"))]
+      [assign ret])))
+
+(defn- register-init-decl [ns-name entries]
+  "Build the package's init() that calls rt.RegisterGoOverrides with a
+   map[string]vm.Value literal of __gogen_wrap-wrapped adapters."
+  (let [kv-pairs (mapv (fn [e]
+                         (gogen/kv-expr
+                           (gogen/string-lit (:fn-name e))
+                           (gogen/call (gogen/ident "__gogen_wrap")
+                                       [(wrapper-fn-lit e)])))
+                       entries)
+        map-lit  (gogen/composite-lit-multi
+                   (gogen/type "map[string]vm.Value")
+                   kv-pairs)
+        register (gogen/call
+                   (gogen/field-sel (gogen/ident "rt") "RegisterGoOverrides")
+                   [(gogen/string-lit ns-name) map-lit])]
+    (gogen/func-decl
+      "init"
+      []
+      []
+      [(gogen/expr-stmt register)])))
+
 (defn lower-ns-to-go [pkg-name ns-name defn-forms]
   "Process defn forms through the Go-lowering pipeline and return rendered
    Go source for a package. pkg-name is the Go package name string,
@@ -293,5 +387,27 @@
                             (recur (rest remaining) out)))))
           ;; Filter out results with nil decls (failures that slipped through).
           valid-results (filterv (fn [r] (some? (:decl r))) results)
-          file-ast (lower-go/file pkg-name valid-results)]
+          ;; Register-eligible: fixed-arity, all-vm.Value-typed defns. Skip:
+          ;;   - variadic (boxing not yet wired through the wrapper)
+          ;;   - multi-arity flattened templates (no :fn-name)
+          ;;   - functions with typed primitive params (int/bool/etc.) — the
+          ;;     wrapper passes args[i] which is vm.Value
+          ;;   - functions with non-vm.Value result type — the wrapper returns
+          ;;     (vm.Value, error); a bool/int return won't fit
+          ;; The bytecode bundle handles every skipped defn.
+          vm-value? (fn [s] (= s "vm.Value"))
+          register-entries (filterv (fn [r]
+                                      (and (:fn-name r)
+                                           (not (:variadic? r))
+                                           (every? vm-value? (or (:param-specs r) []))
+                                           (vm-value? (:result-spec r))))
+                                    valid-results)
+          extra-imports (when (seq register-entries)
+                          [{:path "fmt" :alias nil}
+                           {:path "github.com/nooga/let-go/pkg/rt" :alias "rt"}
+                           {:path "github.com/nooga/let-go/pkg/vm" :alias "vm"}])
+          extra-decls   (when (seq register-entries)
+                          [(register-helper-decl)
+                           (register-init-decl (str ns-name) register-entries)])
+          file-ast (lower-go/file pkg-name valid-results extra-imports extra-decls)]
       (gogen/render file-ast))))

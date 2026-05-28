@@ -52,12 +52,20 @@
       (ir/add-source-info! f inst-id (ir/new-named-source-info (str sym))))))
 
 (defn bind-local! [ctx sym inst-id]
-  (let [s @ctx
-        stack (get s :locals)
-        top-idx (dec (count stack))
-        top (nth stack top-idx)]
-    (reset! ctx (assoc s :locals (assoc stack top-idx (assoc top sym inst-id))))
-    (attach-name! ctx inst-id sym)))
+  ;; `_` is the discard binding (matches Go's blank identifier and
+  ;; Clojure's destructuring convention). The inst-id still exists in
+  ;; the IR — its side effects (if any) still happen — but the symbol
+  ;; is never added to the local-name table, so any later reference to
+  ;; `_` as a value fails resolution at build time (which is the
+  ;; intended error).
+  (if (= sym '_)
+    (attach-name! ctx inst-id sym)
+    (let [s @ctx
+          stack (get s :locals)
+          top-idx (dec (count stack))
+          top (nth stack top-idx)]
+      (reset! ctx (assoc s :locals (assoc stack top-idx (assoc top sym inst-id))))
+      (attach-name! ctx inst-id sym))))
 
 (defn rebind-local! [ctx sym inst-id]
   "Find the nearest frame containing sym and update it there;

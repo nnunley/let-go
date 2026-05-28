@@ -1,0 +1,54 @@
+;; Tests that ir.lower-go does not shadow captured outer-scope identifiers
+;; with inner-closure params or locals. The bug: outer `(fn outer [x] ...)`
+;; lowers to `func outer(arg0 ...)`. An inner `(fn inner [y] (+ x y ...))`
+;; also lowers to `func(arg0 ...)`. Inside the inner, the captured `x`
+;; reference is supposed to read outer's `arg0` via Go closure capture,
+;; but inner's own `arg0` shadows it — so the inner sees `y` where it
+;; should see `x`. swap! / arithmetic / etc. then operate on the wrong
+;; value.
+;;
+;; Bytecode interpretation handles this correctly because each frame has
+;; its own slot space. The bug only manifests in lower-go output.
+;;
+;; This test asserts the bug signature is absent in the rendered Go for
+;; a known-failing reproducer. It does NOT compile-and-run the lowered
+;; Go (that harness doesn't exist yet); it inspects the rendered source
+;; for the structural fingerprint of the shadowing.
+
+(ns test.lower-go-capture-test
+  (:require [test :refer :all]
+            [ir.build :as build]
+            [ir.passes.pipeline :as pipeline]
+            [ir.lower-go :as lower-go]
+            [gogen :as g]))
+
+(defn- lower-defn-to-go
+  "Expand, build, optimize, and lower a quoted (defn ...) form. Returns
+   the rendered Go source string of the lowered decl, or nil if lowering
+   fell back."
+  [defn-form]
+  (let [body-raw  (drop 3 defn-form)
+        body-exp  (mapv (fn [b] (pipeline/expand-all b)) body-raw)
+        expanded  (apply list 'defn (nth defn-form 1) (nth defn-form 2) body-exp)
+        ir-fn     (build/build-fn expanded)
+        _         (pipeline/optimize-fn ir-fn)
+        result    (lower-go/lower ir-fn :bridge)]
+    (when (= :lowered (:status result))
+      (g/render (:decl result)))))
+
+(deftest inner-closure-capture-no-shadowing
+  (testing "inner closure with captured outer arg + own arg must not collapse to same Go identifier"
+    (let [go-src (lower-defn-to-go
+                  '(defn outer-cap [the-outer]
+                     (let [inner (fn [the-inner]
+                                   (+ the-outer the-inner 100))]
+                       (inner 10))))]
+      (is (string? go-src)
+          "lower-go should succeed for this simple defn, not fall back")
+      ;; Bug signature: inner body computes (+ the-outer the-inner 100)
+      ;; but both the-outer and the-inner have collapsed to `arg0`, so
+      ;; the addition reads `arg0 + arg0` — that's `the-inner + the-inner`,
+      ;; not `the-outer + the-inner`. After the fix, the two operands
+      ;; must be distinct identifiers.
+      (is (not (re-find #"rt\.AddValue\(arg0, arg0\)" go-src))
+          (str "inner closure shadows captured outer arg; rendered Go:\n" go-src)))))

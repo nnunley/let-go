@@ -37,7 +37,7 @@
 (def pure-ops
   "Ops safe to hoist — same as DCE's pure set."
   #{:const :load-arg :load-closed :block-arg
-    :add :sub :mul :lt :lte :gt :gte :eq :inc :dec})
+    :add :sub :mul :quot :lt :lte :gt :gte :eq :inc :dec})
 
 (defn pure-op? [op] (contains? pure-ops op))
 
@@ -135,13 +135,20 @@
 ;; --- threading hoisted values through the loop header ----------------
 
 (defn- find-in-loop-users [f clone loop-set]
-  "Find all Insts in loop-set that reference clone."
-  (->> (range (count (:insts @f)))
-       (filter (fn [nid]
-                 (and (not= :invalid (ir/op nid f))
-                      (loop-set (ir/block-of nid f))
-                      (some #(= % clone) (ir/refs nid f)))))
-       vec))
+  "Find all Insts in loop-set that reference clone via :refs.
+   Uses the def→use cache (ir/uses) so cost is O(users-of-clone),
+   not O(total-insts). The :refs membership check is preserved
+   because uses-cache also tracks branch-target-arg uses which the
+   threading-rewriter (set-refs!) cannot rewrite."
+  (let [clone-users (nth (ir/uses f) clone)
+        acc         (atom [])]
+    (ir/uses-for-each clone-users
+      (fn [nid]
+        (when (and (not= :invalid (ir/op nid f))
+                   (loop-set (ir/block-of nid f))
+                   (some #(= % clone) (ir/refs nid f)))
+          (swap! acc conj nid))))
+    @acc))
 
 (defn thread-hoisted-through-header! [f loop-info hoisted-pairs]
   "For each hoisted value used inside the loop body, add a block-arg parameter

@@ -42,7 +42,11 @@
     (or (= t :float) (= t [:const :float 0.0]))  "float64"
     (or (= t :bool) (= t :true) (= t :false))    "bool"
     (= t :string)                                "string"
-    (or (= t :unknown) (= t :any) (= t :nil))    "vm.Value"
+    ;; :number (typeinfer's join of :int and :float) joins the other
+    ;; "carry as vm.Value, dispatch dynamically" cases. Go has no native
+    ;; int|float union type; the arithmetic ops box/dispatch at runtime.
+    (or (= t :unknown) (= t :any) (= t :nil)
+        (= t :number))                           "vm.Value"
     (and (vector? t) (= (first t) :union))       "vm.Value"
     :else nil))
 
@@ -151,17 +155,35 @@
             sym
             (recur (next remaining))))))))
 
+;; *current-fn-instance* tracks the lowering nesting depth so each inner
+;; closure's locals can never collide with the outer scope's. NID spaces
+;; are per-function, so without a per-function suffix `result_15` in the
+;; inner closure would shadow `result_15` in an outer fn — Go closures
+;; share a lexical scope, and the inner var would capture nil instead of
+;; the outer's atom. Top-level (instance 0) keeps the bare scheme;
+;; inner closures append `_c<n>`.
+;;
+;; Implementation: a plain atom + stack rather than dynamic vars. The
+;; lowering walks one function at a time and swaps the atom up/down
+;; around each inner-closure scope. (Dynamic-var `binding` did not
+;; propagate as expected through this code path during testing.)
+(def ^:private *current-fn-instance* (atom 0))
+(def ^:private *fn-instance-counter* (atom 0))
+
 (defn- value-name
   "Go identifier for inst nid. Prefers the user-visible source name when
-   one is attached via a name-only SourceInfo (suffix `_<nid>` preserves
-   uniqueness across shadowing — multiple SSA insts can share a source
-   symbol, but each gets its own Go local). Falls back to `v<nid>` when
-   no name is attached."
-  ([nid] (str "v" nid))
+   one is attached via a name-only SourceInfo. Appends `_c<instance>`
+   for inner closures so locals can't shadow enclosing-scope vars."
+  ([nid]
+   (let [inst @*current-fn-instance*
+         suffix (if (pos? inst) (str "_c" inst) "")]
+     (str "v" nid suffix)))
   ([f nid]
-   (or (when-let [sym (source-name-of f nid)]
-         (str (go-name sym) "_" nid))
-       (str "v" nid))))
+   (let [inst @*current-fn-instance*
+         suffix (if (pos? inst) (str "_c" inst) "")]
+     (or (when-let [sym (source-name-of f nid)]
+           (str (go-name sym) "_" nid suffix))
+         (str "v" nid suffix)))))
 
 ;; Munge Lisp-idiomatic identifier chars to a valid Go identifier.
 ;; Convention is Clojure-flavoured: each unsafe char maps to a distinct
@@ -318,8 +340,14 @@
                 (gogen/call
                   (gogen/field-sel (gogen/ident "rt") "BoxRestArgs")
                   [(gogen/ident rest-var)]))
-              (let [prefix (if (function-needs-tail-call? f) "a" "arg")]
-                (gogen/ident (str prefix aux))))
+              ;; Tail-call mode still uses the a<i> mutable-local scheme so
+              ;; the goto-based loop can reassign args. Non-tail-call mode
+              ;; uses the unique source-name+nid identifier emitted by
+              ;; params-for — preventing collisions with captures from
+              ;; outer scopes when this fn is itself an inner closure.
+              (if (function-needs-tail-call? f)
+                (gogen/ident (str "a" aux))
+                (gogen/ident (value-name f nid))))
 
           (= op :load-var)
             ;; rt.LookupVar returns *vm.Var; .Deref() returns the value-typed
@@ -361,21 +389,24 @@
         (let [op-str       (get binary-op op)
               s0           (go-type-spec (ir/type-of (nth refs 0) f))
               s1           (go-type-spec (ir/type-of (nth refs 1) f))
-              order-op?    (#{"<" "<=" ">" ">="} op-str)
+              ;; == returns bool like the ordering ops, so it goes in
+              ;; the same set for the result-spec wrap logic below.
+              order-op?    (#{"<" "<=" ">" ">=" "=="} op-str)
               arith-op?    (#{"+" "-" "*" "/"} op-str)
               any-vm?      (or (= "vm.Value" s0) (= "vm.Value" s1))
-              ;; rt.LtValue/AddValue/... polymorphic helpers — used when
-              ;; any operand is vm.Value, so we don't bail the whole defn.
-              ;; Each helper mirrors the bytecode VM's OP_<X>: vm.Int fast
-              ;; path then vm.Num<X> fallback for ordering; always-delegate
-              ;; to vm.Num<X> for arithmetic (keeps overflow / BigInt
-              ;; promotion semantics in one place).
+              ;; rt.LtValue/AddValue/EqValue/... polymorphic helpers
+              ;; used when any operand is vm.Value, so we don't bail the
+              ;; whole defn. rt.EqValue has a fast-path Go == for
+              ;; scalar-comparable types so the common typeinfer-keyword
+              ;; case stays nearly free; only slice/map-backed values
+              ;; pay the vm.ValueEquals cost.
               vm-helper    (when any-vm?
                              (cond
                                (= op-str "<")  "LtValue"
                                (= op-str "<=") "LeValue"
                                (= op-str ">")  "GtValue"
                                (= op-str ">=") "GeValue"
+                               (= op-str "==") "EqValue"
                                (= op-str "+")  "AddValue"
                                (= op-str "-")  "SubValue"
                                (= op-str "*")  "MulValue"
@@ -418,9 +449,22 @@
             :else nil))
 
       (or (= op :inc) (= op :dec))
-        (let [lhs (value-expr f closed-exprs (nth refs 0))]
-          (when lhs
-            (gogen/binary (if (= op :inc) "+" "-") lhs (gogen/int-lit 1))))
+        ;; Native Go path only when the operand is statically int/float —
+        ;; otherwise `vm.Value - 1` is a type error. Box the operand and
+        ;; delegate to rt.AddValue / rt.SubValue so semantics match the
+        ;; binary-op path above.
+        (let [operand-spec (go-type-spec (ir/type-of (nth refs 0) f))
+              numeric?     (or (= operand-spec "int") (= operand-spec "float64"))]
+          (if numeric?
+            (let [lhs (value-expr f closed-exprs (nth refs 0))]
+              (when lhs
+                (gogen/binary (if (= op :inc) "+" "-") lhs (gogen/int-lit 1))))
+            (let [boxed-lhs (box-as-value f closed-exprs (nth refs 0))
+                  helper    (if (= op :inc) "AddValue" "SubValue")]
+              (when boxed-lhs
+                (gogen/call
+                  (gogen/field-sel (gogen/ident "rt") helper)
+                  [boxed-lhs (boxed-value-expr 1)])))))
 
       :else nil)))
 
@@ -577,37 +621,77 @@
 
 (declare function-needs-error?)
 
+(defn- self-call-target? [f callee-nid]
+  "True when callee-nid is a :load-var op whose target Var is bound to
+   the same fn (f) currently being lowered. Self-calls can lower to a
+   direct Go function call, bypassing the rt.LookupVar + Deref +
+   rt.InvokeValue dispatch shape used for runtime-resolved targets.
+
+   Detection is structural: the IR's :load-var aux is a Var (e.g.
+   #'core/fact); coerce to a Symbol then compare its bare name to
+   (ir/fn-name f) which is a String."
+  (and (= :load-var (ir/op callee-nid f))
+       (let [aux (ir/aux callee-nid f)
+             sym (try (symbol aux) (catch e nil))]
+         (and sym (= (name sym) (str (ir/fn-name f)))))))
+
+(defn- emit-call-stmts [f assign-target invoke-expr]
+  "Build the [assign err-check] statement pair shared by both call paths.
+   assign-target is either a gogen ident (used? case) or '_'; invoke-expr
+   is the right-hand side that produces (result, error) at runtime."
+  (let [err-id     (gogen/ident "callErr")
+        assign     (gogen/multi-assign "=" [assign-target err-id] [invoke-expr])
+        zero-expr  (case (function-return-spec f)
+                     "bool"    (gogen/ident "false")
+                     "int"     (gogen/int-lit 0)
+                     "float64" (gogen/float-lit 0.0)
+                     "string"  (gogen/string-lit "")
+                     (gogen/ident "nil"))
+        err-check  (gogen/if-stmt nil
+                                  (gogen/binary "!=" err-id (gogen/ident "nil"))
+                                  [(gogen/return-stmt [zero-expr err-id])]
+                                  nil)]
+    [assign err-check]))
+
 (defn- call-assign-stmts [f closed-exprs nid]
-  (let [refs       (ir/refs nid f)
-        callee     (box-as-value f closed-exprs (first refs))
-        arg-exprs  (mapv (fn [rid] (box-as-value f closed-exprs rid)) (rest refs))
-        args-slice (gogen/composite-lit (gogen/type "[]vm.Value") arg-exprs)
-        invoke-expr (gogen/call
-                      (gogen/field-sel (gogen/ident "rt") "InvokeValue")
-                      [callee args-slice])
-        err-id     (gogen/ident "callErr")]
-    (when (and callee (every? identity arg-exprs))
-      (let [assign (if (used? f nid)
-                     (gogen/multi-assign "="
-                                         [(value-ident f nid) err-id]
-                                         [invoke-expr])
-                     (gogen/multi-assign "="
-                                         [(gogen/ident "_") err-id]
-                                         [invoke-expr]))
-            ;; Error-path return zero value must match the function's actual
-            ;; declared return type (not always nil — bool/int/etc. have
-            ;; different zeros).
-            zero-expr (case (function-return-spec f)
-                        "bool"    (gogen/ident "false")
-                        "int"     (gogen/int-lit 0)
-                        "float64" (gogen/float-lit 0.0)
-                        "string"  (gogen/string-lit "")
-                        (gogen/ident "nil"))
-            err-check (gogen/if-stmt nil
-                                     (gogen/binary "!=" err-id (gogen/ident "nil"))
-                                     [(gogen/return-stmt [zero-expr err-id])]
-                                     nil)]
-        [assign err-check]))))
+  (let [refs        (ir/refs nid f)
+        callee-nid  (first refs)
+        target      (if (used? f nid)
+                      (value-ident f nid)
+                      (gogen/ident "_"))]
+    (if (self-call-target? f callee-nid)
+      ;; Self-call: emit direct Go call to the same package-level function
+      ;; instead of dispatching through rt.LookupVar. Bypasses ~100x of
+      ;; per-call overhead and is what makes recursive Lisp fns lower to
+      ;; something that performs like idiomatic Go.
+      ;;
+      ;; Args use value-expr (typed per typeinfer) so they match
+      ;; params-for's emitted types. If any arg can't be typed cleanly,
+      ;; bail to the dynamic path — correctness over micro-optimisation.
+      (let [arg-exprs (mapv (fn [rid] (value-expr f closed-exprs rid)) (rest refs))]
+        (if (every? identity arg-exprs)
+          (let [direct-call (gogen/call (gogen/ident (go-name (str (ir/fn-name f))))
+                                        arg-exprs)]
+            (emit-call-stmts f target direct-call))
+          ;; Fallback: dynamic dispatch with boxed args.
+          (let [callee     (box-as-value f closed-exprs callee-nid)
+                box-args   (mapv (fn [rid] (box-as-value f closed-exprs rid)) (rest refs))
+                args-slice (gogen/composite-lit (gogen/type "[]vm.Value") box-args)
+                invoke-expr (gogen/call
+                              (gogen/field-sel (gogen/ident "rt") "InvokeValue")
+                              [callee args-slice])]
+            (when (and callee (every? identity box-args))
+              (emit-call-stmts f target invoke-expr)))))
+      ;; Runtime-dispatched call (callee not known at lower time, or
+      ;; targets a different fn).
+      (let [callee     (box-as-value f closed-exprs callee-nid)
+            box-args   (mapv (fn [rid] (box-as-value f closed-exprs rid)) (rest refs))
+            args-slice (gogen/composite-lit (gogen/type "[]vm.Value") box-args)
+            invoke-expr (gogen/call
+                          (gogen/field-sel (gogen/ident "rt") "InvokeValue")
+                          [callee args-slice])]
+        (when (and callee (every? identity box-args))
+          (emit-call-stmts f target invoke-expr))))))
 
 (defn- lower-inst-stmts [f closed-exprs nid]
   (let [op  (ir/op nid f)
@@ -715,13 +799,27 @@
             (= :tail-call (ir/op term f)) true
             :else (recur (rest blocks)))))))
 
+(defn- arg-nid-by-aux [f]
+  "Return a vector of load-arg inst nids ordered by aux, indexable as
+   v[i] = load-arg inst whose aux = i. Used to look up the unique
+   source-name+nid identifier for each fn param at emission time."
+  (let [entry       (ir/entry-block f)
+        arity       (ir/fn-arity f)
+        variadic?   (ir/fn-variadic? f)
+        fixed-arity (if variadic? (dec arity) arity)
+        load-args   (filter (fn [nid] (= :load-arg (ir/op nid f)))
+                            (ir/block-insts entry f))
+        by-aux      (reduce (fn [m nid] (assoc m (ir/aux nid f) nid))
+                            {} load-args)]
+    (mapv (fn [i] (get by-aux i)) (range fixed-arity))))
+
 (defn- arg-local-decls [f]
   "For tail-call fns, declare mutable locals (a0, a1, ...) that shadow the
    immutable Go params, plus init assignments (a0 = arg0, ...).
    Returns [var-decls assign-stmts]."
-  (let [arity       (ir/fn-arity f)
-        variadic?   (ir/fn-variadic? f)
-        fixed-arity (if variadic? (dec arity) arity)]
+  (let [variadic?   (ir/fn-variadic? f)
+        arg-nids    (arg-nid-by-aux f)
+        fixed-arity (count arg-nids)]
     (loop [i 0 decls [] assigns []]
       (if (>= i fixed-arity)
         (let [final-decls decls
@@ -731,8 +829,9 @@
              (conj final-assigns
                    (gogen/assign "=" (gogen/ident "args0") (gogen/ident "args")))]
             [final-decls final-assigns]))
-        (let [sym (str "a" i)
-              arg-sym (str "arg" i)]
+        (let [sym     (str "a" i)
+              arg-nid (nth arg-nids i)
+              arg-sym (value-name f arg-nid)]
           (recur (inc i)
                  (conj decls (gogen/var-decl sym (gogen/type "vm.Value") nil))
                  (conj assigns
@@ -772,10 +871,17 @@
                    (recur (rest blocks) (into out stmts))))))))))))
 
 (defn- params-for [f]
-  (let [arity       (ir/fn-arity f)
-        variadic?   (ir/fn-variadic? f)
-        fixed-arity (if variadic? (dec arity) arity)
-        arg-types   (or (ir/fn-arg-types f) [])]
+  ;; Each fixed-arity param gets a source-name-derived identifier
+  ;; (e.g. `key_fn_2`) instead of `arg<i>`. This prevents inner closures
+  ;; from shadowing captured outer args: an inner `func(arg0, arg1)` used
+  ;; to clobber the outer `arg0` (key-fn), silently turning a captured
+  ;; reference into a reference to the inner param. With nid-suffixed
+  ;; names, the inner fn's `m_4` cannot collide with the outer's
+  ;; `key_fn_2`. Variadic and tail-call args still use their own naming.
+  (let [variadic?   (ir/fn-variadic? f)
+        arg-types   (or (ir/fn-arg-types f) [])
+        arg-nids    (arg-nid-by-aux f)
+        fixed-arity (count arg-nids)]
     (loop [i 0 out []]
       (if (>= i fixed-arity)
         (if variadic?
@@ -789,10 +895,12 @@
               t           (cond
                             (not= :unknown load-arg-t) load-arg-t
                             :else                      meta-t)
-              go-type     (infer-go-type t)]
+              go-type     (infer-go-type t)
+              arg-nid     (nth arg-nids i)
+              param-name  (value-name f arg-nid)]
           (if (nil? go-type)
             nil
-            (recur (inc i) (conj out (gogen/param (str "arg" i) go-type)))))))))
+            (recur (inc i) (conj out (gogen/param param-name go-type)))))))))
 
 (defn- return-ref-ids [f]
   (loop [blocks (ir/blocks f) out []]
@@ -834,21 +942,60 @@
               results)))))))
 
 (defn- lower-fn-lit [f closed-exprs]
-  ;; Returns nil on any unlowerable inner — callers (closure-expr →
-  ;; lower-template-closure-expr) propagate nil up through value-expr,
-  ;; which makes the OUTER defn fall back via the normal :status :fallback
-  ;; path in lower-fn*. Previously this threw, which still ended in the
-  ;; same fallback but interrupted control flow harshly and made it
-  ;; harder to attribute the failure. Per-closure fallback (NOTE: this
-  ;; is a stopgap; the real fix is lambda lifting — see
-  ;; project-lambda-lifting-todo memory).
-  (let [params  (params-for f)
-        results (result-node f)
-        body    (lower-body f closed-exprs)]
-    (when (and params results body)
-      (gogen/func-lit params results body))))
+  ;; Each inner closure swaps in a fresh fn-instance so its local
+  ;; variable names get a unique `_c<N>` suffix. The instance is
+  ;; restored when we return so nested closures don't pollute their
+  ;; parent's scope.
+  (let [prev-instance @*current-fn-instance*
+        my-instance   (swap! *fn-instance-counter* inc)]
+    (reset! *current-fn-instance* my-instance)
+    (let [params  (params-for f)
+          results (result-node f)
+          body    (lower-body f closed-exprs)]
+      (reset! *current-fn-instance* prev-instance)
+      (when (and params results body)
+        (gogen/func-lit params results body)))))
+
+(defn- param-type-specs [f]
+  "Per-arg go-type-spec string vector matching params-for's emitted types.
+   Returns nil if any param type is unmappable (matching params-for's
+   nil-on-failure behaviour)."
+  (let [arity       (ir/fn-arity f)
+        variadic?   (ir/fn-variadic? f)
+        fixed-arity (if variadic? (dec arity) arity)
+        arg-types   (or (ir/fn-arg-types f) [])]
+    (loop [i 0 out []]
+      (if (>= i fixed-arity)
+        out
+        (let [load-arg-t (ir/fn-load-arg-type f i)
+              meta-t     (if (< i (count arg-types)) (nth arg-types i) :unknown)
+              t          (cond
+                           (not= :unknown load-arg-t) load-arg-t
+                           :else                      meta-t)
+              spec       (go-type-spec t)]
+          (if (nil? spec)
+            nil
+            (recur (inc i) (conj out spec))))))))
+
+(defn- result-type-spec [f]
+  "go-type-spec string for the function's return value, or nil if
+   unmappable. Matches result-node's gating."
+  (let [ret-ids (return-ref-ids f)]
+    (when (and ret-ids (pos? (count ret-ids)))
+      (let [specs (map (fn [nid] (go-type-spec (ir/type-of nid f))) ret-ids)]
+        (when (and (every? identity specs)
+                   (= 1 (count (distinct specs))))
+          (first specs))))))
 
 (defn- lower-fn* [f mode]
+  ;; Reset the inner-closure counters so each top-level defn lowers with
+  ;; deterministic `_c<N>` suffixes — without this, the counter would
+  ;; accumulate across the full ns lowering and cache fingerprints would
+  ;; drift even when source is unchanged. *current-fn-instance* is the
+  ;; top-level (0); *fn-instance-counter* feeds inner closures within
+  ;; this top-level.
+  (reset! *current-fn-instance* 0)
+  (reset! *fn-instance-counter* 0)
   (let [params  (params-for f)
         results (result-node f)
         body    (lower-body f)
@@ -869,6 +1016,13 @@
       :else
         {:status :lowered
          :imports imports
+         :fn-name  (ir/fn-name f)
+         :go-name  (go-name (ir/fn-name f))
+         :arity    (ir/fn-arity f)
+         :variadic? (ir/fn-variadic? f)
+         :param-specs (param-type-specs f)
+         :result-spec (result-type-spec f)
+         :needs-error? (function-needs-error? f)
          :decl   (gogen/func-decl (go-name (ir/fn-name f)) params results body)})))
 
 (defn- import-spec-node [entry]
@@ -888,16 +1042,21 @@
           (recur (rest remaining) seen out)
           (recur (rest remaining) (conj seen key) (conj out entry)))))))
 
-(defn file [pkg lowered-results]
-  (let [results (vec lowered-results)
-        imports (distinct-imports
-                  (mapcat (fn [result]
-                            (let [entries (:imports result)]
-                              (if entries entries [])))
-                          results))
-        decls   (mapv (fn [result] (:decl result)) results)
-        import-nodes (mapv import-spec-node imports)]
-    (gogen/file pkg import-nodes decls)))
+(defn file
+  ([pkg lowered-results] (file pkg lowered-results nil nil))
+  ([pkg lowered-results extra-imports] (file pkg lowered-results extra-imports nil))
+  ([pkg lowered-results extra-imports extra-decls]
+   (let [results (vec lowered-results)
+         imports (distinct-imports
+                   (concat (or extra-imports [])
+                           (mapcat (fn [result]
+                                     (let [entries (:imports result)]
+                                       (if entries entries [])))
+                                   results)))
+         decls   (into (mapv (fn [result] (:decl result)) results)
+                       (or extra-decls []))
+         import-nodes (mapv import-spec-node imports)]
+     (gogen/file pkg import-nodes decls))))
 
 (defn lower [f mode]
   (if (nil? f)

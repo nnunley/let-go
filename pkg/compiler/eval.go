@@ -261,4 +261,9 @@ func postCoreInit() {
 	})
 
 	// test, walk, etc. are demand-loaded via resolver when required
+
+	// Apply any Go-native overrides queued for core (e.g. from generated
+	// IR-stack packages registered under //go:build gogen_ir). No-op when
+	// no overrides have been registered.
+	rt.ApplyGoOverrides(coreNS)
 }

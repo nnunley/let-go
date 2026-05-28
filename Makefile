@@ -38,8 +38,32 @@ run: $(LG)
 
 build: $(LG)
 
-generate: $(GO) generate-ir-ops generate-ir-bridge generate-ir-data
+# Bundle target. The runtime loads compiled bytecode for the core
+# namespaces from this file, NOT from the .lg sources. Anyone editing
+# a .lg under pkg/rt/core/ must regenerate the bundle or runtime
+# behavior silently diverges from source. This prereq rule makes the
+# regeneration automatic — `make test`, `make build`, etc. now keep
+# the bundle in lockstep with the .lg sources.
+CORE-LG-FILES := $(shell find pkg/rt/core -name '*.lg' -type f 2>/dev/null)
+LGBGEN-SOURCES := $(shell find cmd/lgbgen -name '*.go' -type f 2>/dev/null)
+pkg/rt/core_compiled.lgb: $(CORE-LG-FILES) $(LGBGEN-SOURCES)
 	go run -tags bootstrap ./cmd/lgbgen
+
+# Loud check used by CI / pre-commit to detect a bundle that was
+# committed in a stale state (e.g. someone ran a manual `go test`
+# without going through make and committed the half-stale state).
+# Exits non-zero with a clear remediation when any .lg under
+# pkg/rt/core is newer than the committed bundle.
+check-bundle-fresh:
+	@stale=$$(find pkg/rt/core -name '*.lg' -newer pkg/rt/core_compiled.lgb 2>/dev/null); \
+	if [ -n "$$stale" ]; then \
+		echo "ERROR: pkg/rt/core_compiled.lgb is stale relative to:"; \
+		echo "$$stale" | sed 's/^/  /'; \
+		echo "Run 'make generate' to regenerate the bundle."; \
+		exit 1; \
+	fi
+
+generate: $(GO) generate-ir-ops generate-ir-bridge generate-ir-data pkg/rt/core_compiled.lgb
 
 # Regenerate pkg/ir/op_generated.go from examples/go-gen/ir_ops.lg.
 # Requires ./lg to exist (built by `make build`).
@@ -57,11 +81,11 @@ generate-ir-bridge: build
 generate-ir-data: build
 	./scripts/generate-ir-data.sh
 
-$(LG): $(GO) lg.go pkg/**/*
+$(LG): $(GO) lg.go pkg/**/* pkg/rt/core_compiled.lgb
 	which go
 	go build -ldflags="-s -w" -o $@ .
 
-test: pkg/**/* $(GO)
+test: pkg/**/* pkg/rt/core_compiled.lgb $(GO)
 	$(GO-TEST-ENV) go test $(GO-TEST-FLAGS) -count=1 -v ./test
 
 clojure-compat-report: $(GO)
@@ -84,4 +108,4 @@ install-golangci-lint: $(GO)
 	  GO111MODULE=off go get -u $(GO111MODULE-LINT)
 
 # PHONY targets are for ones that have conflicting files/dirs present:
-.PHONY: test
+.PHONY: test check-bundle-fresh

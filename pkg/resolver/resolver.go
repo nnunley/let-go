@@ -179,6 +179,7 @@ func (r *NSResolver) Load(name string) *vm.Namespace {
 	blocks := stdstrings.Split(name, ".")
 	// Try embedded namespaces first
 	if embedded := r.loadEmbedded(name); embedded != nil {
+		rt.ApplyGoOverrides(embedded)
 		return embedded
 	}
 	// Build candidate paths: try .lg and .cljc extensions,
@@ -203,6 +204,9 @@ func (r *NSResolver) Load(name string) *vm.Namespace {
 				r.cloading[name] = true
 				lns := r.loadFile(cp)
 				delete(r.cloading, name)
+				if lns != nil {
+					rt.ApplyGoOverrides(lns)
+				}
 				return lns
 			}
 		}
