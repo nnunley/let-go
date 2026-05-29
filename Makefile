@@ -67,6 +67,30 @@ test: pkg/**/* $(GO)
 clojure-compat-report: $(GO)
 	@$(REPORT-SCRIPT)
 
+# Performance ratchet.
+#
+#   bench-ratchet         compare current benchmarks against the
+#                         committed docs/perf/baseline.json; exits
+#                         non-zero on any regression > 5% (anchor-
+#                         normalized). Suitable for CI.
+#   bench-ratchet-update  re-run the sweep and ratchet-merge the
+#                         baseline (per-(benchmark, metric) MIN).
+#                         The ratchet only tightens; -force bypasses.
+#   bench-ratchet-show    run the sweep, print the would-be baseline
+#                         JSON to stdout, write nothing. For
+#                         spot-checking before deciding to update.
+#
+# All three are anchor-normalized — see cmd/bench-ratchet/main.go
+# and docs/perf/ratchet.md.
+bench-ratchet:
+	go run ./cmd/bench-ratchet check
+
+bench-ratchet-update:
+	go run ./cmd/bench-ratchet update
+
+bench-ratchet-show:
+	go run ./cmd/bench-ratchet show
+
 clean:
 	$(RM) $(LG)
 
@@ -84,4 +108,4 @@ install-golangci-lint: $(GO)
 	  GO111MODULE=off go get -u $(GO111MODULE-LINT)
 
 # PHONY targets are for ones that have conflicting files/dirs present:
-.PHONY: test
+.PHONY: test bench-ratchet bench-ratchet-update bench-ratchet-show
