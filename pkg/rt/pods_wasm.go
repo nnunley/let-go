@@ -9,6 +9,8 @@ package rt
 
 // Pods are not supported in WASM — subprocess execution is unavailable.
 
+func init() { RegisterInstaller(installPodsNS) }
+
 func installPodsNS() {}
 
 func ShutdownAllPods() {}

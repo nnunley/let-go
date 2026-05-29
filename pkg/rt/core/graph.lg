@@ -1,3 +1,4 @@
+;; lgbgen:skip — has runtime intern blocks that need live fn values; loaded from source on demand.
 ;; Generic graph algorithms.
 ;;
 ;; A graph is represented as a map {node -> coll-of-deps}. Nodes can

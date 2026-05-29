@@ -29,7 +29,7 @@ Each layer is one file (or one directory) in this tree:
 | Path                                          | Role                                                  |
 |-----------------------------------------------|-------------------------------------------------------|
 | `data.lg`                                     | IR data layer: Function/Block/Inst atom shape, ctors, structural mutators, uses cache. Loaded from source (intern block exposes accessors under `ir/`). |
-| `data_generated.lg`                           | Mechanical field accessors, generated from `examples/go-gen/ir_data.lg`. |
+| `data/generated.lg`                           | Mechanical field accessors, generated from `examples/go-gen/ir_data.lg`. |
 | `zipper.lg`                                   | Fn-scoped cursor over Insts in block-order.           |
 | `passes.lg`                                   | `defpass` DSL; binds `*current-fn*` / `*current-inst*` / `*current-zip*`. |
 | `build.lg`                                    | `ir.build/build-fn` — Lisp form → IR Function.        |
@@ -56,7 +56,7 @@ The Go substrate consumed via the `ir/` namespace bridge:
 - `ir/op-terminator?`, `ir/op-pure?`, `ir/op-cheap-load?`, `ir/op-stack-out` — op-table queries (genuine Go bridges).
 - `ir/chunk-emit`, `ir/chunk-emit-with-arg`, `ir/chunk-emit-placeholder`, `ir/chunk-emit-dup-nth`, `ir/chunk-emit-recur`, `ir/chunk-update!`, `ir/chunk-length`, `ir/chunk-max-stack`, `ir/chunk-set-max-stack!`, `ir/chunk-intern-const`, `ir/chunk-add-source-info!`, `ir/new-chunk`, `ir/new-consts`, `ir/new-source-info` — VM-substrate primitives for lower.
 
-Everything in the first three groups is implemented in `data.lg` (mostly via the generated `data_generated.lg`); only the last two groups are Go bridge primitives.
+Everything in the first three groups is implemented in `data.lg` (mostly via the generated `data/generated.lg`); only the last two groups are Go bridge primitives.
 
 ## Using the IR
 
@@ -151,7 +151,7 @@ The IR data is a Lisp atom holding a map. Adding a field means updating both the
      :defaults {...})
    ```
 
-2. **Run `make generate-ir-data`**. Emits new accessor + setter in `data_generated.lg`.
+2. **Run `make generate-ir-data`**. Emits new accessor + setter in `data/generated.lg`.
 
 3. **Update `data.lg`** if structural ops need to initialize the field — most fields will fall back to `nil`, but for vector-valued fields you typically want `[]` in the constructor and in the intern block.
 

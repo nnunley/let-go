@@ -71,6 +71,7 @@ var (
 
 func init() {
 	podRegistry = make(map[string]*Pod)
+	RegisterInstaller(installPodsNS)
 }
 
 func registerPod(p *Pod) {

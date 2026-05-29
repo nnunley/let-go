@@ -273,7 +273,7 @@
 ;; --- ir.Function declaration -------------------------------------------
 ;;
 ;; Phase F: IR data lives in Lisp atoms (pkg/rt/core/ir/data.lg +
-;; data_generated.lg). The bridge for ir.Function shrinks to the
+;; data/generated.lg). The bridge for ir.Function shrinks to the
 ;; op-metadata queries — they're keyed by op-keyword and don't touch
 ;; any Function value, so they remain on the Go side where the op
 ;; table lives. All field accessors and structural mutators were

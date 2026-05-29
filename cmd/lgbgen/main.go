@@ -26,43 +26,191 @@ import (
 	"github.com/nooga/let-go/pkg/vm"
 )
 
-// embeddedNS lists all embedded namespaces in compilation order.
-// Dependencies must come before dependents (test depends on walk).
-var embeddedNS = []struct {
+type embeddedNamespace struct {
 	name string
-	src  *string
-}{
-	{"core", &rt.CoreSrc},
-	{"walk", &rt.WalkSrc},
-	{"string", &rt.StringSrc},
-	{"set", &rt.SetSrc},
-	{"pprint", &rt.PprintSrc},
-	{"edn", &rt.EdnSrc},
-	{"io", &rt.IoSrc},
-	{"async", &rt.AsyncSrc},
-	{"test", &rt.TestSrc}, // depends on walk — must come after
-	// ir.data is loaded from source on demand (like `zip` and `data`)
-	// because precompiled ns chunks only replay nil stubs for defn,
-	// not function bodies — the intern block at the bottom of data.lg
-	// must run with live function values, which only happens via the
-	// source-load path in the resolver's loadEmbedded.
-	{"ir.zipper", &rt.IRZipperSrc},
-	{"ir.passes", &rt.IRPassesSrc},
-	{"ir.dominance", &rt.IRDominanceSrc},
-	{"ir.lower", &rt.IRLowerSrc},
-	{"ir.lower-go", &rt.IRLowerGoSrc},
-	{"ir.validate", &rt.IRValidateSrc},
-	{"ir.passes.dce", &rt.IRPassDCESrc},
-	{"ir.passes.constfold", &rt.IRPassConstFoldSrc},
-	{"ir.passes.cse", &rt.IRPassCSESrc},
-	{"ir.passes.typeinfer", &rt.IRPassTypeInferSrc},
-	{"ir.passes.licm", &rt.IRPassLICMSrc},
-	{"ir.build", &rt.IRBuildSrc},
-	{"ir.passes.pipeline", &rt.IRPassPipelineSrc},
-	{"ir.dump", &rt.IRDumpSrc},
-	{"ir.passes.trace", &rt.IRPassTraceSrc},
-	// zip and data are loaded from source on demand (precompiled ns chunks
-	// only replay nil stubs for defn, not the actual function bodies)
+	src  string
+}
+
+// discoverEmbeddedNS walks pkg/rt's coreFS to find every namespace
+// declared by a `(ns ...)` form. Returns (name, source) pairs in
+// dependency order derived from each file's `:require` clause.
+//
+// Namespaces whose source starts with `;; lgbgen:skip` are omitted
+// from the bundle — they have runtime intern blocks that need live
+// function values and must be loaded from source on demand. `core`
+// is always emitted first since the language depends on it.
+func discoverEmbeddedNS() ([]embeddedNamespace, error) {
+	names := rt.EmbeddedNSNames()
+	allowed := map[string]string{}
+	requires := map[string][]string{}
+	for _, n := range names {
+		src, ok := rt.EmbeddedSource(n)
+		if !ok {
+			continue
+		}
+		if hasLgbgenSkipDirective(src) {
+			continue
+		}
+		allowed[n] = src
+		requires[n] = parseRequires(src)
+	}
+	// Topological sort. Stable: visit names alphabetically so output
+	// order is deterministic across builds. `core` is forced first.
+	sorted, err := topoSort(allowed, requires)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]embeddedNamespace, 0, len(sorted))
+	for _, n := range sorted {
+		out = append(out, embeddedNamespace{name: n, src: allowed[n]})
+	}
+	return out, nil
+}
+
+// hasLgbgenSkipDirective reports whether the source begins with a line
+// containing `lgbgen:skip` (within the first ~3 lines, allowing the
+// licence/blank lines a generator might prepend).
+func hasLgbgenSkipDirective(src string) bool {
+	for i, line := range strings.SplitN(src, "\n", 4) {
+		if i > 2 {
+			break
+		}
+		if strings.Contains(line, "lgbgen:skip") {
+			return true
+		}
+	}
+	return false
+}
+
+// parseRequires extracts the dependency ns names from the first
+// `(ns name ... (:require ...))` form, using the actual Lisp reader so
+// docstrings, comments, and escape sequences are handled correctly.
+// Returns the empty slice when there's no (ns) form or no :require
+// clause. Errors are returned as nil — the topo sort tolerates missing
+// info (an unknown ns in :require just doesn't constrain order).
+func parseRequires(src string) []string {
+	r := compiler.NewLispReader(strings.NewReader(src), "<lgbgen:parseRequires>")
+	// Read past leading comments/whitespace (LispReader.Read returns
+	// vm.Void for line comments). The first real form should be (ns ...).
+	var form vm.Value
+	for tries := 0; tries < 64; tries++ {
+		v, err := r.Read()
+		if err != nil {
+			return nil
+		}
+		if v != nil && v.Type() != vm.VoidType {
+			form = v
+			break
+		}
+	}
+	if form == nil {
+		return nil
+	}
+	list, ok := form.(*vm.List)
+	if !ok {
+		return nil
+	}
+	if list.Count() == nil {
+		return nil
+	}
+	// First element: ns symbol
+	headSym, ok := list.First().(vm.Symbol)
+	if !ok || string(headSym) != "ns" {
+		return nil
+	}
+	var out []string
+	// Walk the rest looking for (:require ...) lists.
+	for s := list.Next(); s != nil; s = s.Next() {
+		clause, ok := s.First().(*vm.List)
+		if !ok {
+			continue
+		}
+		head, ok := clause.First().(vm.Keyword)
+		if !ok || string(head) != "require" {
+			continue
+		}
+		// Each item after :require is either a bare symbol or a
+		// vector whose first element is the ns symbol.
+		for cs := clause.Next(); cs != nil; cs = cs.Next() {
+			switch item := cs.First().(type) {
+			case vm.Symbol:
+				out = append(out, string(item))
+			case vm.ArrayVector:
+				if len(item) > 0 {
+					if sym, ok := item[0].(vm.Symbol); ok {
+						out = append(out, string(sym))
+					}
+				}
+			case vm.PersistentVector:
+				if v := item.ValueAt(vm.Int(0)); v != nil {
+					if sym, ok := v.(vm.Symbol); ok {
+						out = append(out, string(sym))
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// topoSort returns nodes in dependency order. `core` is forced first
+// (every other ns implicitly depends on it). Unknown requires are
+// dropped — they don't constrain order.
+func topoSort(nodes map[string]string, requires map[string][]string) ([]string, error) {
+	visited := map[string]int{} // 0=unseen, 1=visiting, 2=done
+	var out []string
+	var visit func(n string) error
+	visit = func(n string) error {
+		switch visited[n] {
+		case 1:
+			return fmt.Errorf("cycle through namespace %q", n)
+		case 2:
+			return nil
+		}
+		visited[n] = 1
+		// Iterate sorted so order is stable.
+		deps := make([]string, 0, len(requires[n]))
+		for _, d := range requires[n] {
+			if _, ok := nodes[d]; ok {
+				deps = append(deps, d)
+			}
+		}
+		for _, d := range deps {
+			if err := visit(d); err != nil {
+				return err
+			}
+		}
+		visited[n] = 2
+		out = append(out, n)
+		return nil
+	}
+	// Visit `core` first if present so it always heads the order.
+	if _, ok := nodes["core"]; ok {
+		if err := visit("core"); err != nil {
+			return nil, err
+		}
+	}
+	// Visit remaining in deterministic (sorted) order.
+	keys := make([]string, 0, len(nodes))
+	for k := range nodes {
+		keys = append(keys, k)
+	}
+	sortStrings(keys)
+	for _, k := range keys {
+		if err := visit(k); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func sortStrings(s []string) {
+	// avoid importing sort just for this; insertion sort, n is small (≤30)
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1] > s[j]; j-- {
+			s[j], s[j-1] = s[j-1], s[j]
+		}
+	}
 }
 
 func main() {
@@ -88,31 +236,40 @@ func main() {
 	// rt.init() has already run — native builtins are registered in CoreNS.
 	consts := vm.NewConsts()
 
-	// Phase 0: bootstrap ir.data (same for both modes).
+	// Phase 0: bootstrap ir.data (same for both modes). ir.data is
+	// marked lgbgen:skip so it doesn't end up in the bundle, but its
+	// consts still need to be interned in the VM so other NSes that
+	// reference IR data can compile.
 	{
+		src, ok := rt.EmbeddedSource("ir.data")
+		if !ok {
+			fmt.Fprintln(os.Stderr, "ir.data bootstrap: source not found in embed FS")
+			os.Exit(1)
+		}
 		coreNS := rt.NS(rt.NameCoreNS)
 		c := compiler.NewCompiler(consts, coreNS)
 		c.SetSource("<embedded:ir.data:lgbgen-bootstrap>")
-		if _, _, err := c.CompileMultiple(strings.NewReader(rt.IRDataSrc)); err != nil {
+		if _, _, err := c.CompileMultiple(strings.NewReader(src)); err != nil {
 			fmt.Fprintf(os.Stderr, "ir.data bootstrap compilation failed: %v\n", err)
 			os.Exit(1)
 		}
 	}
 
 	// Phase 1: compile all namespaces from source (bytecode, sets up VM state).
+	embeddedNS, err := discoverEmbeddedNS()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ns discovery failed: %v\n", err)
+		os.Exit(1)
+	}
 	nsChunks := make(map[string]*vm.CodeChunk)
 	nsOrder := make([]string, 0, len(embeddedNS))
 
 	for _, ns := range embeddedNS {
-		src := *ns.src
-		if src == "" {
-			continue
-		}
 		coreNS := rt.NS(rt.NameCoreNS)
 		c := compiler.NewCompiler(consts, coreNS)
 		c.SetSource("<embedded:" + ns.name + ">")
 
-		chunk, _, err := c.CompileMultiple(strings.NewReader(src))
+		chunk, _, err := c.CompileMultiple(strings.NewReader(ns.src))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s compilation failed: %v\n", ns.name, err)
 			os.Exit(1)
@@ -172,8 +329,13 @@ func runGoTarget(outDir string) {
 		os.Exit(1)
 	}
 
+	embeddedNS, err := discoverEmbeddedNS()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ns discovery failed: %v\n", err)
+		os.Exit(1)
+	}
 	for _, ns := range embeddedNS {
-		src := *ns.src
+		src := ns.src
 		if src == "" {
 			continue
 		}

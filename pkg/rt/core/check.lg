@@ -1,3 +1,4 @@
+;; lgbgen:skip — has runtime intern blocks that need live fn values; loaded from source on demand.
 (ns check
   "QuickCheck-style property testing with shrinking.
 

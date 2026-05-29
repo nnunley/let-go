@@ -23,38 +23,11 @@ type NSResolver struct {
 	LoadOrder []string
 }
 
-var embeddedSources = map[string]*string{
-	"walk":                &rt.WalkSrc,
-	"core":                &rt.CoreSrc,
-	"test":                &rt.TestSrc,
-	"string":              &rt.StringSrc,
-	"set":                 &rt.SetSrc,
-	"pprint":              &rt.PprintSrc,
-	"edn":                 &rt.EdnSrc,
-	"io":                  &rt.IoSrc,
-	"async":               &rt.AsyncSrc,
-	"zip":                 &rt.ZipSrc,
-	"data":                &rt.DataSrc,
-	"graph":               &rt.GraphSrc,
-	"hash":                &rt.HashSrc,
-	"ir.data":             &rt.IRDataSrc,
-	"ir.zipper":           &rt.IRZipperSrc,
-	"ir.passes":           &rt.IRPassesSrc,
-	"ir.dominance":        &rt.IRDominanceSrc,
-	"ir.lower":            &rt.IRLowerSrc,
-	"ir.lower-go":         &rt.IRLowerGoSrc,
-	"ir.passes.dce":       &rt.IRPassDCESrc,
-	"ir.passes.constfold": &rt.IRPassConstFoldSrc,
-	"ir.passes.cse":       &rt.IRPassCSESrc,
-	"ir.passes.typeinfer": &rt.IRPassTypeInferSrc,
-	"ir.passes.licm":      &rt.IRPassLICMSrc,
-	"ir.build":            &rt.IRBuildSrc,
-	"ir.validate":         &rt.IRValidateSrc,
-	"ir.passes.pipeline":  &rt.IRPassPipelineSrc,
-	"ir.passes.trace":     &rt.IRPassTraceSrc,
-	"ir.dump":             &rt.IRDumpSrc,
-	"check":               &rt.CheckSrc,
-}
+// Embedded namespace sources are looked up via rt.EmbeddedSource, which
+// derives the path from the dotted ns name (every "." is a path separator;
+// hyphens in the leaf segment map to underscores). Adding a new embedded
+// namespace requires only dropping a `.lg` file under `pkg/rt/core/` — no
+// edits here.
 
 // ParseSearchPaths splits a path-list string on os.PathListSeparator,
 // dropping empty entries. Returns nil for empty input.
@@ -221,12 +194,8 @@ func (r *NSResolver) loadEmbedded(name string) *vm.Namespace {
 		// term is a pure Go namespace, already registered in init()
 		return rt.NS("term")
 	}
-	srcPtr := embeddedSources[name]
-	if srcPtr == nil {
-		return nil
-	}
-	src := *srcPtr
-	if src == "" {
+	src, ok := rt.EmbeddedSource(name)
+	if !ok || src == "" {
 		return nil
 	}
 	r.cloading[name] = true

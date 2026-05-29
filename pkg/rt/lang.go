@@ -95,23 +95,13 @@ func init() {
 	})
 
 	initTypeMappings()
+	// installLangNS is called directly (not via the installers queue) so
+	// CoreNS exists before any other installer that Refer's it (async,
+	// io, math, term...) runs. Other installers register themselves via
+	// their own init() into the installers slice; the actual iteration
+	// happens from zz_run_installers.go::init which sorts last
+	// alphabetically so every file has registered first.
 	installLangNS()
-	installHttpNS()
-	installOsNS()
-	installJSONNS()
-	installIoNS()
-	installAsyncNS()
-	installTransitNS()
-	installPodsNS()
-	installMathNS()
-	installTermNS()
-	installSyscallNS()
-	installUnixNS()
-	installSystemNS()
-	installXxh3NS()
-	installGogenNS()
-	installDisasmNS()
-	installProfileNS()
 	// walk namespace is embedded via WalkSrc and will be loaded on demand
 }
 
