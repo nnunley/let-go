@@ -50,7 +50,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -502,59 +501,6 @@ func mostRecentRun() (string, error) {
 		return "", fmt.Errorf("no .jsonl files in %s", defaultRunsDir)
 	}
 	return best, nil
-}
-
-// discoverBenchPackages walks the module looking for *_test.go files
-// that contain `func Benchmark` and returns the import paths.
-func discoverBenchPackages() ([]string, error) {
-	out, err := exec.Command("go", "list", "-f",
-		`{{if (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}`,
-		"./...").Output()
-	if err != nil {
-		return nil, fmt.Errorf("go list: %w", err)
-	}
-	var pkgs []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		// Filter to packages that actually contain a Benchmark function.
-		ok, err := packageHasBench(line)
-		if err != nil || !ok {
-			continue
-		}
-		pkgs = append(pkgs, line)
-	}
-	sort.Strings(pkgs)
-	return pkgs, nil
-}
-
-// packageHasBench returns true if any _test.go file in the package
-// defines a function whose name starts with Benchmark.
-func packageHasBench(pkg string) (bool, error) {
-	out, err := exec.Command("go", "list", "-f",
-		`{{range .TestGoFiles}}{{.}} {{end}}{{range .XTestGoFiles}}{{.}} {{end}}`,
-		pkg).Output()
-	if err != nil {
-		return false, err
-	}
-	dir, err := exec.Command("go", "list", "-f", `{{.Dir}}`, pkg).Output()
-	if err != nil {
-		return false, err
-	}
-	pkgDir := strings.TrimSpace(string(dir))
-	for _, f := range strings.Fields(string(out)) {
-		body, err := os.ReadFile(filepath.Join(pkgDir, f))
-		if err != nil {
-			continue
-		}
-		if bytes.Contains(body, []byte("\nfunc Benchmark")) ||
-			bytes.HasPrefix(body, []byte("func Benchmark")) {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 func compileFilter(pattern string) (*regexp.Regexp, error) {
