@@ -7,8 +7,10 @@
 package vm
 
 import (
+	"context"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestGoIDIsNonZeroAndDistinct(t *testing.T) {
@@ -68,4 +70,85 @@ func TestConcurrentGoIDNoRace(t *testing.T) {
 		go func() { defer wg.Done(); _ = goID() }()
 	}
 	wg.Wait()
+}
+
+func TestScopeGoRegistersItsScope(t *testing.T) {
+	child := Goroutines.Child()
+	defer Goroutines.removeChild(child)
+	seen := make(chan *Scope, 1)
+	child.Go(func(ctx context.Context) { seen <- CurrentScope() })
+	got := <-seen
+	if got != child {
+		t.Fatalf("goroutine spawned via child.Go should see child as current, got %v", got)
+	}
+	child.Await(time.Second)
+	if scopedLive.Load() != 0 {
+		t.Fatalf("scopedLive should return to 0 after the goroutine exits, got %d", scopedLive.Load())
+	}
+}
+
+func TestSubScopeCancelIsIndependent(t *testing.T) {
+	a := Goroutines.Child()
+	b := Goroutines.Child()
+	defer Goroutines.removeChild(a)
+	defer Goroutines.removeChild(b)
+	ch := make(chan Value) // never fed → recv parks
+	park := func(ctx context.Context) {
+		select {
+		case <-ch:
+		case <-CurrentContext().Done(): // gid lookup resolves to a or b
+		}
+	}
+	a.Go(park)
+	b.Go(park)
+	waitLiveScoped(t, a, 1)
+	waitLiveScoped(t, b, 1)
+
+	a.Cancel() // cancel ONLY a's subtree
+	if !a.Await(2 * time.Second) {
+		t.Fatal("a's parked goroutine should unblock on a.Cancel")
+	}
+	if b.Live() != 1 {
+		t.Fatalf("b must remain live after cancelling a, got %d", b.Live())
+	}
+	b.Cancel()
+	b.Await(2 * time.Second)
+}
+
+func waitLiveScoped(t *testing.T, s *Scope, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for s.Live() != want && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if s.Live() != want {
+		t.Fatalf("expected %d live, got %d", want, s.Live())
+	}
+}
+
+func TestCloseScopedUnparentsNoGrowth(t *testing.T) {
+	before := childCount(Goroutines)
+	for i := 0; i < 20; i++ {
+		c := OpenChild()
+		CloseScoped(c, time.Second)
+	}
+	if after := childCount(Goroutines); after != before {
+		t.Fatalf("root children grew: before=%d after=%d", before, after)
+	}
+}
+
+func childCount(s *Scope) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.children)
+}
+
+func TestScopeIsAValue(t *testing.T) {
+	var v Value = Goroutines.Child()
+	if v.Type() != ScopeType {
+		t.Fatalf("scope Type should be ScopeType, got %v", v.Type())
+	}
+	if v.String() == "" {
+		t.Fatal("scope String should be non-empty")
+	}
 }

@@ -8,6 +8,7 @@ package vm
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,9 +98,27 @@ func (s *Scope) Go(fn func(ctx context.Context)) {
 	ctx := s.state.Load().ctx
 	s.wg.Add(1)
 	s.live.Add(1)
+	// Only goroutines running under a NON-root scope need a gid registration:
+	// a goroutine under the root resolves to Goroutines via the fast-path
+	// fallback anyway, so registering it would pointlessly bump scopedLive and
+	// defeat the scopedLive==0 guard for every other goroutine's channel ops
+	// (futures, go-blocks, sleeps and the async pumps all spawn under root).
+	register := s != Goroutines
 	go func() {
-		defer s.wg.Done()
-		defer s.live.Add(-1)
+		var gid int64
+		if register {
+			gid = goID()
+			scopeByGID.Store(gid, s)
+			scopedLive.Add(1)
+		}
+		defer func() {
+			if register {
+				scopeByGID.Delete(gid)
+				scopedLive.Add(-1)
+			}
+			s.live.Add(-1)
+			s.wg.Done()
+		}()
 		fn(ctx)
 	}()
 }
@@ -207,3 +226,21 @@ func (s *Scope) Drain(timeout time.Duration) bool {
 	s.CancelAll()
 	return s.Await(timeout)
 }
+
+// Scope is a Value so it can be handed to Lisp as an opaque handle.
+func (s *Scope) Type() ValueType { return ScopeType }
+func (s *Scope) Unbox() any      { return s }
+func (s *Scope) String() string  { return fmt.Sprintf("#<scope live=%d>", s.LiveTree()) }
+
+type theScopeType struct{}
+
+func (t *theScopeType) String() string  { return t.Name() }
+func (t *theScopeType) Type() ValueType { return TypeType }
+func (t *theScopeType) Unbox() any      { return nil }
+func (t *theScopeType) Name() string    { return "let-go.lang.Scope" }
+func (t *theScopeType) Box(bare any) (Value, error) {
+	return NIL, NewTypeError(bare, "can't be boxed as", t)
+}
+
+// ScopeType is the Value type of a Scope handle.
+var ScopeType *theScopeType = &theScopeType{}
