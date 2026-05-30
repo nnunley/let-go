@@ -3360,7 +3360,7 @@ func installLangNS() {
 			return vm.NIL, fmt.Errorf("go expected Fn")
 		}
 		ret := make(vm.Chan)
-		vm.Goroutines.Go(func(ctx context.Context) {
+		vm.CurrentScope().Go(func(ctx context.Context) {
 			v, err := at.Invoke(nil)
 			if err != nil {
 				fmt.Println(err)
@@ -3453,7 +3453,7 @@ func installLangNS() {
 		select {
 		case ch <- vs[1]:
 			return vm.TRUE, nil
-		case <-vm.Goroutines.Context().Done():
+		case <-vm.CurrentContext().Done():
 			return vm.NIL, nil
 		}
 	})
@@ -3463,7 +3463,7 @@ func installLangNS() {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
 		if pc, ok := asPromiseChan(vs[0]); ok {
-			return pc.take(vm.Goroutines.Context()), nil
+			return pc.take(vm.CurrentContext()), nil
 		}
 		ch, ok := vs[0].(vm.Chan)
 		if !ok {
@@ -3479,7 +3479,7 @@ func installLangNS() {
 				return vm.NIL, nil // closed — not an error
 			}
 			return v, nil
-		case <-vm.Goroutines.Context().Done():
+		case <-vm.CurrentContext().Done():
 			return vm.NIL, nil
 		}
 	})
@@ -5550,7 +5550,7 @@ func installLangNS() {
 		}
 		snap := vm.SnapshotBindings()
 		p := vm.NewPromise()
-		vm.Goroutines.Go(func(ctx context.Context) {
+		vm.CurrentScope().Go(func(ctx context.Context) {
 			v, err := vm.RunWithBindings(snap, func() (vm.Value, error) {
 				return fn.Invoke(nil)
 			})
@@ -7116,7 +7116,7 @@ func installLangNS() {
 		defer t.Stop()
 		select {
 		case <-t.C:
-		case <-vm.Goroutines.Context().Done():
+		case <-vm.CurrentContext().Done():
 		}
 		return vm.NIL, nil
 	})
