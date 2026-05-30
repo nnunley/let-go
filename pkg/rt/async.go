@@ -11,6 +11,7 @@
 package rt
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"sync"
@@ -76,10 +77,15 @@ func installAsyncNS() {
 			return vm.NIL, fmt.Errorf("timeout expected Int milliseconds")
 		}
 		ch := make(vm.Chan)
-		go func() {
-			time.Sleep(time.Duration(int(ms)) * time.Millisecond)
+		vm.Goroutines.Go(func(ctx context.Context) {
+			t := time.NewTimer(time.Duration(int(ms)) * time.Millisecond)
+			defer t.Stop()
+			select {
+			case <-t.C:
+			case <-ctx.Done():
+			}
 			close(ch)
-		}()
+		})
 		return ch, nil
 	})
 

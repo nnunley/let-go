@@ -6,6 +6,7 @@
 package rt
 
 import (
+	"context"
 	crand "crypto/rand"
 	_ "embed"
 	"fmt"
@@ -254,6 +255,20 @@ var (
 	tapsMu sync.Mutex
 	taps   []vm.Fn
 )
+
+// ClearTaps drops every registered tap fn. `add-tap` appends to a
+// process-global slice with no automatic removal, so a test that taps
+// without `remove-tap` (e.g. clojure-test-suite's taps.cljc) leaks its
+// tap closure — and, because all of a compile pass's fns share one
+// vm.Consts, the closure pins that whole constant pool. Re-running the
+// suite in a loop (BenchmarkClojureTestSuite) thus accumulates ~one
+// Consts pool per iteration. The bench calls this between iterations to
+// keep that from growing unboundedly.
+func ClearTaps() {
+	tapsMu.Lock()
+	taps = nil
+	tapsMu.Unlock()
+}
 
 // nsAliases maps alternative namespace names to canonical names.
 // e.g. "clojure.core" → "core", "clojure.test" → "test", "clojure.string" → "string"
@@ -5456,7 +5471,7 @@ func installLangNS() {
 		}
 		snap := vm.SnapshotBindings()
 		p := vm.NewPromise()
-		go func() {
+		vm.Goroutines.Go(func(ctx context.Context) {
 			v, err := vm.RunWithBindings(snap, func() (vm.Value, error) {
 				return fn.Invoke(nil)
 			})
@@ -5465,7 +5480,7 @@ func installLangNS() {
 			} else {
 				p.Deliver(v)
 			}
-		}()
+		})
 		return p, nil
 	})
 
@@ -6998,13 +7013,25 @@ func installLangNS() {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("sleep expects 1 arg")
 		}
+		var d time.Duration
 		switch v := vs[0].(type) {
 		case vm.Int:
-			time.Sleep(time.Duration(int64(v)) * time.Millisecond)
+			d = time.Duration(int64(v)) * time.Millisecond
 		case vm.Float:
-			time.Sleep(time.Duration(int64(v)) * time.Millisecond)
+			d = time.Duration(int64(v)) * time.Millisecond
 		default:
 			return vm.NIL, fmt.Errorf("sleep expects a number")
+		}
+		// Cancellable sleep: return early if the VM goroutine registry's
+		// context is cancelled (e.g. a Drain between bench iterations or
+		// process shutdown), so a `(future (sleep 10000))` doesn't pin
+		// its goroutine — and the Consts pool it captured — for the full
+		// duration. Matches Clojure where an interrupted sleep aborts.
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-t.C:
+		case <-vm.Goroutines.Context().Done():
 		}
 		return vm.NIL, nil
 	})
