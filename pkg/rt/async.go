@@ -37,6 +37,89 @@ type Pub struct {
 
 func init() { RegisterInstaller(installAsyncNS) }
 
+// PromiseChan implements clojure.core.async's promise-chan: a channel
+// that caches the FIRST value put to it and replays that value to every
+// taker, forever. Subsequent puts are dropped; closing without a value
+// makes takers receive nil; closing after a value is a no-op (the value
+// keeps being served).
+//
+// Unlike a raw vm.Chan it STORES the value rather than transferring it,
+// which is what makes the semantics correct: with a single raw channel a
+// taker parked before the first put could steal that put before it was
+// cached, so later takers would never see it. Storing the value behind a
+// latch removes that race entirely.
+//
+// Dispatched to by >! / <! / close! when they receive a boxed
+// *PromiseChan instead of a vm.Chan. Methods are unexported so the
+// reflective method-boxing in vm.NewBoxed skips them.
+type PromiseChan struct {
+	mu     sync.Mutex
+	value  vm.Value
+	set    bool
+	closed bool
+	ready  chan struct{} // closed once set or closed; latch for takers
+}
+
+func newPromiseChan() *PromiseChan {
+	return &PromiseChan{value: vm.NIL, ready: make(chan struct{})}
+}
+
+// put caches v if no value has been delivered and the chan is open;
+// otherwise it is dropped (first put wins).
+func (p *PromiseChan) put(v vm.Value) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.set || p.closed {
+		return
+	}
+	p.value = v
+	p.set = true
+	close(p.ready)
+}
+
+// take returns the cached value, blocking until one is delivered or the
+// chan is closed. ctx (the registry context) lets a blocked take be
+// drained on shutdown; cancellation returns nil.
+func (p *PromiseChan) take(ctx context.Context) vm.Value {
+	p.mu.Lock()
+	if p.set || p.closed {
+		v := p.value
+		p.mu.Unlock()
+		return v
+	}
+	p.mu.Unlock()
+	select {
+	case <-p.ready:
+	case <-ctx.Done():
+		return vm.NIL
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.value // the delivered value, or NIL if closed empty
+}
+
+// doClose marks the chan closed. No-op once a value is set, so the value
+// keeps being served to takers.
+func (p *PromiseChan) doClose() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.set || p.closed {
+		return
+	}
+	p.closed = true
+	close(p.ready)
+}
+
+// asPromiseChan returns the *PromiseChan a value wraps, if any.
+func asPromiseChan(v vm.Value) (*PromiseChan, bool) {
+	b, ok := v.(*vm.Boxed)
+	if !ok {
+		return nil, false
+	}
+	pc, ok := b.Unbox().(*PromiseChan)
+	return pc, ok
+}
+
 // ctxSend sends v on ch, aborting if ctx is cancelled (e.g. a registry
 // Drain on shutdown / between bench iterations). Returns false if the
 // send was abandoned due to cancellation.
@@ -69,6 +152,10 @@ func installAsyncNS() {
 	closeChan, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("close! expects 1 arg")
+		}
+		if pc, ok := asPromiseChan(vs[0]); ok {
+			pc.doClose()
+			return vm.NIL, nil
 		}
 		ch, ok := vs[0].(vm.Chan)
 		if !ok {
@@ -440,70 +527,15 @@ func installAsyncNS() {
 		}
 	})
 
-	// promise-chan — channel that caches and replays one value to all takers.
-	//
-	// NOTE: the replay semantics here are pre-existing and not fully
-	// correct (the put side is not wired to the returned channel). This
-	// change only brings its goroutines under the registry so they are
-	// tracked and drainable, and removes a premature close that made the
-	// replay goroutine panic on a closed channel. A proper promise-chan
-	// redesign is tracked separately.
+	// promise-chan — a channel that caches the first value put and
+	// replays it to every taker (see PromiseChan). Returned boxed; >! /
+	// <! / close! dispatch to it. No goroutine needed — the value is
+	// stored behind a latch, so there is no parked-taker steal race.
 	promiseChan, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		ch := make(vm.Chan)
-		p := vm.NewPromise()
-		// Deliver goroutine: first put delivers.
-		vm.Goroutines.Go(func(ctx context.Context) {
-			v, ok, live := ctxRecv(ctx, ch)
-			if !live {
-				return
-			}
-			if ok {
-				p.Deliver(v)
-			} else {
-				p.Deliver(vm.NIL)
-			}
-		})
-		out := make(vm.Chan)
-		// Replay goroutine: serve the delivered value to readers forever
-		// (until the registry cancels). Must NOT close(out) — that would
-		// panic this loop's send.
-		vm.Goroutines.Go(func(ctx context.Context) {
-			val := p.Deref()
-			for {
-				if !ctxSend(ctx, out, val) {
-					return
-				}
-			}
-		})
-		proxy := make(vm.Chan)
-		delivered := make(chan struct{}, 1)
-		var cached vm.Value
-		vm.Goroutines.Go(func(ctx context.Context) {
-			v, ok, live := ctxRecv(ctx, proxy)
-			if !live {
-				return
-			}
-			if ok {
-				cached = v
-			} else {
-				cached = vm.NIL
-			}
-			close(delivered)
-		})
-		vm.Goroutines.Go(func(ctx context.Context) {
-			select {
-			case <-delivered:
-			case <-ctx.Done():
-				return
-			}
-			for {
-				if !ctxSend(ctx, proxy, cached) {
-					return
-				}
-			}
-		})
-		close(ch)
-		return proxy, nil
+		if len(vs) != 0 {
+			return vm.NIL, fmt.Errorf("promise-chan expects 0 args")
+		}
+		return vm.NewBoxed(newPromiseChan()), nil
 	})
 
 	// mult — create a mult (broadcast) from a source channel

@@ -136,3 +136,92 @@ func TestAsyncGoroutinesTrackedAndDrained(t *testing.T) {
 		t.Fatalf("expected 0 live after drain, got %d", got)
 	}
 }
+
+// --- promise-chan semantics -------------------------------------------
+
+func promiseChanOps(t *testing.T) (mk, put, take, closef vm.Fn) {
+	t.Helper()
+	return asyncFn(t, "promise-chan"), asyncFn(t, ">!"), asyncFn(t, "<!"), asyncFn(t, "close!")
+}
+
+// TestPromiseChanPutThenTake: a value put is replayed to many takers.
+func TestPromiseChanPutThenTake(t *testing.T) {
+	mk, put, take, _ := promiseChanOps(t)
+	pc := invoke(t, mk)
+	invoke(t, put, pc, vm.Int(42))
+	for i := 0; i < 3; i++ {
+		if got := invoke(t, take, pc); got != vm.Int(42) {
+			t.Fatalf("take %d: expected 42, got %v", i, got)
+		}
+	}
+}
+
+// TestPromiseChanTakeBeforePutNoStealRace: a taker parked BEFORE the put
+// must (a) receive the value and (b) NOT consume it — later takers still
+// see it. This is the race the old single-channel design lost.
+func TestPromiseChanTakeBeforePutNoStealRace(t *testing.T) {
+	mk, put, take, _ := promiseChanOps(t)
+	pc := invoke(t, mk)
+
+	got := make(chan vm.Value, 1)
+	go func() {
+		v, err := take.Invoke([]vm.Value{pc})
+		if err != nil {
+			got <- vm.NIL
+			return
+		}
+		got <- v
+	}()
+
+	// Give the taker time to park, then deliver.
+	time.Sleep(50 * time.Millisecond)
+	invoke(t, put, pc, vm.Int(7))
+
+	select {
+	case v := <-got:
+		if v != vm.Int(7) {
+			t.Fatalf("parked taker: expected 7, got %v", v)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("parked taker never woke after put")
+	}
+
+	// Value survived: a later taker still sees it.
+	if v := invoke(t, take, pc); v != vm.Int(7) {
+		t.Fatalf("later taker: expected 7 (replay), got %v", v)
+	}
+}
+
+// TestPromiseChanSubsequentPutsDropped: only the first put wins.
+func TestPromiseChanSubsequentPutsDropped(t *testing.T) {
+	mk, put, take, _ := promiseChanOps(t)
+	pc := invoke(t, mk)
+	invoke(t, put, pc, vm.Int(1))
+	invoke(t, put, pc, vm.Int(2)) // dropped
+	if v := invoke(t, take, pc); v != vm.Int(1) {
+		t.Fatalf("expected first put 1 to win, got %v", v)
+	}
+}
+
+// TestPromiseChanCloseEmptyYieldsNil: closing without a value → takers
+// get nil, not a hang.
+func TestPromiseChanCloseEmptyYieldsNil(t *testing.T) {
+	mk, _, take, closef := promiseChanOps(t)
+	pc := invoke(t, mk)
+	invoke(t, closef, pc)
+	if v := invoke(t, take, pc); v != vm.NIL {
+		t.Fatalf("expected nil from closed-empty promise-chan, got %v", v)
+	}
+}
+
+// TestPromiseChanValueSurvivesClose: a delivered value keeps being served
+// even after close.
+func TestPromiseChanValueSurvivesClose(t *testing.T) {
+	mk, put, take, closef := promiseChanOps(t)
+	pc := invoke(t, mk)
+	invoke(t, put, pc, vm.Int(99))
+	invoke(t, closef, pc) // no-op for the cached value
+	if v := invoke(t, take, pc); v != vm.Int(99) {
+		t.Fatalf("expected cached 99 after close, got %v", v)
+	}
+}

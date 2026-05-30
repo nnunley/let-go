@@ -3388,12 +3388,16 @@ func installLangNS() {
 		if len(vs) != 2 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
+		if vs[1] == vm.NIL {
+			return vm.NIL, fmt.Errorf(">! can't put nil on chan")
+		}
+		if pc, ok := asPromiseChan(vs[0]); ok {
+			pc.put(vs[1])
+			return vm.TRUE, nil
+		}
 		ch, ok := vs[0].(vm.Chan)
 		if !ok {
 			return vm.NIL, fmt.Errorf(">! expected Chan")
-		}
-		if vs[1] == vm.NIL {
-			return vm.NIL, fmt.Errorf(">! can't put nil on chan")
 		}
 		ch <- vs[1]
 		return vm.TRUE, nil
@@ -3402,6 +3406,9 @@ func installLangNS() {
 	changet, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
+		}
+		if pc, ok := asPromiseChan(vs[0]); ok {
+			return pc.take(vm.Goroutines.Context()), nil
 		}
 		ch, ok := vs[0].(vm.Chan)
 		if !ok {
