@@ -21,6 +21,7 @@ import (
 
 	"github.com/nooga/let-go/pkg/bytecode"
 	"github.com/nooga/let-go/pkg/compiler"
+	"github.com/nooga/let-go/pkg/genmanifest"
 	"github.com/nooga/let-go/pkg/resolver"
 	"github.com/nooga/let-go/pkg/rt"
 	"github.com/nooga/let-go/pkg/vm"
@@ -372,6 +373,7 @@ func main() {
 
 	if targetGo {
 		runGoTarget(goOutDir)
+		refreshManifest()
 		return
 	}
 
@@ -388,9 +390,41 @@ func main() {
 		os.Exit(1)
 	}
 
-	fi, _ := f.Stat()
-	fmt.Printf("wrote %s (%d bytes, %d consts, %d namespaces)\n",
-		outPath, fi.Size(), len(consts.Values()), len(nsChunks))
+	// Stat is best-effort: success here is just for the byte-count in
+	// the success line. If it fails we still wrote the bundle, so
+	// report what we know without dereferencing a nil FileInfo.
+	if fi, err := f.Stat(); err == nil {
+		fmt.Printf("wrote %s (%d bytes, %d consts, %d namespaces)\n",
+			outPath, fi.Size(), len(consts.Values()), len(nsChunks))
+	} else {
+		fmt.Printf("wrote %s (%d consts, %d namespaces; stat failed: %v)\n",
+			outPath, len(consts.Values()), len(nsChunks), err)
+	}
+
+	refreshManifest()
+}
+
+// refreshManifest records the content digest of all .lg + lgbgen
+// sources into pkg/rt/generated.sums, so the genmanifest staleness test
+// and the check-generated CLI can tell whether the committed artifacts
+// match the sources on disk. Best-effort: a failure here doesn't
+// invalidate the bundle/tree we just wrote, so warn and continue.
+func refreshManifest() {
+	root, err := genmanifest.FindRepoRoot(".")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: skipping manifest refresh: %v\n", err)
+		return
+	}
+	digest, err := genmanifest.Compute(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: manifest compute failed: %v\n", err)
+		return
+	}
+	if err := genmanifest.Write(root, digest); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: manifest write failed: %v\n", err)
+		return
+	}
+	fmt.Printf("wrote %s (%s)\n", genmanifest.ManifestRelPath, digest[:12])
 }
 
 // nsToGoPkgName converts a let-go namespace name to a valid Go package name.
