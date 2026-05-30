@@ -3357,14 +3357,23 @@ func installLangNS() {
 			return vm.NIL, fmt.Errorf("go expected Fn")
 		}
 		ret := make(vm.Chan)
-		go func() {
+		vm.Goroutines.Go(func(ctx context.Context) {
 			v, err := at.Invoke(nil)
 			if err != nil {
 				fmt.Println(err)
 			}
-			ret <- v
+			// The result send is cancellable via the registry. (Channel
+			// ops <!/>! INSIDE the block are still synchronous and not yet
+			// ctx-aware — cancelling a go-block blocked on a take won't
+			// interrupt it; tracked as the same follow-up as the async.go
+			// channel primitives.)
+			select {
+			case ret <- v:
+			case <-ctx.Done():
+				return
+			}
 			close(ret)
-		}()
+		})
 		return ret, nil
 	})
 
