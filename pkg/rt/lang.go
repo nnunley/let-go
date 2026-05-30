@@ -6,6 +6,7 @@
 package rt
 
 import (
+	"context"
 	crand "crypto/rand"
 	_ "embed"
 	"fmt"
@@ -17,10 +18,234 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/nooga/let-go/pkg/vm"
 )
+
+// eqPair keys visited-pair memoization for valueEqualsCtx. Built from the
+// underlying pointer/slice-header identity of two collection values that
+// are mid-walk; re-encountering the same pair during recursion coinductively
+// returns true, which collapses both true cycles and shared substructure
+// (the latter is otherwise exponential when the same subtree is reachable
+// through many parents — common in compiler IR graphs).
+type eqPair struct{ a, b uintptr }
+
+type eqCtx struct {
+	visited map[eqPair]struct{}
+}
+
+func (c *eqCtx) seenOrMark(a, b vm.Value) bool {
+	if c == nil {
+		return false
+	}
+	pa, ok := valuePtr(a)
+	if !ok {
+		return false
+	}
+	pb, ok := valuePtr(b)
+	if !ok {
+		return false
+	}
+	key := eqPair{pa, pb}
+	if c.visited == nil {
+		c.visited = make(map[eqPair]struct{}, 8)
+	}
+	if _, seen := c.visited[key]; seen {
+		return true
+	}
+	c.visited[key] = struct{}{}
+	return false
+}
+
+// valuePtr extracts a stable identity uintptr for collection-shaped values.
+// Pointer-receiver types yield the pointer; slice-backed ArrayVector yields
+// the first element's address; Go maps yield the runtime hmap header. Used
+// only as an opaque memoization key — never dereferenced. Returns false for
+// scalars (they never need memoization; equality on them is O(1) anyway).
+func valuePtr(v vm.Value) (uintptr, bool) {
+	switch x := v.(type) {
+	case vm.ArrayVector:
+		if len(x) == 0 {
+			return 0, false
+		}
+		return uintptr(unsafe.Pointer(&x[0])), true
+	case vm.Map:
+		if x == nil {
+			return 0, false
+		}
+		return mapPtr(x), true
+	case vm.Set:
+		if x == nil {
+			return 0, false
+		}
+		return setPtr(x), true
+	case *vm.PersistentVector:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.PersistentMap:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.PersistentSet:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.SortedMap:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.SortedSet:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.List:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.Cons:
+		return uintptr(unsafe.Pointer(x)), true
+	case *vm.LazySeq:
+		return uintptr(unsafe.Pointer(x)), true
+	}
+	return 0, false
+}
+
+// mapPtr / setPtr read the runtime hmap header pointer out of a Go map via
+// an unsafe interface-header read. The value is used purely as an identity
+// key for memoization and is never dereferenced.
+func mapPtr(m vm.Map) uintptr {
+	type ifaceHeader struct {
+		_   uintptr
+		ptr unsafe.Pointer
+	}
+	return uintptr((*ifaceHeader)(unsafe.Pointer(&m)).ptr)
+}
+
+func setPtr(s vm.Set) uintptr {
+	type ifaceHeader struct {
+		_   uintptr
+		ptr unsafe.Pointer
+	}
+	return uintptr((*ifaceHeader)(unsafe.Pointer(&s)).ptr)
+}
+
+// identityEqShortCircuit decides equality without descending when the two
+// values are demonstrably identical at the Go level: same comparable scalar,
+// same backing slice, or same pointer. Returns (result, true) when it can
+// decide, (_, false) otherwise. Never executes interface == on uncomparable
+// underlying types — each arm pre-checks the dynamic type first.
+func identityEqShortCircuit(a, b vm.Value) (bool, bool) {
+	// Comparable scalars: interface == is safe and ~free.
+	switch a.(type) {
+	case vm.Int, vm.Float, vm.Boolean, vm.String, vm.Char, vm.Keyword, vm.Symbol:
+		switch b.(type) {
+		case vm.Int, vm.Float, vm.Boolean, vm.String, vm.Char, vm.Keyword, vm.Symbol:
+			return a == b, true
+		}
+		return false, false
+	}
+	// Slice-backed: same backing array + same length ⇒ equal.
+	if av, ok := a.(vm.ArrayVector); ok {
+		bv, ok := b.(vm.ArrayVector)
+		if !ok {
+			return false, false
+		}
+		if len(av) != len(bv) {
+			return false, true
+		}
+		if len(av) == 0 {
+			return true, true
+		}
+		if &av[0] == &bv[0] {
+			return true, true
+		}
+		return false, false
+	}
+	// Pointer-receiver collections + refs: pointer identity ⇒ equal.
+	switch av := a.(type) {
+	case *vm.PersistentVector:
+		if bv, ok := b.(*vm.PersistentVector); ok && av == bv {
+			return true, true
+		}
+	case *vm.PersistentMap:
+		if bv, ok := b.(*vm.PersistentMap); ok && av == bv {
+			return true, true
+		}
+	case *vm.PersistentSet:
+		if bv, ok := b.(*vm.PersistentSet); ok && av == bv {
+			return true, true
+		}
+	case *vm.SortedMap:
+		if bv, ok := b.(*vm.SortedMap); ok && av == bv {
+			return true, true
+		}
+	case *vm.SortedSet:
+		if bv, ok := b.(*vm.SortedSet); ok && av == bv {
+			return true, true
+		}
+	case *vm.List:
+		if bv, ok := b.(*vm.List); ok && av == bv {
+			return true, true
+		}
+	case *vm.BigInt:
+		if bv, ok := b.(*vm.BigInt); ok && av == bv {
+			return true, true
+		}
+	// Functions and refs: Clojure semantics are identity-equal anyway, so
+	// pointer-compare here is the *right* answer, not just an approximation.
+	case *vm.Func:
+		if bv, ok := b.(*vm.Func); ok && av == bv {
+			return true, true
+		}
+	case *vm.Closure:
+		if bv, ok := b.(*vm.Closure); ok && av == bv {
+			return true, true
+		}
+	case *vm.NativeFn:
+		if bv, ok := b.(*vm.NativeFn); ok && av == bv {
+			return true, true
+		}
+	case *vm.MultiArityFn:
+		if bv, ok := b.(*vm.MultiArityFn); ok && av == bv {
+			return true, true
+		}
+	case *vm.MultiFn:
+		if bv, ok := b.(*vm.MultiFn); ok && av == bv {
+			return true, true
+		}
+	case *vm.Atom:
+		if bv, ok := b.(*vm.Atom); ok && av == bv {
+			return true, true
+		}
+	case *vm.Var:
+		if bv, ok := b.(*vm.Var); ok && av == bv {
+			return true, true
+		}
+	}
+	return false, false
+}
+
+// hashEqShortCircuit rejects two Hashable values whose cached hashes differ.
+// Costs at most two cached-hash reads. Same idea as vm.valueEquiv at
+// pkg/vm/hash.go:166, generalized to the main equality entry rather than
+// only map-key equivalence.
+//
+// Skipped when both sides are sequence-like: let-go's hash protocol is not
+// consistent across all sequence concrete types (e.g. ArrayVector hashes
+// differently from EmptyList / PersistentVector), so a hash mismatch is
+// not a sound rejection signal there. Clojure's equality treats `[]` and
+// `'()` as equal regardless.
+func hashEqShortCircuit(a, b vm.Value) (bool, bool) {
+	if _, aSeq := a.(vm.Sequable); aSeq {
+		if _, bSeq := b.(vm.Sequable); bSeq {
+			return false, false
+		}
+	}
+	ha, aOk := a.(vm.Hashable)
+	if !aOk {
+		return false, false
+	}
+	hb, bOk := b.(vm.Hashable)
+	if !bOk {
+		return false, false
+	}
+	if ha.Hash() != hb.Hash() {
+		return false, true
+	}
+	return false, false
+}
 
 var nsRegistry map[string]*vm.Namespace
 
@@ -31,6 +256,20 @@ var (
 	tapsMu sync.Mutex
 	taps   []vm.Fn
 )
+
+// ClearTaps drops every registered tap fn. `add-tap` appends to a
+// process-global slice with no automatic removal, so a test that taps
+// without `remove-tap` (e.g. clojure-test-suite's taps.cljc) leaks its
+// tap closure — and, because all of a compile pass's fns share one
+// vm.Consts, the closure pins that whole constant pool. Re-running the
+// suite in a loop (BenchmarkClojureTestSuite) thus accumulates ~one
+// Consts pool per iteration. The bench calls this between iterations to
+// keep that from growing unboundedly.
+func ClearTaps() {
+	tapsMu.Lock()
+	taps = nil
+	tapsMu.Unlock()
+}
 
 // nsAliases maps alternative namespace names to canonical names.
 // e.g. "clojure.core" → "core", "clojure.test" → "test", "clojure.string" → "string"
@@ -315,11 +554,13 @@ const NameCoreNS = "core"
 var CoreNS *vm.Namespace
 var CurrentNS *vm.Var
 
-var gensymID = 0
+// gensymID backs gensym. Atomic so concurrent gensym calls (e.g. lowering
+// namespaces' defns in parallel) don't race the counter. Single-threaded
+// the sequence is unchanged.
+var gensymID atomic.Int64
 
 func nextID() int {
-	gensymID++
-	return gensymID
+	return int(gensymID.Add(1))
 }
 
 // mapLike is any map type with Lookup + Counted + Sequable
@@ -522,15 +763,38 @@ func iterateSet(v vm.Value, f func(vm.Value) bool) {
 	}
 }
 
-// valueEquals performs deep equality comparison for Clojure semantics
+// valueEquals performs deep equality comparison for Clojure semantics.
+//
+// Adds three layers of early-exit before the structural walk:
+//   - nil-pair fast path (preserved from original)
+//   - identityEqShortCircuit: same scalar, same backing slice, same pointer
+//   - hashEqShortCircuit: Hashable pair with mismatched cached hashes ⇒ false
+//
+// The recursive walk is delegated to valueEqualsCtx, which threads a
+// visited-pair set so shared substructure and cycles collapse to O(N)
+// instead of exponential. The motivating workload was compiler IR graphs
+// where the same subtree is reachable through many parents.
 func valueEquals(a, b vm.Value) bool {
-	// Handle nil
 	if isNilValue(a) && isNilValue(b) {
 		return true
 	}
 	if isNilValue(a) || isNilValue(b) {
 		return false
 	}
+	if r, decided := identityEqShortCircuit(a, b); decided {
+		return r
+	}
+	if r, decided := hashEqShortCircuit(a, b); decided {
+		return r
+	}
+	return valueEqualsCtx(a, b, &eqCtx{})
+}
+
+// valueEqualsCtx is the recursive workhorse. When ctx is non-nil it tracks
+// (a,b) pointer pairs seen mid-walk so shared substructure and cycles don't
+// blow up. Callers with no need for memoization (e.g. internal helpers
+// recursing into freshly-allocated subvalues) may pass nil.
+func valueEqualsCtx(a, b vm.Value, ctx *eqCtx) bool {
 	if vm.IsNumber(a) && vm.IsNumber(b) {
 		return vm.NumEq(a, b)
 	}
@@ -568,7 +832,7 @@ func valueEquals(a, b vm.Value) bool {
 			as := toSeq(a)
 			bs := toSeq(b)
 			for as != nil && bs != nil {
-				if !valueEquals(as.First(), bs.First()) {
+				if !valueEqualsCtx(as.First(), bs.First(), ctx) {
 					return false
 				}
 				as, bs = as.Next(), bs.Next()
@@ -600,8 +864,14 @@ func valueEquals(a, b vm.Value) bool {
 		if len(av) != len(bv) {
 			return false
 		}
+		if len(av) > 0 && &av[0] == &bv[0] {
+			return true
+		}
+		if ctx.seenOrMark(a, b) {
+			return true
+		}
 		for i := range av {
-			if !nilListEquivalent(av[i], bv[i]) && !valueEquals(av[i], bv[i]) {
+			if !nilListEquivalent(av[i], bv[i]) && !valueEqualsCtx(av[i], bv[i], ctx) {
 				return false
 			}
 		}
@@ -624,6 +894,9 @@ func valueEquals(a, b vm.Value) bool {
 		if !ok {
 			return false
 		}
+		if ctx.seenOrMark(a, b) {
+			return true
+		}
 		as := vm.Seq(av)
 		for as != nil && bs != nil {
 			if !listElementEquals(as.First(), bs.First()) {
@@ -637,9 +910,12 @@ func valueEquals(a, b vm.Value) bool {
 			if len(av) != len(bm) {
 				return false
 			}
+			if ctx.seenOrMark(a, b) {
+				return true
+			}
 			for k, v := range av {
 				bv, ok := bm[k]
-				if !ok || !valueEquals(v, bv) {
+				if !ok || !valueEqualsCtx(v, bv, ctx) {
 					return false
 				}
 			}
@@ -652,7 +928,7 @@ func valueEquals(a, b vm.Value) bool {
 			}
 			for k, v := range av {
 				bv := bm.ValueAtOr(k, sentinel)
-				if bv == sentinel || !valueEquals(v, bv) {
+				if bv == sentinel || !valueEqualsCtx(v, bv, ctx) {
 					return false
 				}
 			}
@@ -680,7 +956,7 @@ func valueEquals(a, b vm.Value) bool {
 			}
 			for k, v := range bm {
 				sv := av.ValueAtOr(k, sentinel)
-				if sv == sentinel || !valueEquals(v, sv) {
+				if sv == sentinel || !valueEqualsCtx(v, sv, ctx) {
 					return false
 				}
 			}
@@ -729,7 +1005,7 @@ func valueEquals(a, b vm.Value) bool {
 			as := toSeq(a)
 			bs := toSeq(b)
 			for as != nil && bs != nil {
-				if !valueEquals(as.First(), bs.First()) {
+				if !valueEqualsCtx(as.First(), bs.First(), ctx) {
 					return false
 				}
 				as, bs = as.Next(), bs.Next()
@@ -3074,14 +3350,23 @@ func installLangNS() {
 			return vm.NIL, fmt.Errorf("go expected Fn")
 		}
 		ret := make(vm.Chan)
-		go func() {
+		vm.Goroutines.Go(func(ctx context.Context) {
 			v, err := at.Invoke(nil)
 			if err != nil {
 				fmt.Println(err)
 			}
-			ret <- v
+			// The result send is cancellable via the registry. (Channel
+			// ops <!/>! INSIDE the block are still synchronous and not yet
+			// ctx-aware — cancelling a go-block blocked on a take won't
+			// interrupt it; tracked as the same follow-up as the async.go
+			// channel primitives.)
+			select {
+			case ret <- v:
+			case <-ctx.Done():
+				return
+			}
 			close(ret)
-		}()
+		})
 		return ret, nil
 	})
 
@@ -3096,30 +3381,53 @@ func installLangNS() {
 		if len(vs) != 2 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
+		if vs[1] == vm.NIL {
+			return vm.NIL, fmt.Errorf(">! can't put nil on chan")
+		}
+		if pc, ok := asPromiseChan(vs[0]); ok {
+			pc.put(vs[1])
+			return vm.TRUE, nil
+		}
 		ch, ok := vs[0].(vm.Chan)
 		if !ok {
 			return vm.NIL, fmt.Errorf(">! expected Chan")
 		}
-		if vs[1] == vm.NIL {
-			return vm.NIL, fmt.Errorf(">! can't put nil on chan")
+		// Select on the registry context so a put parked on a full/unread
+		// channel — e.g. inside a (go ...) block — is released by a
+		// CancelAll/Drain on shutdown instead of leaking the goroutine.
+		// Cancellation returns nil (the put did not complete).
+		select {
+		case ch <- vs[1]:
+			return vm.TRUE, nil
+		case <-vm.Goroutines.Context().Done():
+			return vm.NIL, nil
 		}
-		ch <- vs[1]
-		return vm.TRUE, nil
 	})
 
 	changet, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
+		if pc, ok := asPromiseChan(vs[0]); ok {
+			return pc.take(vm.Goroutines.Context()), nil
+		}
 		ch, ok := vs[0].(vm.Chan)
 		if !ok {
 			return vm.NIL, fmt.Errorf("<! expected Chan")
 		}
-		v, ok := <-ch
-		if !ok {
-			return vm.NIL, nil // this is not an error
+		// Select on the registry context so a take parked on an empty
+		// channel — e.g. inside a (go ...) block — is released by a
+		// CancelAll/Drain on shutdown instead of leaking the goroutine.
+		// Both a closed channel and a cancel yield nil.
+		select {
+		case v, ok := <-ch:
+			if !ok {
+				return vm.NIL, nil // closed — not an error
+			}
+			return v, nil
+		case <-vm.Goroutines.Context().Done():
+			return vm.NIL, nil
 		}
-		return v, nil
 	})
 
 	lines, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
@@ -5188,7 +5496,7 @@ func installLangNS() {
 		}
 		snap := vm.SnapshotBindings()
 		p := vm.NewPromise()
-		go func() {
+		vm.Goroutines.Go(func(ctx context.Context) {
 			v, err := vm.RunWithBindings(snap, func() (vm.Value, error) {
 				return fn.Invoke(nil)
 			})
@@ -5197,7 +5505,7 @@ func installLangNS() {
 			} else {
 				p.Deliver(v)
 			}
-		}()
+		})
 		return p, nil
 	})
 
@@ -5569,6 +5877,8 @@ func installLangNS() {
 
 	ns.Def("map*", mapf)
 	ns.Def("mapv", mapv)
+	parMapV, _ := vm.NativeFnType.Wrap(parallelMapV)
+	ns.Def("pmapv", parMapV)
 	ns.Def("chunk-first", chunkFirst)
 	ns.Def("chunk-rest", chunkRest)
 	ns.Def("chunk-next", chunkNext)
@@ -6730,13 +7040,25 @@ func installLangNS() {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("sleep expects 1 arg")
 		}
+		var d time.Duration
 		switch v := vs[0].(type) {
 		case vm.Int:
-			time.Sleep(time.Duration(int64(v)) * time.Millisecond)
+			d = time.Duration(int64(v)) * time.Millisecond
 		case vm.Float:
-			time.Sleep(time.Duration(int64(v)) * time.Millisecond)
+			d = time.Duration(int64(v)) * time.Millisecond
 		default:
 			return vm.NIL, fmt.Errorf("sleep expects a number")
+		}
+		// Cancellable sleep: return early if the VM goroutine registry's
+		// context is cancelled (e.g. a Drain between bench iterations or
+		// process shutdown), so a `(future (sleep 10000))` doesn't pin
+		// its goroutine — and the Consts pool it captured — for the full
+		// duration. Matches Clojure where an interrupted sleep aborts.
+		t := time.NewTimer(d)
+		defer t.Stop()
+		select {
+		case <-t.C:
+		case <-vm.Goroutines.Context().Done():
 		}
 		return vm.NIL, nil
 	})

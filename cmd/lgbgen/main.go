@@ -22,6 +22,7 @@ import (
 
 	"github.com/nooga/let-go/pkg/bytecode"
 	"github.com/nooga/let-go/pkg/compiler"
+	"github.com/nooga/let-go/pkg/resolver"
 	"github.com/nooga/let-go/pkg/rt"
 	"github.com/nooga/let-go/pkg/vm"
 )
@@ -253,6 +254,19 @@ func main() {
 			fmt.Fprintf(os.Stderr, "ir.data bootstrap compilation failed: %v\n", err)
 			os.Exit(1)
 		}
+	}
+
+	// Register an on-demand namespace loader so a bundled namespace that
+	// depends at compile time on an lgbgen:skip namespace (e.g.
+	// ir.passes.pipeline calls graph/toposort-by, and graph is skip'd) can
+	// load that source on demand instead of failing to resolve. The skip'd
+	// ns is compiled into the shared consts/VM state so dependents resolve,
+	// but it is never added to nsChunks, so it stays out of the bundle —
+	// matching the on-demand-from-source contract its skip directive declares.
+	{
+		coreNS := rt.NS(rt.NameCoreNS)
+		loaderCtx := compiler.NewCompiler(consts, coreNS)
+		rt.SetNSLoader(resolver.NewNSResolver(loaderCtx, nil))
 	}
 
 	// Phase 1: compile all namespaces from source (bytecode, sets up VM state).
