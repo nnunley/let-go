@@ -50,8 +50,9 @@ type Scope struct {
 	wg     sync.WaitGroup           // this scope's direct goroutines
 	live   atomic.Int64
 
-	mu       sync.Mutex // guards children (cold path: scope creation only)
-	children []*Scope
+	mu           sync.Mutex // guards children (cold path: scope creation only)
+	children     map[*Scope]struct{}
+	closeRestore func() // set by OpenChild, consumed by CloseScoped
 }
 
 // Goroutines is the process-wide root scope. Every VM spawn goes through
@@ -74,9 +75,19 @@ func (s *Scope) Child() *Scope {
 	c := &Scope{parent: s}
 	c.state.Store(&ctxState{ctx: ctx, cancel: cancel})
 	s.mu.Lock()
-	s.children = append(s.children, c)
+	if s.children == nil {
+		s.children = make(map[*Scope]struct{})
+	}
+	s.children[c] = struct{}{}
 	s.mu.Unlock()
 	return c
+}
+
+// removeChild drops c from this scope's child set (cold path: scope close).
+func (s *Scope) removeChild(c *Scope) {
+	s.mu.Lock()
+	delete(s.children, c)
+	s.mu.Unlock()
 }
 
 // Go runs fn in a tracked goroutine of THIS scope. fn receives the
@@ -102,7 +113,10 @@ func (s *Scope) Live() int { return int(s.live.Load()) }
 func (s *Scope) LiveTree() int {
 	n := int(s.live.Load())
 	s.mu.Lock()
-	kids := append([]*Scope(nil), s.children...)
+	kids := make([]*Scope, 0, len(s.children))
+	for c := range s.children {
+		kids = append(kids, c)
+	}
 	s.mu.Unlock()
 	for _, c := range kids {
 		n += c.LiveTree()
@@ -168,7 +182,10 @@ func (s *Scope) Await(timeout time.Duration) bool {
 func (s *Scope) awaitTree() {
 	s.wg.Wait()
 	s.mu.Lock()
-	kids := append([]*Scope(nil), s.children...)
+	kids := make([]*Scope, 0, len(s.children))
+	for c := range s.children {
+		kids = append(kids, c)
+	}
 	s.mu.Unlock()
 	for _, c := range kids {
 		c.awaitTree()
