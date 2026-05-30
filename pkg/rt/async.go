@@ -472,7 +472,20 @@ func installAsyncNS() {
 			return vm.NIL, fmt.Errorf("alts! requires at least one port")
 		}
 
+		// Append a recv on the registry context's Done channel so an
+		// alts! parked on its ports — e.g. inside a (go ...) block — is
+		// released by a CancelAll/Drain on shutdown. If that case wins,
+		// return nil (no port chosen).
+		cancelIdx := len(cases)
+		cases = append(cases, reflect.SelectCase{
+			Dir:  reflect.SelectRecv,
+			Chan: reflect.ValueOf(vm.Goroutines.Context().Done()),
+		})
+
 		chosen, value, ok := reflect.Select(cases)
+		if chosen == cancelIdx {
+			return vm.NIL, nil
+		}
 		port := ports[chosen]
 
 		var result vm.Value

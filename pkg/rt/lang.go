@@ -3399,8 +3399,16 @@ func installLangNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf(">! expected Chan")
 		}
-		ch <- vs[1]
-		return vm.TRUE, nil
+		// Select on the registry context so a put parked on a full/unread
+		// channel — e.g. inside a (go ...) block — is released by a
+		// CancelAll/Drain on shutdown instead of leaking the goroutine.
+		// Cancellation returns nil (the put did not complete).
+		select {
+		case ch <- vs[1]:
+			return vm.TRUE, nil
+		case <-vm.Goroutines.Context().Done():
+			return vm.NIL, nil
+		}
 	})
 
 	changet, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
@@ -3414,11 +3422,19 @@ func installLangNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf("<! expected Chan")
 		}
-		v, ok := <-ch
-		if !ok {
-			return vm.NIL, nil // this is not an error
+		// Select on the registry context so a take parked on an empty
+		// channel — e.g. inside a (go ...) block — is released by a
+		// CancelAll/Drain on shutdown instead of leaking the goroutine.
+		// Both a closed channel and a cancel yield nil.
+		select {
+		case v, ok := <-ch:
+			if !ok {
+				return vm.NIL, nil // closed — not an error
+			}
+			return v, nil
+		case <-vm.Goroutines.Context().Done():
+			return vm.NIL, nil
 		}
-		return v, nil
 	})
 
 	lines, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {

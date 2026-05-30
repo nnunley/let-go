@@ -225,3 +225,91 @@ func TestPromiseChanValueSurvivesClose(t *testing.T) {
 		t.Fatalf("expected cached 99 after close, got %v", v)
 	}
 }
+
+// --- go-block / <! / >! drainability ----------------------------------
+
+func coreOrAsyncFn(t *testing.T, name string) vm.Fn {
+	t.Helper()
+	v := NS("async").Lookup(vm.Symbol(name))
+	if v == nil {
+		t.Fatalf("%s not found", name)
+	}
+	fn, ok := v.(*vm.Var).Deref().(vm.Fn)
+	if !ok {
+		t.Fatalf("%s is not an Fn", name)
+	}
+	return fn
+}
+
+// TestGoBlockParkedInTakeIsDrainable pins the fix: a (go (<! ch)) parked
+// on an empty channel runs in a registry-tracked goroutine, but <! used
+// to block on a bare `<-ch` with no view of the registry context — so
+// Drain could not release it. After wiring <! to the registry context,
+// CancelAll/Drain unblocks the parked take and the go-block exits.
+func TestGoBlockParkedInTakeIsDrainable(t *testing.T) {
+	vm.Goroutines.Drain(2 * time.Second)
+	base := vm.Goroutines.Live()
+
+	goStar := coreOrAsyncFn(t, "go*")
+	take := asyncFn(t, "<!")
+	ch := make(vm.Chan) // nobody ever delivers
+
+	thunk, _ := vm.NativeFnType.Wrap(func(_ []vm.Value) (vm.Value, error) {
+		return take.Invoke([]vm.Value{ch})
+	})
+	invoke(t, goStar, thunk) // spawns the go-block goroutine; it parks in <!
+
+	deadline := time.Now().Add(time.Second)
+	for vm.Goroutines.Live() <= base && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if vm.Goroutines.Live() <= base {
+		t.Fatalf("go-block goroutine not tracked (live=%d base=%d)", vm.Goroutines.Live(), base)
+	}
+	// Live++ happens before the goroutine body runs; give it time to
+	// actually reach and park in the channel op (reading the current
+	// registry context) before we Drain.
+	time.Sleep(100 * time.Millisecond)
+
+	if !vm.Goroutines.Drain(3 * time.Second) {
+		t.Fatal("Drain could not release a go-block parked in <! (not ctx-aware)")
+	}
+	if got := vm.Goroutines.Live(); got != 0 {
+		t.Fatalf("expected 0 live after drain, got %d", got)
+	}
+}
+
+// TestGoBlockParkedInPutIsDrainable: same, for a put on a full/unread
+// channel.
+func TestGoBlockParkedInPutIsDrainable(t *testing.T) {
+	vm.Goroutines.Drain(2 * time.Second)
+	base := vm.Goroutines.Live()
+
+	goStar := coreOrAsyncFn(t, "go*")
+	put := asyncFn(t, ">!")
+	ch := make(vm.Chan) // unbuffered, no reader
+
+	thunk, _ := vm.NativeFnType.Wrap(func(_ []vm.Value) (vm.Value, error) {
+		return put.Invoke([]vm.Value{ch, vm.Int(1)})
+	})
+	invoke(t, goStar, thunk)
+
+	deadline := time.Now().Add(time.Second)
+	for vm.Goroutines.Live() <= base && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if vm.Goroutines.Live() <= base {
+		t.Fatalf("go-block goroutine not tracked (live=%d base=%d)", vm.Goroutines.Live(), base)
+	}
+	// Live++ happens before the goroutine body runs; give it time to
+	// actually reach and park in the channel op (reading the current
+	// registry context) before we Drain.
+	time.Sleep(100 * time.Millisecond)
+
+	if !vm.Goroutines.Drain(3 * time.Second) {
+		t.Fatal("Drain could not release a go-block parked in >! (not ctx-aware)")
+	}
+	if got := vm.Goroutines.Live(); got != 0 {
+		t.Fatalf("expected 0 live after drain, got %d", got)
+	}
+}
