@@ -72,19 +72,6 @@ check-bundle-fresh:
 		exit 1; \
 	fi
 
-# Sibling of check-bundle-fresh for the -tags gogen_ir lowered Go tree.
-# parity-full silently fails on bucket hashes if the lgb is fresh but
-# core_go_lowered/ is stale (untagged vs gogen_ir run two different
-# versions of the IR pipeline). Caught the hard way 2026-05-28.
-check-lowered-fresh:
-	@stale=$$(find pkg/rt/core -name '*.lg' -newer pkg/rt/core_go_lowered/ir/lower_go/lower_go.go 2>/dev/null); \
-	if [ -n "$$stale" ]; then \
-		echo "ERROR: pkg/rt/core_go_lowered/ is stale relative to:"; \
-		echo "$$stale" | sed 's/^/  /'; \
-		echo "Run 'go run -tags bootstrap ./cmd/lgbgen --target=go' to regenerate."; \
-		exit 1; \
-	fi
-
 generate: $(GO) generate-ir-ops generate-ir-bridge generate-ir-data pkg/rt/core_compiled.lgb pkg/rt/core_go_lowered/ir/lower_go/lower_go.go
 
 # Regenerate pkg/ir/op_generated.go from examples/go-gen/ir_ops.lg.
@@ -177,4 +164,4 @@ install-golangci-lint: $(GO)
 	  GO111MODULE=off go get -u $(GO111MODULE-LINT)
 
 # PHONY targets are for ones that have conflicting files/dirs present:
-.PHONY: test bench-ratchet bench-ratchet-update bench-ratchet-show check-bundle-fresh check-lowered-fresh
+.PHONY: test bench-ratchet bench-ratchet-update bench-ratchet-show check-bundle-fresh

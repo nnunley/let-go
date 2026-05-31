@@ -171,3 +171,6 @@ AGENTS.md
 # bench-ratchet streams per-bench results here on capture; the
 # aggregated baseline is in docs/perf/baseline.json (committed).
 docs/perf/.runs/
+
+# Generated Go-lowered IR tree — build artifact, regenerate with: make generate
+pkg/rt/core_go_lowered/

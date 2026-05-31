@@ -61,17 +61,11 @@ jobs:
         # newer than the committed bundle.
         run: make check-bundle-fresh
 
-      - name: Loud check — pkg/rt/core_go_lowered/ in lockstep with .lg sources
-        # Policy: docs/contribution-policy.md §3 — sibling gate for the
-        # -tags gogen_ir build path. parity-full's bucket hashes
-        # silently diverge if the lgb is fresh but the lowered Go isn't.
-        run: make check-lowered-fresh
-
   # Bootstrap-parity gate (deferred — runs as 'make parity-full' locally).
   #
   # Wiring 'make parity-full' as a CI job requires 'lgbgen --target=go' to
   # produce pkg/rt/core_go_lowered/ cleanly from current main. That gen
   # path errors today on a reader EOF — fixes land in a follow-up. Until
-  # then, parity-full is a local-only target; the staleness gates
-  # (check-bundle-fresh, check-lowered-fresh) protect the artifacts
-  # parity-full depends on.
+  # then, parity-full is a local-only target; check-bundle-fresh protects the
+  # committed lgb artifact, and pkg/rt/core_go_lowered/ regenerates locally
+  # on demand with 'make generate'.
