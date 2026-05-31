@@ -473,3 +473,48 @@ func TestRenderHandlesNil(t *testing.T) {
 		t.Errorf("expected empty string, got %q", out)
 	}
 }
+
+func TestGogenIdentAccessors(t *testing.T) {
+	// Test (gogen/ident? (gogen/ident "foo")) returns true
+	identNode := must(t)(cIdent(vm.String("foo")))
+	isIdentResult, err := cIdentP(identNode)
+	if err != nil {
+		t.Fatalf("cIdentP failed: %v", err)
+	}
+	if isIdentResult != vm.TRUE {
+		t.Errorf("cIdentP on ident node: got %v, want vm.TRUE", isIdentResult)
+	}
+
+	// Test (gogen/ident? "foo") returns false (non-ident value)
+	isIdentResult2, err := cIdentP(vm.String("foo"))
+	if err != nil {
+		t.Fatalf("cIdentP on non-ident: got error %v, expected nil", err)
+	}
+	if isIdentResult2 != vm.FALSE {
+		t.Errorf("cIdentP on non-ident value: got %v, want vm.FALSE", isIdentResult2)
+	}
+
+	// Test (gogen/ident-name (gogen/ident "foo")) returns "foo"
+	nameResult, err := cIdentName(identNode)
+	if err != nil {
+		t.Fatalf("cIdentName failed: %v", err)
+	}
+	nameStr, ok := nameResult.(vm.String)
+	if !ok {
+		t.Fatalf("cIdentName returned non-string: %T", nameResult)
+	}
+	if string(nameStr) != "foo" {
+		t.Errorf("cIdentName: got %q, want %q", string(nameStr), "foo")
+	}
+
+	// Test (gogen/ident-name "foo") returns error (non-ident)
+	_, err = cIdentName(vm.String("foo"))
+	if err == nil {
+		t.Fatalf("cIdentName on non-ident: expected error, got nil")
+	}
+	// The error should mention either the type mismatch or *ast.Ident
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "String") && !strings.Contains(errMsg, "*ast.Ident") {
+		t.Errorf("cIdentName error should mention type issue, got: %v", err)
+	}
+}

@@ -266,6 +266,34 @@ func cIdent(v vm.Value) (vm.Value, error) {
 	return box(ast.NewIdent(s)), nil
 }
 
+// ident?: (gogen/ident? value) -> true if value is an *ast.Ident, false otherwise
+func cIdentP(v vm.Value) (vm.Value, error) {
+	n, err := unboxNode(v)
+	if err != nil {
+		return vm.FALSE, nil
+	}
+	if _, ok := n.(*ast.Ident); ok {
+		return vm.TRUE, nil
+	}
+	return vm.FALSE, nil
+}
+
+// ident-name: (gogen/ident-name ident) -> name of the identifier as a string
+func cIdentName(v vm.Value) (vm.Value, error) {
+	n, err := unboxNode(v)
+	if err != nil {
+		return vm.NIL, fmt.Errorf("gogen/ident-name: %v", err)
+	}
+	if n == nil {
+		return vm.NIL, fmt.Errorf("gogen/ident-name: got nil node")
+	}
+	id, ok := n.(*ast.Ident)
+	if !ok {
+		return vm.NIL, fmt.Errorf("gogen/ident-name: not an *ast.Ident: %T", n)
+	}
+	return vm.String(id.Name), nil
+}
+
 // type-expr: (gogen/type "spec") -> parsed type expression
 // Uses go/parser so the full Go type grammar is supported.
 //
@@ -1629,6 +1657,8 @@ func installGogenNS() {
 		mk("render", render, err),
 
 		mk(wrap1Named("ident", cIdent)),
+		mk(wrap1Named("ident?", cIdentP)),
+		mk(wrap1Named("ident-name", cIdentName)),
 		mk(wrap1Named("type", cType)),
 		mk(wrap1Named("int-lit", cIntLit)),
 		mk(wrap1Named("float-lit", cFloatLit)),
