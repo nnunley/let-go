@@ -237,6 +237,18 @@
     (and (< nid (count uses))
          (pos? (count (nth uses nid))))))
 
+;; live? — is nid's VALUE actually read by emitted Go? Reads the backward
+;; read-set computed by live-nids and cached on f by lower-body. The IR `uses`
+;; table over-reports: build threads some argument subexpressions twice, leaving
+;; dead duplicate insts with non-empty (stale) use lists. live? is the truth for
+;; lowering decisions (declare/assign/route-to-_). Falls back to used? when the
+;; set is absent (non-lowering callers).
+(defn- live? [f nid]
+  (let [ls (:live (deref f))]
+    (if ls
+      (contains? ls nid)
+      (used? f nid))))
+
 (declare value-expr)
 (declare lower-fn-lit)
 
@@ -352,7 +364,7 @@
               (const-expr aux t))
 
           (local-carrying-op? op)
-            (when (and (used? f nid) (infer-go-type t))
+            (when (and (live? f nid) (infer-go-type t))
               (value-ident f nid))
 
           :else nil))))
@@ -445,14 +457,14 @@
       (if (empty? bs)
         out
         (let [bid    (first bs)
-              params (filter (fn [nid] (and (used? f nid)
+              params (filter (fn [nid] (and (live? f nid)
                                             (infer-go-type (ir/type-of nid f))))
                              (ir/block-params bid f))
               insts  (filter (fn [nid]
                                (let [op (ir/op nid f)]
                                  (and (local-carrying-op? op)
                                       (not= op :block-arg)
-                                      (used? f nid)
+                                      (live? f nid)
                                       (infer-go-type (ir/type-of nid f)))))
                              (ir/block-insts bid f))]
           (recur (rest bs) (into out (concat params insts))))))))
@@ -475,31 +487,6 @@
             :else (do (swap! seen conj nm)
                       (recur (rest remaining)
                              (conj out (gogen/var-decl nm go-type nil))))))))))
-
-(defn- collect-local-names [f]
-  ;; Mirror of collect-local-ids that returns just the value-names of decls
-  ;; that local-decls will emit. Used to build a multi-assign discard so Go's
-  ;; declared-and-not-used check ignores vars whose only emission is an
-  ;; assignment (e.g. duplicate ir/op calls before CSE).
-  (let [ids (distinct (collect-local-ids f))]
-    (loop [remaining ids out []]
-      (if (empty? remaining)
-        out
-        (let [nid     (first remaining)
-              go-type (infer-go-type (ir/type-of nid f))]
-          (if (nil? go-type)
-            nil
-            (recur (rest remaining)
-                   (conj out (value-name f nid)))))))))
-
-(defn- discard-locals-stmt [names]
-  ;; Emit `_, _, ..., _ = v3, v6, ...` so each declared local counts as
-  ;; "used" from Go's perspective. Bridge-mode emission can leave vars
-  ;; assigned but never read; this is the cheap safety net.
-  (when (seq names)
-    (let [lhs (mapv (fn [_] (gogen/ident "_")) names)
-          rhs (mapv (fn [n] (gogen/ident n)) names)]
-      (gogen/multi-assign "=" lhs rhs))))
 
 ;; --- parallel-copy sequencing for block-arg edge transfers ------------------
 ;; A branch-target's param<-arg copies execute simultaneously (parallel copy).
@@ -563,7 +550,7 @@
       (if (>= i (count params))
         (oos-sequence-copies f pairs)
         (let [pid (nth params i)]
-          (if (not (used? f pid))
+          (if (not (live? f pid))
             (recur (inc i) pairs)
             (let [lhs (value-ident f pid)
                   lhs-spec (go-type-spec (ir/type-of pid f))
@@ -667,7 +654,7 @@
                       [callee args-slice])
         err-id     (gogen/ident "callErr")]
     (when (and callee (every? identity arg-exprs))
-      (let [assign (if (used? f nid)
+      (let [assign (if (live? f nid)
                      (gogen/multi-assign "="
                                          [(value-ident f nid) err-id]
                                          [invoke-expr])
@@ -703,13 +690,13 @@
       (= op :push-closed)  []
       (= op :block-arg) []
       (contains? binary-op op)
-        (if (used? f nid)
+        (if (live? f nid)
           (let [rhs (inst-rhs f closed-exprs nid)]
             (when rhs
               [(gogen/assign "=" (value-ident f nid) rhs)]))
           [])
       (or (= op :inc) (= op :dec))
-        (if (used? f nid)
+        (if (live? f nid)
           (let [rhs (inst-rhs f closed-exprs nid)]
             (when rhs
               [(gogen/assign "=" (value-ident f nid) rhs)]))
@@ -729,12 +716,19 @@
                        (let [stmts (lower-inst-stmts f closed-exprs (first remaining))]
                          (if (nil? stmts)
                            (let [op (ir/op (first remaining) f)]
-                             (if (or (= op :load-arg)
-                                     (= op :load-var)
-                                     (= op :load-closed)
-                                     (= op :const)
-                                     (= op :block-arg)
-                                     (not (used? f (first remaining))))
+                             ;; A nil result means "no statement". Side-effect-free
+                             ;; ops (loads/const/block-arg, and any other dead value)
+                             ;; can be skipped. A :call that returns nil, however, is
+                             ;; an un-lowerable side-effecting call (e.g. push-binding!
+                             ;; with a (var X) arg) — dropping it would change behavior,
+                             ;; so the whole function must fall back instead.
+                             (if (and (not= op :call)
+                                      (or (= op :load-arg)
+                                          (= op :load-var)
+                                          (= op :load-closed)
+                                          (= op :const)
+                                          (= op :block-arg)
+                                          (not (live? f (first remaining)))))
                                (recur (rest remaining) out)
                                nil))
                            (recur (rest remaining) (into out stmts))))))
@@ -856,6 +850,31 @@
                 (swap! seen assoc s r)))))))
     @unsafe))
 
+(defn- oos-captured-names [f]
+  ;; Source names that arrive via :load-closed (lexical captures). Such a name
+  ;; must NOT coalesce onto a block-param local: that param would shadow the Go
+  ;; closure's captured variable, and the init copy (param = capture) — being a
+  ;; textual self-assign over the shared name — is elided, leaving the capture
+  ;; unread (the closure would read a zero value). Keeping captured names
+  ;; versioned makes the copy real and preserves the capture.
+  (let [acc (atom #{})]
+    (doseq [bid (ir/blocks f)
+            nid (ir/block-insts bid f)]
+      (when (= :load-closed (ir/op nid f))
+        (let [s (source-name-of f nid)]
+          (when (and (string? s) (pos? (count s)))
+            (swap! acc conj s)))))
+    @acc))
+
+(defn- oos-branch-targets [term f]
+  ;; The branch-targets a terminator transfers control to (for reasoning about
+  ;; which block-param incoming args are read).
+  (let [op (ir/op term f) aux (ir/aux term f)]
+    (cond
+      (= op :branch)    [aux]
+      (= op :branch-if) [(ir/cond-target-true aux) (ir/cond-target-false aux)]
+      :else             [])))
+
 (defn- coalesce-map [f]
   ;; {nid go-name} for every nid whose source name is safe to coalesce; all
   ;; same-named versions map to the one bare name. Absent nids fall through to
@@ -863,7 +882,7 @@
   ;; A name is coalescable only when it is (1) interference-safe and (2) every
   ;; version shares ONE Go type — versions of differing type (e.g. the and/or
   ;; macro temps, bool vs vm.Value) cannot share a single mutable local.
-  (let [unsafe (oos-unsafe-names f)
+  (let [unsafe (into (oos-unsafe-names f) (oos-captured-names f))
         nids   (oos-all-nids f)
         name-types (reduce (fn [m nid]
                              (let [s (source-name-of f nid)]
@@ -888,10 +907,53 @@
             {}
             nids)))
 
+(defn- live-nids [f]
+  ;; Backward read-set: the nids whose VALUE is actually read by emitted Go.
+  ;; Roots: refs of value-reading terminators (:return / :branch-if cond /
+  ;; :tail-call args) and refs of every :call inst (calls always emit for their
+  ;; side effects, so their callee+args are read). Propagation to a fixpoint: a
+  ;; live instruction's refs are read; a live block-param's incoming branch-args
+  ;; are read. Dead duplicate subexpressions — which build threads twice and the
+  ;; ir/uses table still marks "used" — are reachable from nothing and stay out,
+  ;; so lowering routes their side-effecting calls to `_` and never declares the
+  ;; pure ones.
+  (let [live (atom #{})
+        seed (fn [nid] (swap! live conj nid))]
+    (doseq [bid (ir/blocks f)]
+      (let [term (ir/block-term bid f)]
+        (when term
+          (let [op (ir/op term f)]
+            (when (or (= op :return) (= op :branch-if) (= op :tail-call))
+              (doseq [r (ir/refs term f)] (seed r))))))
+      (doseq [nid (ir/block-insts bid f)]
+        (when (= :call (ir/op nid f))
+          (doseq [r (ir/refs nid f)] (seed r)))))
+    (loop []
+      (let [before (count @live)]
+        (doseq [bid (ir/blocks f)]
+          (doseq [nid (ir/block-insts bid f)]
+            (when (contains? @live nid)
+              (doseq [r (ir/refs nid f)] (seed r))))
+          (let [term (ir/block-term bid f)]
+            (when term
+              (doseq [bt (oos-branch-targets term f)]
+                (let [tgt    (ir/branch-target-target bt)
+                      params (ir/block-params tgt f)
+                      args   (ir/branch-target-args bt)]
+                  (loop [i 0]
+                    (when (< i (count params))
+                      (when (and (< i (count args))
+                                 (contains? @live (nth params i)))
+                        (seed (nth args i)))
+                      (recur (inc i)))))))))
+        (when (> (count @live) before) (recur))))
+    @live))
+
 (defn- lower-body
   ([f] (lower-body f nil))
   ([f closed-exprs]
    (swap! f assoc :coalesce (coalesce-map f))
+   (swap! f assoc :live (live-nids f))
    (let [needs-error? (function-needs-error? f)
          needs-tail-call? (function-needs-tail-call? f)
          decls0 (local-decls f)
@@ -902,8 +964,6 @@
                                  (arg-local-decls f)
                                  [[] []])
          decls  (into decls1 arg-decls)
-         discard (discard-locals-stmt (collect-local-names f))
-         decls  (if discard (conj decls discard) decls)
          entry-label [(gogen/label-stmt "func_entry" nil)]]
      (when decls
        (loop [blocks (ir/blocks f)

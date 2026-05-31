@@ -585,3 +585,100 @@ func TestLowerGoCoalescesLineageByName(t *testing.T) {
 		t.Fatalf("expected `acc`:\n%s", rendered)
 	}
 }
+
+func TestLowerGoReassignsInPlaceNoDiscardNet(t *testing.T) {
+	ensureLoader()
+	fn := buildLispIR(t, `(defn sum [n] (loop [i 0 acc 0] (if (= i n) acc (recur (+ i 1) (+ acc i)))))`)
+	seedArgTypes(t, fn, "[:int]")
+	optimizeLispIR(t, fn)
+	rendered := bindAndRenderGoDecl(t, lowerGo(t, fn, ":strict"))
+	// The `_, _, ... = v3, v6` discard net masks declared-but-unread locals
+	// instead of not declaring them. Read-set gating must make it unnecessary.
+	if regexp.MustCompile(`(?m)^\s*_(, _)+ = `).MatchString(rendered) {
+		t.Fatalf("discard net still present\n--- go ---\n%s", rendered)
+	}
+}
+
+// writeOnlyLocals returns declared locals (`var NAME T`) that are never read in
+// the rendered Go: every occurrence is either the declaration or an assignment
+// LHS. Such a local is a dead store — Go would reject it as declared-and-not-used
+// (or ineffassign would flag it). callErr is excused (error plumbing).
+func writeOnlyLocals(rendered string) []string {
+	declRe := regexp.MustCompile(`^\s*var (\w+) `)
+	declared := []string{}
+	reads := map[string]int{}
+	lines := strings.Split(rendered, "\n")
+	for _, ln := range lines {
+		if m := declRe.FindStringSubmatch(ln); m != nil {
+			if m[1] != "callErr" {
+				declared = append(declared, m[1])
+			}
+			continue
+		}
+		// Assignment? Split on the first " = " (not ":=", not "==").
+		rhs := ln
+		if idx := strings.Index(ln, " = "); idx >= 0 && !strings.Contains(ln[:idx], ":") {
+			rhs = ln[idx+3:]
+		}
+		for _, name := range declared {
+			if regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`).MatchString(rhs) {
+				reads[name]++
+			}
+		}
+	}
+	var dead []string
+	for _, name := range declared {
+		if reads[name] == 0 {
+			dead = append(dead, name)
+		}
+	}
+	return dead
+}
+
+func TestLowerGoDeadCallResultRoutedToBlank(t *testing.T) {
+	ensureLoader()
+	// `(vec (reverse path))` is built with the `(reverse path)` subexpression
+	// duplicated; one copy is dead. The dead side-effecting call must be
+	// discarded via `_, callErr =`, never stored in a declared-but-unread local.
+	fn := buildLispIR(t, `(defn f [path] (vec (reverse path)))`)
+	seedArgTypes(t, fn, "[:string]")
+	optimizeLispIR(t, fn)
+	rendered := bindAndRenderGoDecl(t, lowerGo(t, fn, ":strict"))
+	if dead := writeOnlyLocals(rendered); len(dead) > 0 {
+		t.Fatalf("declared-but-unread locals (dead stores): %v\n--- go ---\n%s", dead, rendered)
+	}
+}
+
+func TestLowerGoCapturedNameNotShadowedByBlockParam(t *testing.T) {
+	ensureLoader()
+	// `bad` is captured by the closure AND used inside an if-branch, so it is
+	// threaded through a block-param. If that param coalesces to "bad", it
+	// shadows the lexical capture and (the init copy being a self-assign) is
+	// never assigned — the closure then reads a zero value, and the outer `bad`
+	// becomes unused. Captured names must stay versioned so the copy is real.
+	fn := buildLispIR(t, `(defn h [xs] (let [bad (count xs)] (map (fn* [s] (if s (contains? bad s) nil)) xs)))`)
+	optimizeLispIR(t, fn)
+	rendered := bindAndRenderGoDecl(t, lowerGo(t, fn, ":strict"))
+	if n := strings.Count(rendered, "var bad vm.Value"); n > 1 {
+		t.Fatalf("captured `bad` shadowed by an inner block-param local (%d decls)\n--- go ---\n%s", n, rendered)
+	}
+}
+
+func TestLowerGoFallsBackOnUnloweredSideEffectingCall(t *testing.T) {
+	ensureLoader()
+	// push-binding! takes a `(var *ns*)` arg that gogen cannot lower, so
+	// call-assign-stmts returns nil. A side-effecting call must NOT be silently
+	// dropped (which would change behavior and leave its arg a dead store) — the
+	// whole function must fall back to bytecode instead.
+	fn := buildLispIR(t, `(defn cf [form caller-ns]
+	  (do
+	    (push-binding! (var *ns*) (first caller-ns))
+	    (let [r (do (count form))]
+	      (do (pop-binding! (var *ns*)) r))))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("fallback") {
+		t.Fatalf("expected :fallback for un-lowerable side-effecting push-binding!, got %v\n%s",
+			got, bindAndRenderGoDecl(t, result))
+	}
+}
