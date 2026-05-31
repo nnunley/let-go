@@ -523,3 +523,29 @@ func TestLowerGoStrictNestedDestructureDefn(t *testing.T) {
 		t.Fatalf("expected arithmetic in lowered body\n--- go ---\n%s", rendered)
 	}
 }
+
+func TestLowerGoNoSelfAssignment(t *testing.T) {
+	ensureLoader()
+	fn := buildLispIR(t, `(defn test-loop [x y]
+	                       (loop [a x b y]
+	                         (if (not= a 0)
+	                           (recur a b)
+	                           b)))`)
+	seedArgTypes(t, fn, "[:int :int]")
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":strict")
+	rendered := bindAndRenderGoDecl(t, result)
+	for _, line := range strings.Split(rendered, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "=") && !strings.HasPrefix(trimmed, "//") {
+			parts := strings.Split(trimmed, "=")
+			if len(parts) == 2 {
+				lhs := strings.TrimSpace(parts[0])
+				rhs := strings.TrimSpace(parts[1])
+				if lhs != "" && lhs == rhs {
+					t.Fatalf("self-assignment emitted: %q\n--- go ---\n%s", trimmed, rendered)
+				}
+			}
+		}
+	}
+}

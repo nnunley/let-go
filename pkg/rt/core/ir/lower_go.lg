@@ -204,6 +204,10 @@
   ([nid] (gogen/ident (value-name nid)))
   ([f nid] (gogen/ident (value-name f nid))))
 
+(defn- same-ident? [a b]
+  (and (gogen/ident? a) (gogen/ident? b)
+       (= (gogen/ident-name a) (gogen/ident-name b))))
+
 (defn- fn-template? [aux]
   (and (map? aux) (= (:kind aux) :fn-template)))
 
@@ -517,7 +521,9 @@
               (if (nil? rhs)
                 nil
                 (recur (inc i)
-                       (conj out (gogen/assign "=" lhs rhs)))))))))))
+                       (if (same-ident? lhs rhs)
+                         out
+                         (conj out (gogen/assign "=" lhs rhs))))))))))))
 
 (defn- transfer-stmts [f closed-exprs bt]
   (let [assigns (emit-assignments-for-target f closed-exprs bt)]
@@ -578,7 +584,9 @@
                             (if (nil? val-expr)
                               nil
                               (recur (inc i) (rest remaining)
-                                     (conj out (gogen/assign "=" lhs val-expr)))))))]
+                                     (if (same-ident? lhs val-expr)
+                                       out
+                                       (conj out (gogen/assign "=" lhs val-expr))))))))]
           (when assigns
             (conj assigns (gogen/goto-stmt "func_entry"))))
 
