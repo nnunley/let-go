@@ -241,6 +241,29 @@ func TestLowerGoStrictIdentityClosureLowersToWrappedGoClosure(t *testing.T) {
 	}
 }
 
+// TestLowerGoClosureCapturingLoopCarriedBlockParam: a closure defined inside a
+// loop, capturing the loop-carried binding, must lower to Go. The optimizer
+// threads the closure's fn-template AND its captured loop var through the loop
+// header as block-parameters (:block-arg); closure-info must follow that
+// block-param lineage back through branch-target-args to the originating
+// :const template. Before the fix it hit :else nil and the whole body fell back
+// as "unsupported function body shape".
+func TestLowerGoClosureCapturingLoopCarriedBlockParam(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn lc [xs]
+		(loop [seen #{}]
+			(let [more (filter (fn* [x] (not (seen x))) xs)]
+				(if (empty? more) seen (recur (into seen more))))))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		reason := result.ValueAt(vm.Keyword("reason"))
+		t.Fatalf("expected closure-over-loop-block-param to lower; got status=%v reason=%v", got, reason)
+	}
+}
+
 func TestLowerGoStrictCapturedClosureUsesOuterGoLocal(t *testing.T) {
 	ensureLoader()
 

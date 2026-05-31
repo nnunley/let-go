@@ -253,25 +253,94 @@
 (declare value-expr)
 (declare lower-fn-lit)
 
-(defn- closure-info [f nid]
-  (let [op   (ir/op nid f)
-        aux  (ir/aux nid f)
-        refs (ir/refs nid f)]
-    (cond
-      (and (= op :const) (any-fn-template? aux))
-        {:template aux :captures []}
+;; --- block-parameter lineage --------------------------------------------
+;; A closure created inside a loop has its fn-template (and its captured
+;; values) threaded through the loop header as block-parameters (:block-arg),
+;; rather than referenced as direct :const / inst nodes. To resolve such a
+;; value we read the block-param's incoming branch-target-args directly off the
+;; block structure — the lineage that block-parameter SSA already encodes.
+;; Block-oriented; no phi/dominance reconstruction (lesson_dae310d3ce22).
+;;
+;; param-sources ({param-nid -> [feeder-nid …]}) and a closure-info memo are
+;; precomputed ONCE per function and cached on f by lower-body (alongside
+;; :coalesce/:live/:const-params): closure-value? is queried per param across
+;; collect-local-ids and per edge in emit-assignments, so an un-memoized
+;; block-graph re-walk would blow the lowering time budget on large functions.
+;; Both fall back to direct computation when the cache is absent (callers that
+;; run before lower-body, e.g. params-for/result-node).
 
-      (= op :make-closure)
-        (when (= 1 (count refs))
-          (closure-info f (nth refs 0)))
+(defn- term-targets [op aux]
+  (cond
+    (= op :branch)    [aux]
+    (= op :branch-if) [(ir/cond-target-true aux) (ir/cond-target-false aux)]
+    :else             []))
 
-      (= op :push-closed)
-        (when (= 2 (count refs))
-          (let [base (closure-info f (nth refs 0))]
-            (when base
-              (assoc base :captures (conj (:captures base) (nth refs 1))))))
+(defn- compute-param-sources [f]
+  (let [m (atom {})]
+    (doseq [bid (ir/blocks f)]
+      (let [params (ir/block-params bid f)
+            np     (count params)]
+        (doseq [p (ir/block-preds bid f)]
+          (let [term (ir/block-term p f)]
+            (when term
+              (let [op (ir/op term f) aux (ir/aux term f)]
+                (doseq [bt (term-targets op aux)]
+                  (when (and bt (= (ir/branch-target-target bt) bid))
+                    (let [args (ir/branch-target-args bt)]
+                      (loop [i 0]
+                        (when (< i np)
+                          (when (< i (count args))
+                            (let [pid (nth params i)
+                                  a   (nth args i)]
+                              (swap! m update pid (fn [v] (conj (or v []) a)))))
+                          (recur (inc i)))))))))))))
+    @m))
 
-      :else nil)))
+(defn- block-arg-sources [f nid]
+  ;; Inst ids feeding block-parameter nid, from the per-fn cache (or computed).
+  (if-let [srcs (:param-sources (deref f))]
+    (get srcs nid)
+    (get (compute-param-sources f) nid)))
+
+(defn- closure-info* [f nid visited]
+  (if (contains? visited nid)
+    nil
+    (let [op   (ir/op nid f)
+          aux  (ir/aux nid f)
+          refs (ir/refs nid f)]
+      (cond
+        (and (= op :const) (any-fn-template? aux))
+          {:template aux :captures []}
+
+        (= op :make-closure)
+          (when (= 1 (count refs))
+            (closure-info* f (nth refs 0) visited))
+
+        (= op :push-closed)
+          (when (= 2 (count refs))
+            (let [base (closure-info* f (nth refs 0) visited)]
+              (when base
+                (assoc base :captures (conj (:captures base) (nth refs 1))))))
+
+        (= op :block-arg)
+          (some (fn [src] (closure-info* f src (conj visited nid)))
+                (block-arg-sources f nid))
+
+        :else nil))))
+
+(defn- closure-info
+  "Resolve the closure a value refers to: {:template <aux> :captures [nid …]}
+   or nil. Walks make-closure/push-closed and follows block-parameter lineage
+   so closures threaded through a loop header still resolve (captures on
+   push-closed nodes are preserved across the walk). Memoized per function on f."
+  [f nid]
+  (if-let [memo (:closure-memo (deref f))]
+    (if (contains? @memo nid)
+      (get @memo nid)
+      (let [r (closure-info* f nid #{})]
+        (swap! memo assoc nid r)
+        r))
+    (closure-info* f nid #{})))
 
 (defn- nested-template-fns [f]
   (loop [blocks (ir/blocks f) out []]
@@ -312,10 +381,25 @@
 
     :else nil))
 
+(defn- closure-value?
+  "True when nid denotes a closure/fn-template value — closure-info resolves it.
+   Such values are compile-time entities: closure-expr re-materializes the real
+   Go closure inline at each USE site (from the statically-resolved template +
+   captures), so they have no runtime Go local and must be excluded from
+   edge-assignment and local materialization — a bare template threaded through
+   a loop header as a block-arg has no standalone Go value."
+  [f nid]
+  (some? (closure-info f nid)))
+
 (defn- closure-expr [f closed-exprs nid]
   (let [info (closure-info f nid)]
     (when info
-      (let [capture-exprs (mapv (fn [rid] (value-expr f closed-exprs rid)) (:captures info))]
+      ;; Captures flow into the inner fn as vm.Value (read back via :load-closed,
+      ;; which is vm.Value-typed), so box each capture to vm.Value at the splice.
+      ;; Arg captures are already vm.Value (raw is a no-op box), but a loop-carried
+      ;; capture is a primitive Go local (e.g. int) — splicing it raw produces
+      ;; `[]vm.Value{i_5}` / `return i_5`, which doesn't typecheck.
+      (let [capture-exprs (mapv (fn [rid] (box-as-value f closed-exprs rid)) (:captures info))]
         (when (every? identity capture-exprs)
           (lower-template-closure-expr (:template info) capture-exprs))))))
 
@@ -466,6 +550,7 @@
         (let [bid    (first bs)
               params (filter (fn [nid] (and (live? f nid)
                                             (not (const-param-of f nid))
+                                            (not (closure-value? f nid))
                                             (infer-go-type (ir/type-of nid f))))
                              (ir/block-params bid f))
               insts  (filter (fn [nid]
@@ -473,6 +558,7 @@
                                  (and (local-carrying-op? op)
                                       (not= op :block-arg)
                                       (live? f nid)
+                                      (not (closure-value? f nid))
                                       (infer-go-type (ir/type-of nid f)))))
                              (ir/block-insts bid f))]
           (recur (rest bs) (into out (concat params insts))))))))
@@ -557,13 +643,22 @@
     (loop [i 0 pairs []]
       (if (>= i (count params))
         (oos-sequence-copies f pairs)
-        (let [pid (nth params i)]
-          ;; A const-param is materialized inline at each use; no edge copy.
-          (if (or (not (live? f pid)) (const-param-of f pid))
+        (let [pid     (nth params i)
+              arg-nid (nth args i)]
+          ;; Skip when the param is unused, a const-param (materialized inline at
+          ;; each use), or when either side is a compile-time template/closure
+          ;; value. Closure/template values carry no runtime Go local —
+          ;; closure-expr re-materializes the real closure inline at each USE
+          ;; site — so threading them across an edge would reference a local that
+          ;; was never declared. Checking the ARG too catches templates threaded
+          ;; into DCE-killed (:invalid) params.
+          (if (or (not (live? f pid))
+                  (const-param-of f pid)
+                  (closure-value? f pid)
+                  (closure-value? f arg-nid))
             (recur (inc i) pairs)
             (let [lhs (value-ident f pid)
                   lhs-spec (go-type-spec (ir/type-of pid f))
-                  arg-nid  (nth args i)
                   arg-spec (go-type-spec (ir/type-of arg-nid f))
                   rhs (cond
                         ;; LHS is vm.Value: box raw RHS if needed.
@@ -1047,6 +1142,11 @@
 (defn- lower-body
   ([f] (lower-body f nil))
   ([f closed-exprs]
+   ;; Per-fn lowering caches. param-sources + closure-memo back the
+   ;; block-parameter-lineage closure resolution (closure-value? is queried per
+   ;; param/edge); the rest back read-set gating, coalescing and const-params.
+   (swap! f assoc :param-sources (compute-param-sources f))
+   (swap! f assoc :closure-memo (atom {}))
    (swap! f assoc :const-params (const-param-map f))
    (swap! f assoc :coalesce (coalesce-map f))
    (swap! f assoc :live (live-nids f))
