@@ -8,6 +8,7 @@ package ir_test
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -568,5 +569,19 @@ func TestBlockParamsCarrySourceName(t *testing.T) {
 	s := string(out.(vm.String))
 	if strings.HasSuffix(s, " 0]") {
 		t.Fatalf("no block params carry a source name: %s", s)
+	}
+}
+
+func TestLowerGoCoalescesLineageByName(t *testing.T) {
+	ensureLoader()
+	fn := buildLispIR(t, `(defn sum [n] (loop [i 0 acc 0] (if (= i n) acc (recur (+ i 1) (+ acc i)))))`)
+	seedArgTypes(t, fn, "[:int]")
+	optimizeLispIR(t, fn)
+	rendered := bindAndRenderGoDecl(t, lowerGo(t, fn, ":strict"))
+	if regexp.MustCompile(`acc_\d+`).MatchString(rendered) {
+		t.Fatalf("expected coalesced `acc`, found versioned acc_NN:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "acc") {
+		t.Fatalf("expected `acc`:\n%s", rendered)
 	}
 }

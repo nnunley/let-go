@@ -159,7 +159,9 @@
    no name is attached."
   ([nid] (str "v" nid))
   ([f nid]
-   (or (when-let [sym (source-name-of f nid)]
+   (or (when-let [cm (:coalesce (deref f))]
+         (get cm nid))
+       (when-let [sym (source-name-of f nid)]
          (str (go-name sym) "_" nid))
        (str "v" nid))))
 
@@ -456,16 +458,23 @@
           (recur (rest bs) (into out (concat params insts))))))))
 
 (defn- local-decls [f]
-  (let [ids (distinct (collect-local-ids f))]
+  ;; One var-decl per DISTINCT Go name. Coalescing maps several SSA nids to the
+  ;; same name (one mutable local per variable lineage), so dedupe by name to
+  ;; avoid "redeclared in this block".
+  (let [ids  (distinct (collect-local-ids f))
+        seen (atom #{})]
     (loop [remaining ids out []]
       (if (empty? remaining)
         out
         (let [nid     (first remaining)
-              go-type (infer-go-type (ir/type-of nid f))]
-          (if (nil? go-type)
-            nil
-            (recur (rest remaining)
-                   (conj out (gogen/var-decl (value-name f nid) go-type nil)))))))))
+              go-type (infer-go-type (ir/type-of nid f))
+              nm      (value-name f nid)]
+          (cond
+            (nil? go-type)        nil
+            (contains? @seen nm)  (recur (rest remaining) out)
+            :else (do (swap! seen conj nm)
+                      (recur (rest remaining)
+                             (conj out (gogen/var-decl nm go-type nil))))))))))
 
 (defn- collect-local-names [f]
   ;; Mirror of collect-local-ids that returns just the value-names of decls
@@ -761,9 +770,74 @@
                  (conj assigns
                        (gogen/assign "=" (gogen/ident sym) (gogen/ident arg-sym)))))))))
 
+;; --- out-of-SSA coalescing (block-oriented; phi-free) -----------------------
+;; The IR is block-parameter SSA, and the build pass propagates each source
+;; variable's name onto its block params. A variable's SSA versions are
+;; sequential (each def kills the prior), so they can share ONE mutable Go
+;; local: name every nid carrying source name S as `S`. The only unsafe case
+;; is shadowing — two distinct same-named bindings live at once — detected
+;; conservatively: a name is unsafe if a single inst references two DIFFERENT
+;; nids carrying it. Unsafe names stay versioned. No union-find, no dominance,
+;; no liveness engine.
+
+(defn- oos-all-nids [f]
+  (let [acc (atom [])]
+    (doseq [bid (ir/blocks f)]
+      (doseq [p (ir/block-params bid f)] (swap! acc conj p))
+      (doseq [nid (ir/block-insts bid f)] (swap! acc conj nid)))
+    (distinct @acc)))
+
+(defn- oos-unsafe-names [f]
+  ;; #{source-name} unsafe to coalesce: some single inst references two
+  ;; distinct nids sharing the name (both live at once — e.g. shadowing).
+  (let [unsafe (atom #{})]
+    (doseq [bid (ir/blocks f)
+            nid (ir/block-insts bid f)]
+      (let [seen (atom {})]
+        (doseq [r (ir/refs nid f)]
+          (let [s (source-name-of f r)]
+            (when (and (string? s) (pos? (count s)))
+              (if-let [prev (get @seen s)]
+                (when (not= prev r) (swap! unsafe conj s))
+                (swap! seen assoc s r)))))))
+    @unsafe))
+
+(defn- coalesce-map [f]
+  ;; {nid go-name} for every nid whose source name is safe to coalesce; all
+  ;; same-named versions map to the one bare name. Absent nids fall through to
+  ;; value-name's versioned naming. Cached on f by lower-body.
+  ;; A name is coalescable only when it is (1) interference-safe and (2) every
+  ;; version shares ONE Go type — versions of differing type (e.g. the and/or
+  ;; macro temps, bool vs vm.Value) cannot share a single mutable local.
+  (let [unsafe (oos-unsafe-names f)
+        nids   (oos-all-nids f)
+        name-types (reduce (fn [m nid]
+                             (let [s (source-name-of f nid)]
+                               (if (and (string? s) (pos? (count s)))
+                                 (assoc m s (conj (get m s #{})
+                                                  (go-type-spec (ir/type-of nid f))))
+                                 m)))
+                           {}
+                           nids)]
+    (reduce (fn [result nid]
+              (let [s (source-name-of f nid)]
+                (if (and (string? s) (pos? (count s))
+                         (not (contains? unsafe s))
+                         (= 1 (count (get name-types s))))
+                  (let [gn (go-name s)]
+                    ;; never coalesce to the Go blank identifier or an empty
+                    ;; name; those fall through to versioned naming (valid).
+                    (if (and (pos? (count gn)) (not= "_" gn))
+                      (assoc result nid gn)
+                      result))
+                  result)))
+            {}
+            nids)))
+
 (defn- lower-body
   ([f] (lower-body f nil))
   ([f closed-exprs]
+   (swap! f assoc :coalesce (coalesce-map f))
    (let [needs-error? (function-needs-error? f)
          needs-tail-call? (function-needs-tail-call? f)
          decls0 (local-decls f)
@@ -793,7 +867,6 @@
                  (if (nil? stmts)
                    nil
                    (recur (rest blocks) (into out stmts))))))))))))
-
 (defn- params-for [f]
   (let [arity       (ir/fn-arity f)
         variadic?   (ir/fn-variadic? f)
