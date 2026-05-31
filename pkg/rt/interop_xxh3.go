@@ -6,6 +6,8 @@ import (
 	xxh3 "github.com/zeebo/xxh3"
 )
 
+func init() { RegisterInstaller(installXxh3NS) }
+
 func installXxh3NS() {
 	ns := vm.NewNamespace("xxh3")
 	ns.Def("Hash", vm.MustBox(xxh3.Hash))

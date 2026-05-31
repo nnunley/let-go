@@ -1,4 +1,4 @@
-;; Generate pkg/rt/core/ir/data_generated.lg from a single IR-type spec.
+;; Generate pkg/rt/core/ir/data/generated.lg from a single IR-type spec.
 ;;
 ;; This is the Lisp counterpart to ir_bridge.lg (which emits Go bridge
 ;; primitives). Where ir_bridge.lg's defgostruct describes Go-backed

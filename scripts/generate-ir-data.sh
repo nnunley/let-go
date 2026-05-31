@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate pkg/rt/core/ir/data_generated.lg from examples/go-gen/ir_data.lg.
+# Generate pkg/rt/core/ir/data/generated.lg from examples/go-gen/ir_data.lg.
 #
 # Lisp output (no compile / format step beyond what the generator emits).
 # Output is the mechanical accessor surface for the IR data types; the
@@ -15,7 +15,7 @@ if [ ! -x ./lg ]; then
   exit 1
 fi
 
-OUT=pkg/rt/core/ir/data_generated.lg
+OUT=pkg/rt/core/ir/data/generated.lg
 
 ./lg -source-paths examples/go-gen examples/go-gen/ir_data.lg > "$OUT"
 

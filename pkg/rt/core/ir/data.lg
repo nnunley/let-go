@@ -1,3 +1,4 @@
+;; lgbgen:skip — has runtime intern blocks that need live fn values; loaded from source on demand.
 ;; IR data layer — see ./README.md for the framework overview, how
 ;; to use it, and how to extend it (new passes, ops, fields, bridge
 ;; primitives, plus the load-order quirks).

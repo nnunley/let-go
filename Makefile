@@ -97,7 +97,7 @@ generate-ir-ops: build
 generate-ir-bridge: build
 	./scripts/generate-ir-bridge.sh
 
-# Regenerate pkg/rt/core/ir/data_generated.lg from examples/go-gen/ir_data.lg.
+# Regenerate pkg/rt/core/ir/data/generated.lg from examples/go-gen/ir_data.lg.
 # Lisp output (mechanical accessor surface for the IR data types).
 # Requires ./lg to exist (built by `make build`).
 generate-ir-data: build
