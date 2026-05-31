@@ -61,11 +61,29 @@ jobs:
         # newer than the committed bundle.
         run: make check-bundle-fresh
 
-  # Bootstrap-parity gate (deferred — runs as 'make parity-full' locally).
+  # gogen_ir native-dispatch gate. Previously deferred because
+  # 'lgbgen --target=go' could not produce pkg/rt/core_go_lowered/ cleanly
+  # (it errored on a reader EOF); that blocker is resolved — the tree now
+  # generates and `go build -tags gogen_ir ./...` compiles. This job proves
+  # the native override path is actually wired (not a silent no-op) and that
+  # the native passes produce byte-identical results to the bytecode VM.
   #
-  # Wiring 'make parity-full' as a CI job requires 'lgbgen --target=go' to
-  # produce pkg/rt/core_go_lowered/ cleanly from current main. That gen
-  # path errors today on a reader EOF — fixes land in a follow-up. Until
-  # then, parity-full is a local-only target; check-bundle-fresh protects the
-  # committed lgb artifact, and pkg/rt/core_go_lowered/ regenerates locally
-  # on demand with 'make generate'.
+  # NB: lower-go parity is intentionally NOT gated here — its AOT self-lower
+  # run trips the wall-clock *typeinfer-budget-ms* (the same expensive form
+  # flips :ok<->unsupported across runs on a single engine), so it is flaky
+  # by construction. ir-compile is byte-stable and is the CI-safe gate.
+  gogen-ir:
+    name: gogen-ir-native-dispatch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Confirm native dispatch (generate tree, build -tags gogen_ir, dce -> NativeFn)
+        run: make check-gogen-ir
+      - name: ir-compile parity (bytecode vs native — byte-identical)
+        run: scripts/gogen-parity.sh --ir-compile
