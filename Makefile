@@ -138,6 +138,26 @@ parity-check:
 parity-full:
 	@scripts/gogen-parity.sh --full
 
+# Verify the gogen_ir native-override path is actually wired: the lowered
+# Go tree must compile under -tags gogen_ir AND a known IR-pass var must
+# dispatch to a NativeFn override (not the bytecode Fn). Catches silent
+# regression of the wiring — a dropped ApplyGoOverrides hook, a missing
+# blank import in the generated wireup, or an emitter that stops writing
+# init(). Requires the generated tree, so it runs `make generate` first.
+check-gogen-ir: generate
+	@echo ">> building -tags gogen_ir ./..."
+	@go build -tags gogen_ir ./...
+	@echo ">> asserting native dispatch (ir.passes.dce/dce must be a NativeFn)"
+	@out=$$(printf '(require (quote ir.passes.dce)) (println "DCE-TYPE:" (type ir.passes.dce/dce))' \
+	        | go run -tags gogen_ir . /dev/stdin 2>&1); \
+	if echo "$$out" | grep -q "DCE-TYPE: let-go.lang.NativeFn"; then \
+		echo "OK: gogen_ir native dispatch confirmed (dce -> NativeFn)"; \
+	else \
+		echo "FAIL: ir.passes.dce/dce did not dispatch to a NativeFn override"; \
+		echo "$$out" | tail -5; \
+		exit 1; \
+	fi
+
 # Manual deep-dive (~25 min): the entire pkg/vm micro-benchmark fleet plus the
 # suite under -tags. Not gated in CI — run by hand when investigating a specific
 # regression. Pair with `update` to refresh the full baseline.
@@ -164,4 +184,4 @@ install-golangci-lint: $(GO)
 	  GO111MODULE=off go get -u $(GO111MODULE-LINT)
 
 # PHONY targets are for ones that have conflicting files/dirs present:
-.PHONY: test bench-ratchet bench-ratchet-update bench-ratchet-show check-bundle-fresh
+.PHONY: test bench-ratchet bench-ratchet-update bench-ratchet-show check-bundle-fresh check-gogen-ir

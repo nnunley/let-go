@@ -256,6 +256,107 @@
         non-defn (vec (remove (fn [f] (some? (defn-key f))) forms))]
     (into ordered non-defn)))
 
+;; --- gogen_ir override-registration emission (Part 1) ----------------
+;; Each lowered package emits a package-local `__gogen_wrap` helper plus
+;; an init() that calls rt.RegisterGoOverrides, clobbering the bytecode-
+;; produced Vars with NativeFn adapters that call the lowered Go fns. The
+;; resolver/eval drains these after each namespace loads. Untagged builds
+;; never import these packages, so none of this runs.
+;;
+;; All AST is built with gogen primitives (not string concat) so
+;; gogen/render owns formatting. Only single-arity, non-variadic lowered
+;; fns are registered — the strict fixed-arity wrapper can't represent an
+;; &-rest tail.
+
+(defn- override-wrapper-fn-lit [entry]
+  "Build the per-defn `func(args []vm.Value) (vm.Value, error)` adapter:
+   arity-check, then call the generated typed fn, supplying `, nil` when
+   the typed fn doesn't itself return an error."
+  (let [arity        (:arity entry)
+        go-name      (:go-name entry)
+        fn-name      (:fn-name entry)
+        needs-error? (:needs-error? entry)
+        args-id      (gogen/ident "args")
+        len-call     (gogen/call (gogen/ident "len") [args-id])
+        msg          (str fn-name ": wrong number of arguments %d (expected " arity ")")
+        arity-mismatch
+          (gogen/return-stmt
+            [(gogen/ident "nil")
+             (gogen/call
+               (gogen/field-sel (gogen/ident "fmt") "Errorf")
+               [(gogen/string-lit msg) len-call])])
+        len-check    (gogen/if-stmt
+                       nil
+                       (gogen/binary "!=" len-call (gogen/int-lit arity))
+                       [arity-mismatch]
+                       nil)
+        arg-exprs    (mapv (fn [i] (gogen/index args-id (gogen/int-lit i)))
+                           (range arity))
+        inner-call   (gogen/call (gogen/ident go-name) arg-exprs)
+        ret-stmt     (if needs-error?
+                       (gogen/return-stmt [inner-call])
+                       (gogen/return-stmt [inner-call (gogen/ident "nil")]))]
+    (gogen/func-lit
+      [(gogen/param "args" (gogen/type "[]vm.Value"))]
+      [(gogen/result (gogen/type "vm.Value"))
+       (gogen/result (gogen/type "error"))]
+      [len-check ret-stmt])))
+
+(defn- override-helper-decl []
+  "Build the package-local `__gogen_wrap` helper:
+     func __gogen_wrap(fn func(args []vm.Value) (vm.Value, error)) vm.Value {
+       v, _ := vm.NativeFnType.Wrap(fn)
+       return v
+     }"
+  (let [wrap-call (gogen/call
+                    (gogen/field-sel
+                      (gogen/field-sel (gogen/ident "vm") "NativeFnType")
+                      "Wrap")
+                    [(gogen/ident "fn")])
+        assign    (gogen/multi-assign ":="
+                    [(gogen/ident "v") (gogen/ident "_")]
+                    [wrap-call])
+        ret       (gogen/return-stmt [(gogen/ident "v")])]
+    (gogen/func-decl
+      "__gogen_wrap"
+      [(gogen/param "fn" (gogen/type "func(args []vm.Value) (vm.Value, error)"))]
+      [(gogen/result (gogen/type "vm.Value"))]
+      [assign ret])))
+
+(defn- override-init-decl [ns-name entries]
+  "Build the package's init() that calls rt.RegisterGoOverrides with a
+   map[string]vm.Value literal of __gogen_wrap-wrapped adapters."
+  (let [kv-pairs (mapv (fn [e]
+                         (gogen/kv-expr
+                           (gogen/string-lit (:fn-name e))
+                           (gogen/call (gogen/ident "__gogen_wrap")
+                                       [(override-wrapper-fn-lit e)])))
+                       entries)
+        map-lit  (gogen/composite-lit-multi
+                   (gogen/type "map[string]vm.Value")
+                   kv-pairs)
+        register-call (gogen/call
+                        (gogen/field-sel (gogen/ident "rt") "RegisterGoOverrides")
+                        [(gogen/string-lit ns-name) map-lit])]
+    (gogen/func-decl
+      "init" [] []
+      [(gogen/expr-stmt register-call)])))
+
+(defn- override-entries [valid-results]
+  "Lowered results eligible for override registration: single-arity fns
+   (carry :fn-name) whose Go signature is uniformly vm.Value, so the
+   fixed-arity wrapper adapts them without boxing/unboxing. Typed and
+   variadic fns are flagged :override-eligible? false and stay on bytecode."
+  (filterv (fn [r] (and (:fn-name r) (:override-eligible? r)))
+           valid-results))
+
+;; Extra decls reference rt + vm + fmt; attach the imports explicitly so a
+;; package whose lowered fns happen to need none still compiles.
+(def ^:private override-decl-imports
+  [{:path "github.com/nooga/let-go/pkg/rt" :alias "rt"}
+   {:path "github.com/nooga/let-go/pkg/vm" :alias "vm"}
+   {:path "fmt" :alias nil}])
+
 (defn lower-ns-to-go [pkg-name ns-name defn-forms]
   "Process defn forms through the Go-lowering pipeline and return rendered
    Go source for a package. pkg-name is the Go package name string,
@@ -293,5 +394,15 @@
                             (recur (rest remaining) out)))))
           ;; Filter out results with nil decls (failures that slipped through).
           valid-results (filterv (fn [r] (some? (:decl r))) results)
-          file-ast (lower-go/file pkg-name valid-results)]
+          ;; gogen_ir: append a __gogen_wrap helper + init() that
+          ;; registers Go-native overrides for the eligible lowered fns.
+          reg-entries (override-entries valid-results)
+          extra-decls (if (seq reg-entries)
+                        [{:decl (override-helper-decl)
+                          :imports override-decl-imports}
+                         {:decl (override-init-decl (str ns-name) reg-entries)
+                          :imports override-decl-imports}]
+                        [])
+          all-results (into valid-results extra-decls)
+          file-ast (lower-go/file pkg-name all-results)]
       (gogen/render file-ast))))

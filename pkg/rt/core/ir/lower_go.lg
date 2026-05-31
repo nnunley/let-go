@@ -1239,6 +1239,32 @@
               (conj results (gogen/result (gogen/type "error")))
               results)))))))
 
+(defn- function-param-specs [f]
+  ;; Go type-spec string ("vm.Value"/"int"/"bool"/…) for each fixed
+  ;; (non-variadic) param, mirroring params-for's type resolution.
+  (let [arity       (ir/fn-arity f)
+        variadic?   (ir/fn-variadic? f)
+        fixed-arity (if variadic? (dec arity) arity)
+        arg-types   (or (ir/fn-arg-types f) [])]
+    (loop [i 0 out []]
+      (if (>= i fixed-arity)
+        out
+        (let [load-arg-t (ir/fn-load-arg-type f i)
+              meta-t     (if (< i (count arg-types)) (nth arg-types i) :unknown)
+              t          (if (not= :unknown load-arg-t) load-arg-t meta-t)]
+          (recur (inc i) (conj out (go-type-spec t))))))))
+
+(defn- override-uniform-value? [f]
+  ;; True iff the lowered Go signature is uniformly vm.Value in / vm.Value
+  ;; out (the error result aside). Such a fn can be wrapped as a NativeFn
+  ;; override with NO boxing/unboxing at the boundary — args[i] flow
+  ;; straight in and the result straight out. Fns with typed (int/bool/…)
+  ;; params or result need coercion the Part-1 wrapper does not emit, so
+  ;; they are left to dispatch via bytecode.
+  (and (not (ir/fn-variadic? f))
+       (= "vm.Value" (function-return-spec f))
+       (every? (fn [s] (= "vm.Value" s)) (function-param-specs f))))
+
 (defn- lower-fn-lit [f closed-exprs]
   ;; Returns nil on any unlowerable inner — callers (closure-expr →
   ;; lower-template-closure-expr) propagate nil up through value-expr,
@@ -1260,6 +1286,7 @@
         body    (lower-body f)
         needs-rt? (function-needs-rt? f)
         needs-vm? (function-needs-vm? f)
+        needs-error? (function-needs-error? f)
         imports (vec
                   (concat
                     (if needs-rt?
@@ -1273,8 +1300,21 @@
       (nil? results) (unsupported mode "unsupported result type")
       (nil? body)    (unsupported mode "unsupported function body shape")
       :else
+        ;; :fn-name/:go-name/:arity/:needs-error?/:override-eligible? feed
+        ;; the gogen_ir override-registration emitter (pipeline.lg's
+        ;; register-init-decl). :override-eligible? is true only for
+        ;; uniformly-vm.Value signatures the Part-1 wrapper can adapt
+        ;; without coercion; typed (int/bool/…) and variadic fns are
+        ;; excluded and stay on bytecode. (Multi-arity defns never reach
+        ;; this path: lgbgen's runGoTarget pre-filters to isSingleArityDefn
+        ;; before calling lower-ns-to-go.)
         {:status :lowered
          :imports imports
+         :fn-name (str (ir/fn-name f))
+         :go-name (go-name (ir/fn-name f))
+         :arity (ir/fn-arity f)
+         :needs-error? needs-error?
+         :override-eligible? (override-uniform-value? f)
          :decl   (gogen/func-decl (go-name (ir/fn-name f)) params results body)})))
 
 (defn- import-spec-node [entry]
