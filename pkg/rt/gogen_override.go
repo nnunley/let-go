@@ -36,7 +36,7 @@ var pendingGoOverrides = map[string]map[string]vm.Value{}
 // through bytecode dispatch even with -tags gogen_ir + all the blank
 // imports wired up.
 func RegisterGoOverrides(nsName string, defs map[string]vm.Value) {
-	if defs == nil || len(defs) == 0 {
+	if len(defs) == 0 {
 		return
 	}
 	if ns := LookupNS(nsName); ns != nil {
