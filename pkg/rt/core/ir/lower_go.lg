@@ -501,15 +501,70 @@
           rhs (mapv (fn [n] (gogen/ident n)) names)]
       (gogen/multi-assign "=" lhs rhs))))
 
+;; --- parallel-copy sequencing for block-arg edge transfers ------------------
+;; A branch-target's param<-arg copies execute simultaneously (parallel copy).
+;; After coalescing, an arg that is a bare reference to another param (e.g. a
+;; loop swap `(recur b a)`) becomes `a = b` / `b = a`, which clobbers if
+;; emitted naively. We order copies so no destination is overwritten while a
+;; pending copy still reads it, breaking read/write cycles with a fresh `:=`
+;; temp. Computed args are materialized into distinct temps upstream, so only
+;; bare-ident copies can ever form a cycle.
+
+(defn- oos-next-tmp! [f]
+  (let [n (or (:pc-tmp (deref f)) 0)]
+    (swap! f assoc :pc-tmp (inc n))
+    (str "_pc" n)))
+
+(defn- oos-vec-remove [v i]
+  (vec (concat (take i v) (drop (inc i) v))))
+
+(defn- oos-rhs-read-name [rhs]
+  ;; The single dst name this rhs reads, IF rhs is a bare identifier; else nil.
+  (when (gogen/ident? rhs) (gogen/ident-name rhs)))
+
+(defn- oos-sequence-copies [f pairs]
+  ;; pairs: vec of [lhs-ident rhs-expr]. Returns ordered gogen assign stmts.
+  (if (<= (count pairs) 1)
+    (mapv (fn [p] (gogen/assign "=" (nth p 0) (nth p 1))) pairs)
+    (loop [pending pairs out []]
+      (if (empty? pending)
+        out
+        (let [reads (reduce (fn [s p]
+                              (let [rd (oos-rhs-read-name (nth p 1))]
+                                (if rd (conj s rd) s)))
+                            #{} pending)
+              ;; a writer is safe iff no pending copy still reads its dst
+              ready (loop [i 0]
+                      (if (< i (count pending))
+                        (if (contains? reads (gogen/ident-name (nth (nth pending i) 0)))
+                          (recur (inc i)) i)
+                        -1))]
+          (if (>= ready 0)
+            (let [p (nth pending ready)]
+              (recur (oos-vec-remove pending ready)
+                     (conj out (gogen/assign "=" (nth p 0) (nth p 1)))))
+            ;; all remaining are in cycles: save one dst to a temp, redirect readers
+            (let [p     (nth pending 0)
+                  dname (gogen/ident-name (nth p 0))
+                  tname (oos-next-tmp! f)
+                  save  (gogen/assign ":=" (gogen/ident tname) (gogen/ident dname))
+                  pending* (mapv (fn [q]
+                                   (let [r (nth q 1)]
+                                     (if (and (gogen/ident? r) (= dname (gogen/ident-name r)))
+                                       [(nth q 0) (gogen/ident tname)]
+                                       q)))
+                                 pending)]
+              (recur pending* (conj out save)))))))))
+
 (defn- emit-assignments-for-target [f closed-exprs bt]
   (let [params (ir/block-params (ir/branch-target-target bt) f)
         args   (ir/branch-target-args bt)]
-    (loop [i 0 out []]
+    (loop [i 0 pairs []]
       (if (>= i (count params))
-        out
+        (oos-sequence-copies f pairs)
         (let [pid (nth params i)]
           (if (not (used? f pid))
-            (recur (inc i) out)
+            (recur (inc i) pairs)
             (let [lhs (value-ident f pid)
                   lhs-spec (go-type-spec (ir/type-of pid f))
                   arg-nid  (nth args i)
@@ -529,10 +584,9 @@
                           (value-expr f closed-exprs arg-nid))]
               (if (nil? rhs)
                 nil
-                (recur (inc i)
-                       (if (same-ident? lhs rhs)
-                         out
-                         (conj out (gogen/assign "=" lhs rhs))))))))))))
+                (if (same-ident? lhs rhs)
+                  (recur (inc i) pairs)
+                  (recur (inc i) (conj pairs [lhs rhs])))))))))))
 
 (defn- transfer-stmts [f closed-exprs bt]
   (let [assigns (emit-assignments-for-target f closed-exprs bt)]
