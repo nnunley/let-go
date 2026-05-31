@@ -28,6 +28,7 @@
 (declare function-needs-tail-call?)
 (declare return-ref-ids)
 (declare function-return-spec)
+(declare const-param-of)
 
 (defn- unsupported [mode msg]
   (if (= mode :bridge)
@@ -323,6 +324,12 @@
         aux (ir/aux nid f)
         t   (ir/type-of nid f)]
     (or (closure-expr f closed-exprs nid)
+        ;; A constant block-param is re-materialized as the literal inline
+        ;; (consts are block-free), eliding its local and its edge copies.
+        (when-let [cp (const-param-of f nid)]
+          (if (= "vm.Value" (go-type-spec t))
+            (boxed-value-expr (first cp))
+            (const-expr (first cp) t)))
         (cond
           (= op :load-closed)
             (when (and closed-exprs
@@ -458,6 +465,7 @@
         out
         (let [bid    (first bs)
               params (filter (fn [nid] (and (live? f nid)
+                                            (not (const-param-of f nid))
                                             (infer-go-type (ir/type-of nid f))))
                              (ir/block-params bid f))
               insts  (filter (fn [nid]
@@ -550,7 +558,8 @@
       (if (>= i (count params))
         (oos-sequence-copies f pairs)
         (let [pid (nth params i)]
-          (if (not (live? f pid))
+          ;; A const-param is materialized inline at each use; no edge copy.
+          (if (or (not (live? f pid)) (const-param-of f pid))
             (recur (inc i) pairs)
             (let [lhs (value-ident f pid)
                   lhs-spec (go-type-spec (ir/type-of pid f))
@@ -949,9 +958,96 @@
         (when (> (count @live) before) (recur))))
     @live))
 
+(defn- oos-param-incoming-args [f b i]
+  ;; Every argument feeding param index i of block b, across predecessor edges.
+  (let [acc (atom [])]
+    (doseq [bp (ir/block-preds b f)]
+      (let [term (ir/block-term bp f)]
+        (when term
+          (doseq [bt (oos-branch-targets term f)]
+            (when (= (ir/branch-target-target bt) b)
+              (let [args (ir/branch-target-args bt)]
+                (when (< i (count args))
+                  (swap! acc conj (nth args i)))))))))
+    @acc))
+
+(defn- const-inst-val [f nid]
+  ;; [value] when nid is a :const we can re-materialize as a literal; nil else.
+  ;; Wrapped in a vector so a genuine `nil`/`false` const is distinguishable from
+  ;; "not a const". fn-template consts are excluded (not plain literals).
+  (when (= :const (ir/op nid f))
+    (let [aux (ir/aux nid f)]
+      (when (not (any-fn-template? aux))
+        [aux]))))
+
+;; Lattice for constant-param analysis: :top (no info yet) ⊐ [const-value] ⊐ :bot
+;; (provably not a single constant). meet moves DOWN only, so the fixpoint is
+;; monotone and terminates.
+(defn- cp-meet [a b]
+  (cond
+    (= a :top) b
+    (= b :top) a
+    (= a :bot) :bot
+    (= b :bot) :bot
+    (= a b)    a       ; [c] meet [c]
+    :else      :bot))  ; [c] meet [d], c != d
+
+(defn- cp-value [f known a p]
+  ;; The lattice value an incoming arg contributes to param p. A self-ref
+  ;; (loop back-edge passing p through) contributes :top — it constrains nothing.
+  ;; A :const inst contributes its [value]; another param contributes its current
+  ;; lattice value; any other inst (call/inc/…) is :bot (not a constant).
+  (if (= a p)
+    :top
+    (or (const-inst-val f a)
+        (get known a :bot))))
+
+(defn- const-param-map [f]
+  ;; nid -> [const-value] for every block-param that PROVABLY always holds ONE
+  ;; constant on every path. OPTIMISTIC fixpoint (SCCP-style): all params start
+  ;; :top, each is lowered to the meet of its incoming args, iterated to a fixed
+  ;; point. Optimism is essential — a constant threaded around a LOOP forms a
+  ;; param cycle (v79←v80←v81←v78←v79 all carrying :else); a pessimistic
+  ;; "promote only when all inputs already known" pass deadlocks on the cycle,
+  ;; the optimistic meet resolves it. A constant is block-free, so a const-param
+  ;; lowers to the literal inline — NO cross-block ref, NO interference, NO copy —
+  ;; collapsing constant copy chains the cross-block-ref invariant forbids
+  ;; rewriting in the IR.
+  (let [known (atom {})]
+    (doseq [bid (ir/blocks f)
+            p   (ir/block-params bid f)]
+      (swap! known assoc p :top))
+    (loop []
+      (let [changed (atom false)]
+        (doseq [bid (ir/blocks f)]
+          (let [params (ir/block-params bid f)]
+            (loop [i 0]
+              (when (< i (count params))
+                (let [p    (nth params i)
+                      args (oos-param-incoming-args f bid i)
+                      newv (if (empty? args)
+                             :bot
+                             (reduce cp-meet :top
+                                     (map (fn [a] (cp-value f @known a p)) args)))]
+                  (when (not= newv (get @known p))
+                    (swap! known assoc p newv)
+                    (reset! changed true)))
+                (recur (inc i))))))
+        (when @changed (recur))))
+    (reduce (fn [m kv] (if (vector? (val kv)) (assoc m (key kv) (val kv)) m))
+            {}
+            @known)))
+
+(defn- const-param-of [f nid]
+  ;; [const-value] if nid is a recognized constant block-param (cached on f), nil
+  ;; otherwise. Falls back to nil for non-lowering callers.
+  (when-let [cp (:const-params (deref f))]
+    (get cp nid)))
+
 (defn- lower-body
   ([f] (lower-body f nil))
   ([f closed-exprs]
+   (swap! f assoc :const-params (const-param-map f))
    (swap! f assoc :coalesce (coalesce-map f))
    (swap! f assoc :live (live-nids f))
    (let [needs-error? (function-needs-error? f)

@@ -664,6 +664,24 @@ func TestLowerGoCapturedNameNotShadowedByBlockParam(t *testing.T) {
 	}
 }
 
+func TestLowerGoInlinesConstantBlockParams(t *testing.T) {
+	ensureLoader()
+	// `:k` is carried through a staircase of merge block-params, each holding
+	// only the constant. A constant block-param is freely re-materializable
+	// (consts are block-free), so it must lower to the literal inline — no local,
+	// no `vN = vm.Keyword("k")` forwarding copy. The function just returns :k.
+	fn := buildLispIR(t, `(defn f [a b] (if a :k (if b :k :k)))`)
+	seedArgTypes(t, fn, "[:any :any]")
+	optimizeLispIR(t, fn)
+	rendered := bindAndRenderGoDecl(t, lowerGo(t, fn, ":strict"))
+	if m := regexp.MustCompile(`(?m)^\s*v\d+ = vm\.Keyword\("k"\)$`).FindString(rendered); m != "" {
+		t.Fatalf("constant block-param not inlined: %q\n--- go ---\n%s", strings.TrimSpace(m), rendered)
+	}
+	if !strings.Contains(rendered, `return vm.Keyword("k")`) {
+		t.Fatalf("expected `return vm.Keyword(\"k\")` (inlined const param)\n--- go ---\n%s", rendered)
+	}
+}
+
 func TestLowerGoFallsBackOnUnloweredSideEffectingCall(t *testing.T) {
 	ensureLoader()
 	// push-binding! takes a `(var *ns*)` arg that gogen cannot lower, so
