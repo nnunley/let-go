@@ -549,3 +549,24 @@ func TestLowerGoNoSelfAssignment(t *testing.T) {
 		}
 	}
 }
+
+func TestBlockParamsCarrySourceName(t *testing.T) {
+	ensureLoader()
+	fn := buildLispIR(t, `(defn sum [n] (loop [i 0 acc 0] (if (= i n) acc (recur (+ i 1) (+ acc i)))))`)
+	seedArgTypes(t, fn, "[:int]")
+	passVarCounter++
+	v := fmt.Sprintf("*bp-%d*", passVarCounter)
+	rt.NS(rt.NameCoreNS).Def(v, fn)
+	out := runLispExpr(t, fmt.Sprintf(`
+	  (let [f %s
+	        params (mapcat (fn [b] (ir/block-params b f)) (ir/blocks f))
+	        named  (filter (fn [p]
+	                         (some (fn [si] (ir/source-info-symbol si))
+	                               (ir/source-infos p f)))
+	                       params)]
+	    (pr-str [(count params) (count named)]))`, v))
+	s := string(out.(vm.String))
+	if strings.HasSuffix(s, " 0]") {
+		t.Fatalf("no block params carry a source name: %s", s)
+	}
+}

@@ -178,6 +178,8 @@
                         (let [pos (count (ir/block-params blk f))
                               pid (ir/add-inst f blk :block-arg [] pos)]
                           (ir/add-block-param! f blk pid)
+                          (doseq [si (ir/source-infos clone f)]
+                            (ir/add-source-info! f pid si))
                           (assoc m blk pid)))
                       {}
                       body)]
@@ -225,11 +227,15 @@
                     (when (not tt-in-loop?)
                       (let [pos (count (ir/block-params tt-tgt f))
                             pid (ir/add-inst f tt-tgt :block-arg [] pos)]
-                        (ir/add-block-param! f tt-tgt pid)))
+                        (ir/add-block-param! f tt-tgt pid)
+                        (doseq [si (ir/source-infos val-to-pass f)]
+                          (ir/add-source-info! f pid si))))
                     (when (not ft-in-loop?)
                       (let [pos (count (ir/block-params ft-tgt f))
                             pid (ir/add-inst f ft-tgt :block-arg [] pos)]
-                        (ir/add-block-param! f ft-tgt pid)))
+                        (ir/add-block-param! f ft-tgt pid)
+                        (doseq [si (ir/source-infos val-to-pass f)]
+                          (ir/add-source-info! f pid si))))
                     (let [new-tt (ir/new-branch-target tt-tgt (conj (vec (ir/branch-target-args tt)) val-to-pass))
                           new-ft (ir/new-branch-target ft-tgt (conj (vec (ir/branch-target-args ft)) val-to-pass))
                           new-aux (-> aux
