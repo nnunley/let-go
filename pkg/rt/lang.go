@@ -3304,6 +3304,25 @@ func installLangNS() {
 		return at.Reset(vs[1])
 	})
 
+	// (compare-and-set! a old new): set to new iff current is identical to old.
+	compareAndSet, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 3 {
+			return vm.NIL, fmt.Errorf("compare-and-set! expected 3 arguments, got %d", len(vs))
+		}
+		at, ok := vs[0].(*vm.Atom)
+		if !ok {
+			return vm.NIL, fmt.Errorf("compare-and-set! expected Atom")
+		}
+		swapped, err := at.CompareAndSet(vs[1], vs[2])
+		if err != nil {
+			return vm.NIL, err
+		}
+		if swapped {
+			return vm.TRUE, nil
+		}
+		return vm.FALSE, nil
+	})
+
 	// swap-vals!: like swap! but returns [old new]
 	swapVals, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		if len(vs) < 2 {
@@ -4489,6 +4508,26 @@ func installLangNS() {
 		fields := make([]vm.Value, len(vs)-1)
 		copy(fields, vs[1:])
 		return vm.NewDTypeInstance(dt, fields), nil
+	})
+
+	// set-field!: mutate a deftype instance field in place (backs ^:mutable).
+	// (set-field! instance 'field-name value) -> value
+	setField, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 3 {
+			return vm.NIL, fmt.Errorf("set-field! expected 3 arguments, got %d", len(vs))
+		}
+		inst, ok := vs[0].(*vm.DTypeInstance)
+		if !ok {
+			return vm.NIL, fmt.Errorf("set-field! expected a deftype instance, got %s", vs[0].Type().Name())
+		}
+		name, ok := vs[1].(vm.Symbol)
+		if !ok {
+			return vm.NIL, fmt.Errorf("set-field! expected a Symbol field name")
+		}
+		if err := inst.SetField(name, vs[2]); err != nil {
+			return vm.NIL, err
+		}
+		return vs[2], nil
 	})
 
 	// defprotocol*: create a protocol (called by defprotocol macro)
@@ -5944,6 +5983,7 @@ func installLangNS() {
 
 	ns.Def("atom", atom)
 	ns.Def("reset!", reset)
+	ns.Def("compare-and-set!", compareAndSet)
 	ns.Def("swap!", swap)
 	ns.Def("swap-vals!", swapVals)
 	ns.Def("reset-vals!", resetVals)
@@ -6020,6 +6060,7 @@ func installLangNS() {
 	ns.Def("record?", isRecord)
 	ns.Def("make-deftype", makeDType)
 	ns.Def("make-deftype-instance", makeDTypeInstance)
+	ns.Def("set-field!", setField)
 	ns.Def("defprotocol*", defProtocol)
 	installHierarchyBuiltins(ns)
 	ns.Def("make-protocol-fn", makeProtocolFn)
