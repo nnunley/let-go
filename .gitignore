@@ -181,3 +181,4 @@ pkg/rt/core_go_lowered/
 # `make generate`. Carry a "DO NOT EDIT" banner; never hand-edit.
 /lg_gogen_ir.go
 /cmd/lgbgen/main_gogen_ir.go
+/pkg/ir/zz_gogen_ir_wire_test.go
