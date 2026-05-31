@@ -213,6 +213,7 @@
               (integer? form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (float?   form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (string?  form)  (add-inst! ctx (ctx-block ctx) :const [] form)
+              (char?    form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (keyword? form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (boolean? form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (symbol?  form)  (build-symbol form ctx)

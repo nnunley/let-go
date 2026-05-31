@@ -43,6 +43,7 @@
     (or (= t :float) (= t [:const :float 0.0]))  "float64"
     (or (= t :bool) (= t :true) (= t :false))    "bool"
     (= t :string)                                "string"
+    (= t :char)                                  "vm.Char"
     (or (= t :unknown) (= t :any) (= t :nil))    "vm.Value"
     (and (vector? t) (= (first t) :union))       "vm.Value"
     :else nil))
@@ -58,6 +59,8 @@
     (= aux true)      (gogen/ident "true")
     (= aux false)     (gogen/ident "false")
     (string? aux)     (gogen/string-lit aux)
+    (char? aux)       (gogen/call (gogen/field-sel (gogen/ident "vm") "Char")
+                                  [(gogen/char-lit aux)])
     (keyword? aux)    nil
     (or (= t :float) (= t [:const :float 0.0])) (gogen/float-lit aux)
     (integer? aux)    (gogen/int-lit aux)
@@ -121,6 +124,9 @@
       (= spec "int")      (vm-call "Int" [expr])
       (= spec "float64")  (vm-call "Float" [expr])
       (= spec "string")   (vm-call "String" [expr])
+      ;; vm.Char is a thin rune type that already implements vm.Value, so a
+      ;; vm.Char-typed expr is usable as vm.Value directly (no wrapper needed).
+      (= spec "vm.Char")  expr
       :else               expr)))
 
 (defn- boxed-value-expr [v]

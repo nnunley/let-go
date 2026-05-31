@@ -26,10 +26,11 @@
    :float 4
    :number 5
    :string 6
-   :nil 7
-   :unknown 8
-   :any 9
-   :bottom 10})
+   :char 7
+   :nil 8
+   :unknown 9
+   :any 10
+   :bottom 11})
 
 ;; --- diagnostic instrumentation ---
 ;; Bind *ti-counters* to an atom-map around a `typeinfer` call to record
@@ -245,6 +246,7 @@
     (and (float? aux) (= aux 0.0)) [:const :float 0.0]
     (float?   aux) :float
     (string?  aux) :string
+    (char?    aux) :char
     :else          :any))
 
 ;; --- CFG helpers -----------------------------------------------------

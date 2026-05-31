@@ -723,3 +723,29 @@ func TestLowerGoFallsBackOnUnloweredSideEffectingCall(t *testing.T) {
 			got, bindAndRenderGoDecl(t, result))
 	}
 }
+
+// TestLowerGoCharLiteral (ITER-0001): character literals lower to vm.Char, and
+// in a primitive-typed (char-returning) context they UNBOX to a vm.Char-typed
+// return rather than vm.Value — consistent with int. Before the fix, build-form
+// had no char? case and threw "unrecognized form".
+func TestLowerGoCharLiteral(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn whitespace? [c] (or (= c \space) (= c \tab)))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("char-literal defn should lower; got %v reason=%v", got, result.ValueAt(vm.Keyword("reason")))
+	}
+	if r := bindAndRenderGoDecl(t, result); !strings.Contains(r, `vm.Char(' ')`) {
+		t.Fatalf("expected vm.Char(' ')\n%s", r)
+	}
+
+	fn2 := buildLispIR(t, `(defn ch [] \a)`)
+	optimizeLispIR(t, fn2)
+	result2 := lowerGo(t, fn2, ":bridge")
+	r2 := bindAndRenderGoDecl(t, result2)
+	if !strings.Contains(r2, "func ch() vm.Char") {
+		t.Fatalf("expected char return to UNBOX to vm.Char\n%s", r2)
+	}
+}
