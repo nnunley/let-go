@@ -35,6 +35,10 @@ jobs:
       - name: Regenerate bundled bytecode
         run: go generate ./pkg/rt/
 
+      # Freshness of the committed artifacts is gated once, in the dedicated
+      # `generated` job below (make check-generated). This job regenerates the
+      # bundle only so build/test exercise the current .lg sources.
+
       - name: Build
         run: go build -v ./...
 
@@ -50,40 +54,23 @@ jobs:
       - name: Clojure compatibility test suite with source stdlib bootstrap
         run: go test -tags bootstrap ./test/ -count=1 -run TestClojureTestSuite -v
 
-  bundle-fresh:
-    name: bundle-fresh
+  # Single gate for every generated artifact (Policy: docs/contribution-policy.md §3):
+  # the bundle is verified in lockstep with pkg/rt/core/**/*.lg (content-based, so
+  # it survives a fresh checkout where mtimes are arbitrary), and the committed
+  # lowered-Go tree must compile under -tags gogen_ir. One Makefile target —
+  # `make check-generated` — so contributors have one command to remember.
+  generated:
+    name: generated-artifacts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Loud check — pkg/rt/core_compiled.lgb in lockstep with .lg sources
-        # Policy: docs/contribution-policy.md §3 (stale bundle is a hard gate).
-        # Fast (~1 s) — fails immediately when any pkg/rt/core/**/*.lg is
-        # newer than the committed bundle.
-        run: make check-bundle-fresh
-
-  # gogen_ir native-dispatch gate. Previously deferred because
-  # 'lgbgen --target=go' could not produce pkg/rt/core_go_lowered/ cleanly
-  # (it errored on a reader EOF); that blocker is resolved — the tree now
-  # generates and `go build -tags gogen_ir ./...` compiles. This job proves
-  # the native override path is actually wired (not a silent no-op) and that
-  # the native passes produce byte-identical results to the bytecode VM.
-  #
-  # NB: lower-go parity is intentionally NOT gated here — its AOT self-lower
-  # run trips the wall-clock *typeinfer-budget-ms* (the same expensive form
-  # flips :ok<->unsupported across runs on a single engine), so it is flaky
-  # by construction. ir-compile is byte-stable and is the CI-safe gate.
-  gogen-ir:
-    name: gogen-ir-native-dispatch
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Confirm native dispatch (generate tree, build -tags gogen_ir, dce -> NativeFn)
-        run: make check-gogen-ir
-      - name: ir-compile parity (bytecode vs native — byte-identical)
-        run: scripts/gogen-parity.sh --ir-compile
+      - name: make check-generated
+        run: make check-generated
+
+  # Bootstrap-parity gate (deferred — runs as 'make parity-full' locally).
+  # Until parity-full is wired as a CI job, `make check-generated` protects
+  # the artifacts parity-full depends on.

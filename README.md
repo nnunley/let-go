@@ -112,6 +112,38 @@ It shares `~/.babashka/pods/` with `bb`, so install pods with babashka and use
 them from `lg`. See the [pod registry](https://github.com/babashka/pod-registry)
 for what's available.
 
+### Portable code (`:lg` reader conditionals)
+
+let-go ships some namespaces of its own — e.g. `let-go.semver` — that JVM
+Clojure can't load. To keep shared code loadable on both, guard the let-go-only
+parts behind `:lg` reader conditionals. The reader always matches `:lg` and
+`:default`, and matches `:clj` / `:bb` only when opted in. JVM Clojure has no
+idea what `:lg` is, so it skips those branches entirely — the same way it skips
+a `:cljs` branch:
+
+```clojure
+(ns my.app
+  ;; only let-go reads the :lg branch; Clojure never tries to load let-go.semver
+  #?(:lg (:require [let-go.semver :as semver])))
+
+(defn normalize [s]
+  ;; the semver alias appears only inside the :lg branch, so a non-let-go reader
+  ;; never sees an unresolved symbol
+  #?(:lg (semver/render (semver/version s))
+     :default s))
+```
+
+This has to be guarded at **read** time: a missing namespace or an unresolved
+symbol fails at compile time, before any `when`/`if` could intervene. Two
+things to know:
+
+- **Use `.cljc`.** Clojure only honors `#?` in `.cljc` files. let-go reads `#?`
+  in any file and its loader resolves `.lg` → `.cljc` → `.clj`, so a shared file
+  should just be `.cljc`.
+- **Put `:lg` before `:clj`.** First match wins. If a let-go user opted into
+  `:clj` matching to consume a Clojure library, then in `#?(:clj … :lg …)`
+  let-go would take the `:clj` branch.
+
 ## Known limitations
 
 ### Not implemented
@@ -311,13 +343,15 @@ After cloning the repo (or pulling for the first time after this driver was
 added), register it locally:
 
 ```bash
-git config merge.lgb.name "Regenerate core_compiled.lgb from sources"
-git config merge.lgb.driver "scripts/git-merge-lgb.sh %O %A %B %L %P"
+make install-hooks
 ```
 
-This is a one-time per-clone step. After registration, rebases that touch any
-embedded `.lg` source will regenerate the `.lgb` automatically — no more
-binary merge conflicts when stacking PRs that edit `core.lg` and friends.
+(A merge driver lives in `.git/config`, which is not shared, so each clone
+needs this once. The target just runs the `git config` commands for you.)
+
+After registration, rebases and merges that touch any embedded `.lg` source
+will regenerate the `.lgb` automatically — no more binary merge conflicts when
+stacking PRs that edit `core.lg` and friends.
 
 ---
 

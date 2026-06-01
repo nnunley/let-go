@@ -48,6 +48,12 @@ case "$MODE" in
         ;;
 esac
 
+# The gogen_ir lowered tree (pkg/rt/core_go_lowered/) is a gitignored build
+# artifact, so regenerate it before any `-tags gogen_ir` build below. Cheap
+# relative to the parity runs; non-determinism is irrelevant here (we compare
+# program output across engines, not the generated Go bytes).
+go run -tags bootstrap ./cmd/lgbgen --target=go >/dev/null
+
 # IR corpus used by ir-stress. Order matters (data.lg must load first).
 IR_CORPUS=(
     data.lg build.lg lower.lg lower_go.lg dump.lg

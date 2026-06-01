@@ -1059,6 +1059,7 @@ func readShortFn(r *LispReader, _ rune) (vm.Value, error) {
 
 const lgConditionalTag = vm.Keyword("lg")
 const cljConditionalTag = vm.Keyword("clj")
+const bbConditionalTag = vm.Keyword("bb")
 const defaultConditionalTag = vm.Keyword("default")
 
 // matchCljConditional controls whether reader conditionals match the :clj
@@ -1072,6 +1073,17 @@ var matchCljConditional = os.Getenv("LG_READ_CLJ") != ""
 
 // SetMatchCljConditional toggles whether reader conditionals match :clj.
 func SetMatchCljConditional(v bool) { matchCljConditional = v }
+
+// matchBbConditional controls whether reader conditionals match the :bb
+// (babashka) branch, in addition to :lg and :default. Opt-in like :clj: many
+// libraries ship :bb fallbacks that avoid JVM-internal constructors (the
+// babashka path), which is exactly what a JVM-free host wants. Enable alongside
+// :clj to run babashka-compatible libraries. Set via SetMatchBbConditional,
+// set-read-bb! at runtime, or the LG_READ_BB env var at startup.
+var matchBbConditional = os.Getenv("LG_READ_BB") != ""
+
+// SetMatchBbConditional toggles whether reader conditionals match :bb.
+func SetMatchBbConditional(v bool) { matchBbConditional = v }
 
 func readConditional(r *LispReader, s rune) (vm.Value, error) {
 	n, err := r.next()
@@ -1124,6 +1136,7 @@ func readConditional(r *LispReader, s rune) (vm.Value, error) {
 		}
 		isMatch := !found && (key == lgConditionalTag ||
 			(matchCljConditional && key == cljConditionalTag) ||
+			(matchBbConditional && key == bbConditionalTag) ||
 			key == defaultConditionalTag)
 		if isMatch {
 			// Read the value form normally
@@ -1184,6 +1197,21 @@ func skipReaderForm(r *LispReader) {
 				continue
 			}
 			switch c {
+			case '\\':
+				// Character literal (e.g. \), \", \(): skip the next char so a
+				// delimiter or quote in a char literal doesn't corrupt the count.
+				if _, err := r.next(); err != nil {
+					return
+				}
+			case ';':
+				// Line comment: skip to end of line so a delimiter inside a
+				// comment isn't counted.
+				for c != '\n' && c != '\r' {
+					c, err = r.next()
+					if err != nil {
+						return
+					}
+				}
 			case '"':
 				inString = true
 			case '(', '[', '{':
@@ -1212,22 +1240,70 @@ func skipReaderForm(r *LispReader) {
 		if err != nil {
 			return
 		}
-		if c == '(' || c == '{' {
+		switch c {
+		case '(', '{':
+			// #(...) anon fn or #{...} set — balanced delimiters.
 			r.unread()
 			skipReaderForm(r)
-		} else {
-			// #something — skip to whitespace/delimiter
+		case '"':
+			// #"regex" — a string literal; skip to its closing quote.
 			for {
-				c, err := r.next()
+				cc, err := r.next()
 				if err != nil {
 					return
 				}
-				if isWhitespace(c) || isTerminatingMacro(c) {
-					r.unread()
-					return
+				if cc == '\\' {
+					r.next()
+				} else if cc == '"' {
+					break
 				}
 			}
+		case '\'', '_':
+			// #'var-quote or #_discard — applies to the single next form.
+			skipReaderForm(r)
+		case '?':
+			// Nested reader conditional #?(...) / #?@(...) inside a skipped
+			// branch — skip the whole (list) (consume the optional @ first).
+			cc, err := r.next()
+			if err != nil {
+				return
+			}
+			if cc != '@' {
+				r.unread()
+			}
+			skipReaderForm(r)
+		default:
+			// Tagged literal #tag form (e.g. #js [], #inst "..."): skip the tag
+			// token, THEN the form it tags. Skipping only the tag would leave
+			// the tagged collection/value behind and desync the surrounding
+			// reader-conditional, swallowing the rest of the file.
+			for {
+				cc, err := r.next()
+				if err != nil {
+					return
+				}
+				if isWhitespace(cc) || isTerminatingMacro(cc) {
+					r.unread()
+					break
+				}
+			}
+			skipReaderForm(r)
 		}
+	case '^':
+		// Metadata prefix (`^number x`, `^{:k v} x`, `^:kw x`): the metadata
+		// form and the form it attaches to are ONE logical value. Skip BOTH,
+		// or the trailing target (e.g. `size` in `^number size`) is left
+		// behind and desyncs the surrounding reader-conditional key/value
+		// pairing — which then consumes the closing `)` and swallows the
+		// rest of the file.
+		skipReaderForm(r) // the metadata form
+		skipReaderForm(r) // the form it attaches to
+	case '\'', '`', '~', '@':
+		// Quote / syntax-quote / unquote / deref prefixes each apply to the
+		// single following form. Skip that form so the prefix doesn't leave
+		// its target dangling. (`~@` composes: `~` skips a form starting with
+		// `@`, which in turn skips one more.)
+		skipReaderForm(r)
 	default:
 		// Atom (symbol, number, keyword, etc.) — skip to whitespace/delimiter
 		for {
@@ -1275,7 +1351,12 @@ func readMeta(r *LispReader, _ rune) (vm.Value, error) {
 		case vm.Keyword:
 			m = m.(*vm.PersistentMap).Assoc(v, vm.TRUE).(*vm.PersistentMap)
 		case vm.Symbol:
-			m = m.(*vm.PersistentMap).Assoc(tagKey, v).(*vm.PersistentMap)
+			// A bare-symbol tag (`^Iterable x`) is a type hint. Preserve it as
+			// :tag metadata (the IR's typeinfer/lowering passes can use it), but
+			// quote it so the (often host-class) symbol is a datum, not an
+			// evaluated var reference that won't resolve.
+			quotedTag := vm.NewList([]vm.Value{vm.Symbol("quote"), v})
+			m = m.(*vm.PersistentMap).Assoc(tagKey, quotedTag).(*vm.PersistentMap)
 		case vm.String:
 			m = m.(*vm.PersistentMap).Assoc(tagKey, v).(*vm.PersistentMap)
 		default:
