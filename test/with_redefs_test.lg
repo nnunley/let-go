@@ -1,0 +1,56 @@
+;; Tests for with-redefs: temporary root rebinding of any var (including plain
+;; defns, which `binding` cannot touch), restored afterward even on throw.
+(ns test.with-redefs-test
+  (:require
+   [let-go.semver :as semver]
+   [test :refer :all]))
+
+(def wr-value 1)
+(defn wr-fn [] :original)
+
+(deftest with-redefs-rebinds-and-restores
+  (testing "body sees the temporary root, original is restored afterward"
+    (is (= 1 wr-value))
+    (is (= 99 (with-redefs [wr-value 99] wr-value)))
+    (is (= 1 wr-value))))
+
+(deftest with-redefs-returns-body-value
+  (testing "returns the value of the last body form"
+    (is (= :result (with-redefs [wr-value 0] :a :b :result)))))
+
+(deftest with-redefs-stubs-a-function
+  (testing "redefines an ordinary defn (binding cannot do this)"
+    (is (= :original (wr-fn)))
+    (is (= :stubbed (with-redefs [wr-fn (fn [] :stubbed)] (wr-fn))))
+    (is (= :original (wr-fn)))))
+
+(deftest with-redefs-restores-on-throw
+  (testing "the original root is restored even when body throws"
+    (is (= :caught
+           (try (with-redefs [wr-value 42] (throw "boom"))
+                (catch e :caught))))
+    (is (= 1 wr-value))))
+
+(deftest with-redefs-multiple-vars
+  (testing "rebinds several vars at once, restores all"
+    (with-redefs [wr-value 7 wr-fn (fn [] :two)]
+      (is (= 7 wr-value))
+      (is (= :two (wr-fn))))
+    (is (= 1 wr-value))
+    (is (= :original (wr-fn)))))
+
+;; End-to-end: with-redefs over the build-introspection seam drives
+;; require-letgo's throw path on an ordinary (dev) test binary.
+(deftest with-redefs-drives-require-letgo-throw
+  (testing "forcing a known-mismatching running version makes require-letgo throw"
+    (let [e (with-redefs [semver/current        (fn [] (semver/version "1.8.0"))
+                          semver/current-commit (fn [] nil)]
+              (try (semver/require-letgo ">=1.9.0")
+                   (catch ex ex)))]
+      (is (= "require-letgo: this file requires >=1.9.0 but running v1.8.0"
+             (ex-message e)))
+      (is (= :semver (:check-type (ex-data e))))))
+  (testing "a satisfied requirement returns nil (no throw) under redef"
+    (is (nil? (with-redefs [semver/current        (fn [] (semver/version "2.0.0"))
+                            semver/current-commit (fn [] nil)]
+                (semver/require-letgo ">=1.9.0"))))))

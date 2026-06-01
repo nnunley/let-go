@@ -15,6 +15,7 @@
   (:require
    [portable-consumer :as pc]
    [portable-foreign :as pf]
+   [portable-requires :as pr]
    [test :refer :all]))
 
 (deftest cljc-lg-guarded-require-loads-under-let-go
@@ -29,3 +30,10 @@
     ;; non-existent namespace was skipped — the same mechanism that makes a
     ;; Clojure consumer skip an #?@(:lg ...) let-go-only require.
     (is (= :ok pf/loaded))))
+
+(deftest cljc-require-letgo-guarded-and-loads
+  (testing "an :lg-guarded require-letgo call loads clean under let-go (dev-skip)"
+    ;; portable-requires runs (require-letgo \">=1.9.0\") at load time, guarded by
+    ;; :lg. On the dev/none test binary that warns-and-passes; a Clojure reader
+    ;; would skip both the :refer and the call entirely.
+    (is (= :loaded (pr/ok)))))
