@@ -778,37 +778,69 @@
 
 (declare function-needs-error?)
 
+;; When bound (by the two-pass go-lowering in pipeline.lg) to
+;;   {:ns "<namespace>" :fns {"<let-go-name>" {:arity n :go-name "<go-func>"}}}
+;; intra-namespace calls to single-arity, vm.Value-uniform lowered siblings are
+;; emitted as direct Go calls instead of rt.InvokeValue/LookupVar. Default nil →
+;; behavior is exactly as before (bytecode path and any single-pass caller).
+(def ^:dynamic *lowered-siblings* nil)
+
+(defn- direct-call-target
+  "If callee-ref is a :load-var naming a same-namespace lowered sibling in
+   *lowered-siblings* with matching arity, return its entry
+   {:go-name :arity :needs-error?}; else nil."
+  [f callee-ref argc]
+  (when (and *lowered-siblings* (= :load-var (ir/op callee-ref f)))
+    (let [sym   (symbol (ir/aux callee-ref f))
+          sns   (namespace sym)
+          entry (get (:fns *lowered-siblings*) (name sym))]
+      (when (and entry
+                 (or (nil? sns) (= sns (:ns *lowered-siblings*)))
+                 (= argc (:arity entry)))
+        entry))))
+
 (defn- call-assign-stmts [f closed-exprs nid]
-  (let [refs       (ir/refs nid f)
-        callee     (box-as-value f closed-exprs (first refs))
-        arg-exprs  (mapv (fn [rid] (box-as-value f closed-exprs rid)) (rest refs))
-        args-slice (gogen/composite-lit (gogen/type "[]vm.Value") arg-exprs)
-        invoke-expr (gogen/call
-                      (gogen/field-sel (gogen/ident "rt") "InvokeValue")
-                      [callee args-slice])
-        err-id     (gogen/ident "callErr")]
-    (when (and callee (every? identity arg-exprs))
-      (let [assign (if (live? f nid)
-                     (gogen/multi-assign "="
-                                         [(value-ident f nid) err-id]
-                                         [invoke-expr])
-                     (gogen/multi-assign "="
-                                         [(gogen/ident "_") err-id]
-                                         [invoke-expr]))
-            ;; Error-path return zero value must match the function's actual
-            ;; declared return type (not always nil — bool/int/etc. have
-            ;; different zeros).
-            zero-expr (case (function-return-spec f)
-                        "bool"    (gogen/ident "false")
-                        "int"     (gogen/int-lit 0)
-                        "float64" (gogen/float-lit 0.0)
-                        "string"  (gogen/string-lit "")
-                        (gogen/ident "nil"))
-            err-check (gogen/if-stmt nil
-                                     (gogen/binary "!=" err-id (gogen/ident "nil"))
-                                     [(gogen/return-stmt [zero-expr err-id])]
-                                     nil)]
-        [assign err-check]))))
+  (let [refs      (ir/refs nid f)
+        arg-exprs (mapv (fn [rid] (box-as-value f closed-exprs rid)) (rest refs))
+        entry     (direct-call-target f (first refs) (count (rest refs)))]
+    (if (and entry (not (:needs-error? entry)))
+      ;; Direct call to a sibling returning a single vm.Value (no error):
+      ;; emit `result = callee(args)` with NO callErr / err-check. (rt.InvokeValue
+      ;; always returns (vm.Value, error), so the 2-value form below applies only
+      ;; to it and to error-returning direct callees.)
+      (let [call-expr (gogen/call (gogen/ident (:go-name entry)) arg-exprs)]
+        (when (every? identity arg-exprs)
+          (if (live? f nid)
+            [(gogen/multi-assign "=" [(value-ident f nid)] [call-expr])]
+            [(gogen/multi-assign "=" [(gogen/ident "_")] [call-expr])])))
+      ;; Two-value form: rt.InvokeValue, or a direct call to an error-returning
+      ;; sibling. Both yield (vm.Value, error).
+      (let [call-expr (if entry
+                        (gogen/call (gogen/ident (:go-name entry)) arg-exprs)
+                        (let [callee (box-as-value f closed-exprs (first refs))]
+                          (when callee
+                            (gogen/call
+                              (gogen/field-sel (gogen/ident "rt") "InvokeValue")
+                              [callee (gogen/composite-lit (gogen/type "[]vm.Value") arg-exprs)]))))
+            err-id    (gogen/ident "callErr")]
+        (when (and call-expr (every? identity arg-exprs))
+          (let [assign (if (live? f nid)
+                         (gogen/multi-assign "=" [(value-ident f nid) err-id] [call-expr])
+                         (gogen/multi-assign "=" [(gogen/ident "_") err-id] [call-expr]))
+                ;; Error-path return zero value must match the function's actual
+                ;; declared return type (not always nil — bool/int/etc. have
+                ;; different zeros).
+                zero-expr (case (function-return-spec f)
+                            "bool"    (gogen/ident "false")
+                            "int"     (gogen/int-lit 0)
+                            "float64" (gogen/float-lit 0.0)
+                            "string"  (gogen/string-lit "")
+                            (gogen/ident "nil"))
+                err-check (gogen/if-stmt nil
+                                         (gogen/binary "!=" err-id (gogen/ident "nil"))
+                                         [(gogen/return-stmt [zero-expr err-id])]
+                                         nil)]
+            [assign err-check]))))))
 
 (defn- lower-inst-stmts [f closed-exprs nid]
   (let [op  (ir/op nid f)

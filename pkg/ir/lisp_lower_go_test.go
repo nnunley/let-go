@@ -749,3 +749,74 @@ func TestLowerGoCharLiteral(t *testing.T) {
 		t.Fatalf("expected char return to UNBOX to vm.Char\n%s", r2)
 	}
 }
+
+// With *lowered-siblings* naming a same-ns single-arity sibling, an intra-ns
+// call lowers to a direct Go call (no InvokeValue / LookupVar).
+func TestLowerGoIntraNsCallLiftsToDirect(t *testing.T) {
+	ensureLoader()
+	// Define a dummy callee function in the core namespace so the symbol resolves.
+	runLispExpr(t, `(defn callee [x] x)`)
+	fn := buildLispIR(t, `(defn caller [y] (callee y))`)
+	optimizeLispIR(t, fn)
+	passVarCounter++
+	varName := fmt.Sprintf("*lower-go-direct-%d*", passVarCounter)
+	rt.NS(rt.NameCoreNS).Def(varName, fn)
+
+	// Get the var reference and set it directly
+	lowerGoNS := rt.NS("ir.lower-go")
+	if lowerGoNS == nil {
+		t.Fatalf("ir.lower-go namespace not found")
+	}
+	loweredSiblingsVar := lowerGoNS.LookupLocal(vm.Symbol("*lowered-siblings*"))
+	if loweredSiblingsVar == nil {
+		t.Fatalf("*lowered-siblings* var not found")
+	}
+
+	// Create the siblings map at the Go level
+	// NOTE: buildLispIR compiles in rt.NameCoreNS which maps to "clojure.core"
+	siblingsMap := vm.NewPersistentMap([]vm.Value{
+		vm.Keyword("ns"), vm.String("clojure.core"),
+		vm.Keyword("fns"), vm.NewPersistentMap([]vm.Value{
+			vm.String("callee"), vm.NewPersistentMap([]vm.Value{
+				vm.Keyword("arity"), vm.Int(1),
+				vm.Keyword("go-name"), vm.String("callee"),
+			}),
+		}),
+	})
+	oldVal := loweredSiblingsVar.Deref()
+	loweredSiblingsVar.SetRoot(siblingsMap)
+	defer loweredSiblingsVar.SetRoot(oldVal)
+
+	v := runLispExpr(t, fmt.Sprintf(
+		`(gogen/render (:decl (ir.lower-go/lower %s :bridge)))`, varName))
+	s, ok := v.(vm.String)
+	if !ok {
+		t.Fatalf("expected rendered Go string, got %T", v)
+	}
+	got := string(s)
+	if !strings.Contains(got, "callee(") {
+		t.Fatalf("expected a direct callee(...) call:\n%s", got)
+	}
+	if strings.Contains(got, "InvokeValue") {
+		t.Fatalf("expected NO InvokeValue for the lifted intra-ns call:\n%s", got)
+	}
+}
+
+// With *lowered-siblings* nil (the default), behavior is unchanged: the call
+// stays on the rt.InvokeValue / LookupVar path. Guards the bytecode path.
+func TestLowerGoCallDefaultStaysInvokeValue(t *testing.T) {
+	ensureLoader()
+	// Define a dummy callee function so the symbol resolves.
+	runLispExpr(t, `(defn callee [x] x)`)
+	fn := buildLispIR(t, `(defn caller [y] (callee y))`)
+	optimizeLispIR(t, fn)
+	passVarCounter++
+	varName := fmt.Sprintf("*lower-go-noopt-%d*", passVarCounter)
+	rt.NS(rt.NameCoreNS).Def(varName, fn)
+	v := runLispExpr(t, fmt.Sprintf(
+		`(gogen/render (:decl (ir.lower-go/lower %s :bridge)))`, varName))
+	got := string(v.(vm.String))
+	if !strings.Contains(got, "InvokeValue") {
+		t.Fatalf("expected InvokeValue when *lowered-siblings* is nil:\n%s", got)
+	}
+}
