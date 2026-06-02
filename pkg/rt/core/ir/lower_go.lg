@@ -9,7 +9,8 @@
 ;;   - control flow lowers from block-parameter SSA to mutable locals plus labels/gotos
 
 (ns ir.lower-go
-  (:require ir.data))
+  (:require
+   [ir.data]))
 
 (def ^:private binary-op
   {:add  "+"
@@ -128,6 +129,27 @@
       ;; vm.Char-typed expr is usable as vm.Value directly (no wrapper needed).
       (= spec "vm.Char")  expr
       :else               expr)))
+
+(defn- unbox-from-value
+  "Inverse of box-as-value: extract the native Go payload from a vm.Value
+   expression `raw` when the target slot's go-type-spec is a native primitive.
+   Used at copy sites (branch-edge param<-arg transfers) where typeinfer's edge
+   refinement narrowed the value to exactly one primitive while the source inst
+   stayed vm.Value — e.g. a `string|nil` union is `:string` on the truthy edge
+   (refine-truthy drops :nil), so a `vm.Value` arg must be unwrapped into the
+   `string` param slot. Sound precisely because the refinement guarantees the
+   runtime value IS that primitive on this edge. Mirrors box-as-value's type
+   set (the supported unboxed lowering targets)."
+  [spec raw]
+  (cond
+    (= spec "bool")     (gogen/call (vm-sel "IsTruthy") [raw])
+    (= spec "int")      (gogen/call (gogen/ident "int")     [(gogen/type-assert raw (gogen/type "vm.Int"))])
+    (= spec "float64")  (gogen/call (gogen/ident "float64") [(gogen/type-assert raw (gogen/type "vm.Float"))])
+    (= spec "string")   (gogen/call (gogen/ident "string")  [(gogen/type-assert raw (gogen/type "vm.String"))])
+    ;; vm.Char already implements vm.Value, so the slot type is vm.Char — a
+    ;; direct assertion extracts it without a conversion.
+    (= spec "vm.Char")  (gogen/type-assert raw (gogen/type "vm.Char"))
+    :else               raw))
 
 (defn- boxed-value-expr [v]
   (cond
@@ -316,21 +338,21 @@
           refs (ir/refs nid f)]
       (cond
         (and (= op :const) (any-fn-template? aux))
-          {:template aux :captures []}
+        {:template aux :captures []}
 
         (= op :make-closure)
-          (when (= 1 (count refs))
-            (closure-info* f (nth refs 0) visited))
+        (when (= 1 (count refs))
+          (closure-info* f (nth refs 0) visited))
 
         (= op :push-closed)
-          (when (= 2 (count refs))
-            (let [base (closure-info* f (nth refs 0) visited)]
-              (when base
-                (assoc base :captures (conj (:captures base) (nth refs 1))))))
+        (when (= 2 (count refs))
+          (let [base (closure-info* f (nth refs 0) visited)]
+            (when base
+              (assoc base :captures (conj (:captures base) (nth refs 1))))))
 
         (= op :block-arg)
-          (some (fn [src] (closure-info* f src (conj visited nid)))
-                (block-arg-sources f nid))
+        (some (fn [src] (closure-info* f src (conj visited nid)))
+              (block-arg-sources f nid))
 
         :else nil))))
 
@@ -365,25 +387,25 @@
 (defn- lower-template-closure-expr [template capture-exprs]
   (cond
     (fn-template? template)
-      (let [inner* (lower-fn-lit (:fn template) capture-exprs)]
-        (when inner*
-          (gogen/call
-            (gogen/field-sel (gogen/ident "rt") "BoxNativeFn")
-            [inner*])))
+    (let [inner* (lower-fn-lit (:fn template) capture-exprs)]
+      (when inner*
+        (gogen/call
+          (gogen/field-sel (gogen/ident "rt") "BoxNativeFn")
+          [inner*])))
 
     (multi-fn-template? template)
-      (let [inners (mapv (fn [entry]
-                           (lower-fn-lit (:fn entry) capture-exprs))
-                         (:fns template))]
-        (when (every? identity inners)
-          (let [boxed (mapv (fn [inner*]
-                              (gogen/call
-                                (gogen/field-sel (gogen/ident "rt") "BoxNativeFn")
-                                [inner*]))
-                            inners)]
-            (gogen/call
-              (gogen/field-sel (gogen/ident "rt") "MakeNativeMultiArity")
-              [(gogen/composite-lit (gogen/type "[]vm.Value") boxed)]))))
+    (let [inners (mapv (fn [entry]
+                         (lower-fn-lit (:fn entry) capture-exprs))
+                       (:fns template))]
+      (when (every? identity inners)
+        (let [boxed (mapv (fn [inner*]
+                            (gogen/call
+                              (gogen/field-sel (gogen/ident "rt") "BoxNativeFn")
+                              [inner*]))
+                          inners)]
+          (gogen/call
+            (gogen/field-sel (gogen/ident "rt") "MakeNativeMultiArity")
+            [(gogen/composite-lit (gogen/type "[]vm.Value") boxed)]))))
 
     :else nil))
 
@@ -422,47 +444,47 @@
             (const-expr (first cp) t)))
         (cond
           (= op :load-closed)
-            (when (and closed-exprs
-                       (>= aux 0)
-                       (< aux (count closed-exprs)))
-              (nth closed-exprs aux))
+          (when (and closed-exprs
+                     (>= aux 0)
+                     (< aux (count closed-exprs)))
+            (nth closed-exprs aux))
 
           (= op :load-arg)
-            (if (and (ir/fn-variadic? f) (= aux (dec (ir/fn-arity f))))
-              (let [rest-var (if (function-needs-tail-call? f) "args0" "args")]
-                (gogen/call
-                  (gogen/field-sel (gogen/ident "rt") "BoxRestArgs")
-                  [(gogen/ident rest-var)]))
-              (let [prefix (if (function-needs-tail-call? f) "a" "arg")]
-                (gogen/ident (str prefix aux))))
+          (if (and (ir/fn-variadic? f) (= aux (dec (ir/fn-arity f))))
+            (let [rest-var (if (function-needs-tail-call? f) "args0" "args")]
+              (gogen/call
+                (gogen/field-sel (gogen/ident "rt") "BoxRestArgs")
+                [(gogen/ident rest-var)]))
+            (let [prefix (if (function-needs-tail-call? f) "a" "arg")]
+              (gogen/ident (str prefix aux))))
 
           (= op :load-var)
-            ;; rt.LookupVar returns *vm.Var; .Deref() returns the value-typed
-            ;; root (or thread-bound) form. We need vm.Value here because the
-            ;; result may be compared (`==`) or assigned to a vm.Value local;
-            ;; *vm.Var is a concrete type and won't compare against other
-            ;; vm.Value concrete types like vm.Keyword. For :call sites
-            ;; rt.InvokeValue handles either form, so deref is safe there too.
-            (let [sym (symbol aux)
-                  sns (namespace sym)
-                  sn  (name sym)]
-              (gogen/call
-                (gogen/field-sel
-                  (gogen/call
-                    (gogen/field-sel (gogen/ident "rt") "LookupVar")
-                    [(gogen/string-lit (if (nil? sns) "core" sns))
-                     (gogen/string-lit sn)])
-                  "Deref")
-                []))
+          ;; rt.LookupVar returns *vm.Var; .Deref() returns the value-typed
+          ;; root (or thread-bound) form. We need vm.Value here because the
+          ;; result may be compared (`==`) or assigned to a vm.Value local;
+          ;; *vm.Var is a concrete type and won't compare against other
+          ;; vm.Value concrete types like vm.Keyword. For :call sites
+          ;; rt.InvokeValue handles either form, so deref is safe there too.
+          (let [sym (symbol aux)
+                sns (namespace sym)
+                sn  (name sym)]
+            (gogen/call
+              (gogen/field-sel
+                (gogen/call
+                  (gogen/field-sel (gogen/ident "rt") "LookupVar")
+                  [(gogen/string-lit (if (nil? sns) "core" sns))
+                   (gogen/string-lit sn)])
+                "Deref")
+              []))
 
           (= op :const)
-            (if (= "vm.Value" (go-type-spec t))
-              (boxed-value-expr aux)
-              (const-expr aux t))
+          (if (= "vm.Value" (go-type-spec t))
+            (boxed-value-expr aux)
+            (const-expr aux t))
 
           (local-carrying-op? op)
-            (when (and (live? f nid) (infer-go-type t))
-              (value-ident f nid))
+          (when (and (live? f nid) (infer-go-type t))
+            (value-ident f nid))
 
           :else nil))))
 
@@ -473,78 +495,78 @@
         refs (ir/refs nid f)]
     (cond
       (contains? binary-op op)
-        (let [op-str       (get binary-op op)
-              s0           (go-type-spec (ir/type-of (nth refs 0) f))
-              s1           (go-type-spec (ir/type-of (nth refs 1) f))
-              order-op?    (#{"<" "<=" ">" ">="} op-str)
-              arith-op?    (#{"+" "-" "*" "/"} op-str)
-              any-vm?      (or (= "vm.Value" s0) (= "vm.Value" s1))
-              ;; rt.LtValue/AddValue/... polymorphic helpers — used when
-              ;; any operand is vm.Value, so we don't bail the whole defn.
-              ;; Each helper mirrors the bytecode VM's OP_<X>: vm.Int fast
-              ;; path then vm.Num<X> fallback for ordering; always-delegate
-              ;; to vm.Num<X> for arithmetic (keeps overflow / BigInt
-              ;; promotion semantics in one place).
-              vm-helper    (when any-vm?
-                             (cond
-                               (= op-str "<")  "LtValue"
-                               (= op-str "<=") "LeValue"
-                               (= op-str ">")  "GtValue"
-                               (= op-str ">=") "GeValue"
-                               (= op-str "+")  "AddValue"
-                               (= op-str "-")  "SubValue"
-                               (= op-str "*")  "MulValue"
-                               (= op-str "/")  "QuotValue"
-                               :else           nil))
-              ;; Mixed operand types (only meaningful when NOT routing
-              ;; through a helper, i.e. for `==`/`!=` with one vm.Value
-              ;; side): box the other so Go's `==` sees compatible types.
-              mixed?       (and (not vm-helper)
-                                (not= s0 s1)
-                                (or (= "vm.Value" s0) (= "vm.Value" s1)))
-              lhs-expr     (cond
-                             vm-helper (box-as-value f closed-exprs (nth refs 0))
-                             mixed?    (box-as-value f closed-exprs (nth refs 0))
-                             :else     (value-expr f closed-exprs (nth refs 0)))
-              rhs-expr     (cond
-                             vm-helper (box-as-value f closed-exprs (nth refs 1))
-                             mixed?    (box-as-value f closed-exprs (nth refs 1))
-                             :else     (value-expr f closed-exprs (nth refs 1)))
-              result-spec  (go-type-spec (ir/type-of nid f))]
-          (cond
-            ;; Polymorphic helper path: emit rt.<Op>Value(lhs, rhs).
-            ;; Helpers return: bool for ordering, vm.Value for arithmetic.
-            (and vm-helper lhs-expr rhs-expr)
-              (let [call (gogen/call
-                           (gogen/field-sel (gogen/ident "rt") vm-helper)
-                           [lhs-expr rhs-expr])]
-                (if (and order-op? (= "vm.Value" result-spec))
-                  ;; Inst declared type didn't narrow to bool — wrap.
-                  (gogen/call (gogen/field-sel (gogen/ident "vm") "Boolean") [call])
-                  call))
+      (let [op-str       (get binary-op op)
+            s0           (go-type-spec (ir/type-of (nth refs 0) f))
+            s1           (go-type-spec (ir/type-of (nth refs 1) f))
+            order-op?    (#{"<" "<=" ">" ">="} op-str)
+            arith-op?    (#{"+" "-" "*" "/"} op-str)
+            any-vm?      (or (= "vm.Value" s0) (= "vm.Value" s1))
+            ;; rt.LtValue/AddValue/... polymorphic helpers — used when
+            ;; any operand is vm.Value, so we don't bail the whole defn.
+            ;; Each helper mirrors the bytecode VM's OP_<X>: vm.Int fast
+            ;; path then vm.Num<X> fallback for ordering; always-delegate
+            ;; to vm.Num<X> for arithmetic (keeps overflow / BigInt
+            ;; promotion semantics in one place).
+            vm-helper    (when any-vm?
+                           (cond
+                             (= op-str "<")  "LtValue"
+                             (= op-str "<=") "LeValue"
+                             (= op-str ">")  "GtValue"
+                             (= op-str ">=") "GeValue"
+                             (= op-str "+")  "AddValue"
+                             (= op-str "-")  "SubValue"
+                             (= op-str "*")  "MulValue"
+                             (= op-str "/")  "QuotValue"
+                             :else           nil))
+            ;; Mixed operand types (only meaningful when NOT routing
+            ;; through a helper, i.e. for `==`/`!=` with one vm.Value
+            ;; side): box the other so Go's `==` sees compatible types.
+            mixed?       (and (not vm-helper)
+                              (not= s0 s1)
+                              (or (= "vm.Value" s0) (= "vm.Value" s1)))
+            lhs-expr     (cond
+                           vm-helper (box-as-value f closed-exprs (nth refs 0))
+                           mixed?    (box-as-value f closed-exprs (nth refs 0))
+                           :else     (value-expr f closed-exprs (nth refs 0)))
+            rhs-expr     (cond
+                           vm-helper (box-as-value f closed-exprs (nth refs 1))
+                           mixed?    (box-as-value f closed-exprs (nth refs 1))
+                           :else     (value-expr f closed-exprs (nth refs 1)))
+            result-spec  (go-type-spec (ir/type-of nid f))]
+        (cond
+          ;; Polymorphic helper path: emit rt.<Op>Value(lhs, rhs).
+          ;; Helpers return: bool for ordering, vm.Value for arithmetic.
+          (and vm-helper lhs-expr rhs-expr)
+          (let [call (gogen/call
+                       (gogen/field-sel (gogen/ident "rt") vm-helper)
+                       [lhs-expr rhs-expr])]
+            (if (and order-op? (= "vm.Value" result-spec))
+              ;; Inst declared type didn't narrow to bool — wrap.
+              (gogen/call (gogen/field-sel (gogen/ident "vm") "Boolean") [call])
+              call))
 
-            ;; Native Go binary path: both operands typed compatibly.
-            (and lhs-expr rhs-expr)
-              (let [raw-binary (gogen/binary op-str lhs-expr rhs-expr)]
-                (if (and (comparison-op? op-str) (= "vm.Value" result-spec))
-                  (gogen/call (gogen/field-sel (gogen/ident "vm") "Boolean") [raw-binary])
-                  raw-binary))
+          ;; Native Go binary path: both operands typed compatibly.
+          (and lhs-expr rhs-expr)
+          (let [raw-binary (gogen/binary op-str lhs-expr rhs-expr)]
+            (if (and (comparison-op? op-str) (= "vm.Value" result-spec))
+              (gogen/call (gogen/field-sel (gogen/ident "vm") "Boolean") [raw-binary])
+              raw-binary))
 
-            :else nil))
+          :else nil))
 
       (or (= op :inc) (= op :dec))
-        (let [lhs-id   (nth refs 0)
-              lhs-spec (go-type-spec (ir/type-of lhs-id f))]
-          (if (= "vm.Value" lhs-spec)
-            (let [lhs (box-as-value f closed-exprs lhs-id)]
-              (when lhs
-                (gogen/call
-                  (gogen/field-sel (gogen/ident "rt")
-                                    (if (= op :inc) "AddValue" "SubValue"))
-                  [lhs (vm-call "Int" [(gogen/int-lit 1)])])))
-            (let [lhs (value-expr f closed-exprs lhs-id)]
-              (when lhs
-                (gogen/binary (if (= op :inc) "+" "-") lhs (gogen/int-lit 1))))))
+      (let [lhs-id   (nth refs 0)
+            lhs-spec (go-type-spec (ir/type-of lhs-id f))]
+        (if (= "vm.Value" lhs-spec)
+          (let [lhs (box-as-value f closed-exprs lhs-id)]
+            (when lhs
+              (gogen/call
+                (gogen/field-sel (gogen/ident "rt")
+                  (if (= op :inc) "AddValue" "SubValue"))
+                [lhs (vm-call "Int" [(gogen/int-lit 1)])])))
+          (let [lhs (value-expr f closed-exprs lhs-id)]
+            (when lhs
+              (gogen/binary (if (= op :inc) "+" "-") lhs (gogen/int-lit 1))))))
 
       :else nil)))
 
@@ -669,16 +691,18 @@
                   rhs (cond
                         ;; LHS is vm.Value: box raw RHS if needed.
                         (= "vm.Value" lhs-spec)
-                          (box-as-value f closed-exprs arg-nid)
-                        ;; LHS is bool but RHS is vm.Value: unwrap via IsTruthy.
-                        (and (= "bool" lhs-spec) (= "vm.Value" arg-spec))
-                          (let [raw (value-expr f closed-exprs arg-nid)]
-                            (when raw
-                              (gogen/call
-                                (gogen/field-sel (gogen/ident "vm") "IsTruthy")
-                                [raw])))
+                        (box-as-value f closed-exprs arg-nid)
+                        ;; LHS is a native primitive but RHS is vm.Value: unbox.
+                        ;; Edge refinement (refine-truthy/falsey) can narrow a
+                        ;; param to one primitive while its incoming arg stays
+                        ;; vm.Value, so the copy needs a type-assert/convert.
+                        ;; Generalizes the former bool-only IsTruthy special case
+                        ;; to every box-as-value target (int/float/string/char).
+                        (and lhs-spec (not= lhs-spec arg-spec) (= "vm.Value" arg-spec))
+                        (let [raw (value-expr f closed-exprs arg-nid)]
+                          (when raw (unbox-from-value lhs-spec raw)))
                         :else
-                          (value-expr f closed-exprs arg-nid))]
+                        (value-expr f closed-exprs arg-nid))]
               (if (nil? rhs)
                 nil
                 (if (same-ident? lhs rhs)
@@ -698,57 +722,57 @@
         needs-error? (function-needs-error? f)]
     (cond
       (= op :return)
-        (when (= 1 (count refs))
-          ;; Coerce the return value to the function's declared return type.
-          ;; If the function returns vm.Value, box raw values. Otherwise emit
-          ;; raw and let result-node have chosen the matching type.
-          (let [ret-spec (function-return-spec f)
-                expr (if (= "vm.Value" ret-spec)
-                       (box-as-value f closed-exprs (nth refs 0))
-                       (value-expr f closed-exprs (nth refs 0)))]
-            (when expr
-              [(gogen/return-stmt
-                 (if needs-error?
-                   [expr (gogen/ident "nil")]
-                   [expr]))])))
+      (when (= 1 (count refs))
+        ;; Coerce the return value to the function's declared return type.
+        ;; If the function returns vm.Value, box raw values. Otherwise emit
+        ;; raw and let result-node have chosen the matching type.
+        (let [ret-spec (function-return-spec f)
+              expr (if (= "vm.Value" ret-spec)
+                     (box-as-value f closed-exprs (nth refs 0))
+                     (value-expr f closed-exprs (nth refs 0)))]
+          (when expr
+            [(gogen/return-stmt
+               (if needs-error?
+                 [expr (gogen/ident "nil")]
+                 [expr]))])))
 
       (= op :branch)
-        (transfer-stmts f closed-exprs aux)
+      (transfer-stmts f closed-exprs aux)
 
       (= op :branch-if)
-        (when (= 1 (count refs))
-          (let [cond-nid    (nth refs 0)
-                cond-spec   (go-type-spec (ir/type-of cond-nid f))
-                raw-cond    (value-expr f closed-exprs cond-nid)
-                cond-expr   (if (= "bool" cond-spec)
-                              raw-cond
-                              (when raw-cond
-                                (gogen/call
-                                  (gogen/field-sel (gogen/ident "vm") "IsTruthy")
-                                  [raw-cond])))
-                true-stmts  (transfer-stmts f closed-exprs (ir/cond-target-true aux))
-                false-stmts (transfer-stmts f closed-exprs (ir/cond-target-false aux))]
-            (when (and cond-expr true-stmts false-stmts)
-              [(gogen/if-stmt nil cond-expr true-stmts false-stmts)])))
+      (when (= 1 (count refs))
+        (let [cond-nid    (nth refs 0)
+              cond-spec   (go-type-spec (ir/type-of cond-nid f))
+              raw-cond    (value-expr f closed-exprs cond-nid)
+              cond-expr   (if (= "bool" cond-spec)
+                            raw-cond
+                            (when raw-cond
+                              (gogen/call
+                                (gogen/field-sel (gogen/ident "vm") "IsTruthy")
+                                [raw-cond])))
+              true-stmts  (transfer-stmts f closed-exprs (ir/cond-target-true aux))
+              false-stmts (transfer-stmts f closed-exprs (ir/cond-target-false aux))]
+          (when (and cond-expr true-stmts false-stmts)
+            [(gogen/if-stmt nil cond-expr true-stmts false-stmts)])))
 
       (= op :tail-call)
-        (let [tail-args refs
-              fixed-arity (if (ir/fn-variadic? f) (dec (ir/fn-arity f)) (ir/fn-arity f))
-              assigns (loop [i 0 remaining tail-args out []]
-                        (if (empty? remaining)
-                          out
-                          (let [val-expr (box-as-value f closed-exprs (first remaining))
-                                lhs (if (and (ir/fn-variadic? f) (= i fixed-arity))
-                                      (gogen/ident "args0")
-                                      (gogen/ident (str "a" i)))]
-                            (if (nil? val-expr)
-                              nil
-                              (recur (inc i) (rest remaining)
-                                     (if (same-ident? lhs val-expr)
-                                       out
-                                       (conj out (gogen/assign "=" lhs val-expr))))))))]
-          (when assigns
-            (conj assigns (gogen/goto-stmt "func_entry"))))
+      (let [tail-args refs
+            fixed-arity (if (ir/fn-variadic? f) (dec (ir/fn-arity f)) (ir/fn-arity f))
+            assigns (loop [i 0 remaining tail-args out []]
+                      (if (empty? remaining)
+                        out
+                        (let [val-expr (box-as-value f closed-exprs (first remaining))
+                              lhs (if (and (ir/fn-variadic? f) (= i fixed-arity))
+                                    (gogen/ident "args0")
+                                    (gogen/ident (str "a" i)))]
+                          (if (nil? val-expr)
+                            nil
+                            (recur (inc i) (rest remaining)
+                                   (if (same-ident? lhs val-expr)
+                                     out
+                                     (conj out (gogen/assign "=" lhs val-expr))))))))]
+        (when assigns
+          (conj assigns (gogen/goto-stmt "func_entry"))))
 
       :else nil)))
 
@@ -794,25 +818,25 @@
       (= op :load-var)  []
       (= op :load-closed) []
       (and (= op :const) (any-fn-template? aux))
-        []
+      []
       (= op :const)     []
       (= op :make-closure) []
       (= op :push-closed)  []
       (= op :block-arg) []
       (contains? binary-op op)
-        (if (live? f nid)
-          (let [rhs (inst-rhs f closed-exprs nid)]
-            (when rhs
-              [(gogen/assign "=" (value-ident f nid) rhs)]))
-          [])
+      (if (live? f nid)
+        (let [rhs (inst-rhs f closed-exprs nid)]
+          (when rhs
+            [(gogen/assign "=" (value-ident f nid) rhs)]))
+        [])
       (or (= op :inc) (= op :dec))
-        (if (live? f nid)
-          (let [rhs (inst-rhs f closed-exprs nid)]
-            (when rhs
-              [(gogen/assign "=" (value-ident f nid) rhs)]))
-          [])
+      (if (live? f nid)
+        (let [rhs (inst-rhs f closed-exprs nid)]
+          (when rhs
+            [(gogen/assign "=" (value-ident f nid) rhs)]))
+        [])
       (= op :call)
-        (call-assign-stmts f closed-exprs nid)
+      (call-assign-stmts f closed-exprs nid)
       :else nil)))
 
 (defn- lower-block-stmts [f closed-exprs bid]
@@ -877,7 +901,7 @@
                                  (and (or (= op :inc) (= op :dec))
                                       (= "vm.Value" (go-type-spec (ir/type-of (nth refs 0) f)))))))
                          (ir/block-insts (first blocks) f))
-                     true
+                   true
                    :else (recur (rest blocks))))]
     (or (ir/fn-variadic? f)
         local?
@@ -899,11 +923,11 @@
     (cond
       (empty? blocks) false
       :else
-        (let [term (ir/block-term (first blocks) f)]
-          (cond
-            (nil? term) (recur (rest blocks))
-            (= :tail-call (ir/op term f)) true
-            :else (recur (rest blocks)))))))
+      (let [term (ir/block-term (first blocks) f)]
+        (cond
+          (nil? term) (recur (rest blocks))
+          (= :tail-call (ir/op term f)) true
+          :else (recur (rest blocks)))))))
 
 (defn- arg-local-decls [f]
   "For tail-call fns, declare mutable locals (a0, a1, ...) that shadow the
@@ -1170,8 +1194,8 @@
      (when decls
        (loop [blocks (ir/blocks f)
               out    (if needs-tail-call?
-                      (vec (concat decls arg-inits entry-label))
-                      decls)]
+                       (vec (concat decls arg-inits entry-label))
+                       decls)]
          (if (empty? blocks)
            out
            (let [bid (first blocks)]
@@ -1215,14 +1239,14 @@
           ;; Block has no terminator — unreachable/dead block left over from
           ;; build. Skip; only terminated :return blocks contribute return ids.
           (nil? term)
-            (recur (rest blocks) out)
+          (recur (rest blocks) out)
           (= (ir/op term f) :return)
-            (let [refs (ir/refs term f)]
-              (if (= 1 (count refs))
-                (recur (rest blocks) (conj out (nth refs 0)))
-                nil))
+          (let [refs (ir/refs term f)]
+            (if (= 1 (count refs))
+              (recur (rest blocks) (conj out (nth refs 0)))
+              nil))
           :else
-            (recur (rest blocks) out))))))
+          (recur (rest blocks) out))))))
 
 (defn- function-return-spec [f]
   ;; What Go type does this function return? Mirrors result-node's logic.
@@ -1306,22 +1330,22 @@
       (nil? results) (unsupported mode "unsupported result type")
       (nil? body)    (unsupported mode "unsupported function body shape")
       :else
-        ;; :fn-name/:go-name/:arity/:needs-error?/:override-eligible? feed
-        ;; the gogen_ir override-registration emitter (pipeline.lg's
-        ;; register-init-decl). :override-eligible? is true only for
-        ;; uniformly-vm.Value signatures the Part-1 wrapper can adapt
-        ;; without coercion; typed (int/bool/…) and variadic fns are
-        ;; excluded and stay on bytecode. (Multi-arity defns never reach
-        ;; this path: lgbgen's runGoTarget pre-filters to isSingleArityDefn
-        ;; before calling lower-ns-to-go.)
-        {:status :lowered
-         :imports imports
-         :fn-name (str (ir/fn-name f))
-         :go-name (go-name (ir/fn-name f))
-         :arity (ir/fn-arity f)
-         :needs-error? needs-error?
-         :override-eligible? (override-uniform-value? f)
-         :decl   (gogen/func-decl (go-name (ir/fn-name f)) params results body)})))
+      ;; :fn-name/:go-name/:arity/:needs-error?/:override-eligible? feed
+      ;; the gogen_ir override-registration emitter (pipeline.lg's
+      ;; register-init-decl). :override-eligible? is true only for
+      ;; uniformly-vm.Value signatures the Part-1 wrapper can adapt
+      ;; without coercion; typed (int/bool/…) and variadic fns are
+      ;; excluded and stay on bytecode. (Multi-arity defns never reach
+      ;; this path: lgbgen's runGoTarget pre-filters to isSingleArityDefn
+      ;; before calling lower-ns-to-go.)
+      {:status :lowered
+       :imports imports
+       :fn-name (str (ir/fn-name f))
+       :go-name (go-name (ir/fn-name f))
+       :arity (ir/fn-arity f)
+       :needs-error? needs-error?
+       :override-eligible? (override-uniform-value? f)
+       :decl   (gogen/func-decl (go-name (ir/fn-name f)) params results body)})))
 
 (defn- import-spec-node [entry]
   (let [path  (:path entry)
