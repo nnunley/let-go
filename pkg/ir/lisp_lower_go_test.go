@@ -8,6 +8,7 @@ package ir_test
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -237,6 +238,29 @@ func TestLowerGoStrictIdentityClosureLowersToWrappedGoClosure(t *testing.T) {
 	}
 	if !strings.Contains(rendered, "return arg0") {
 		t.Fatalf("expected identity closure body to return the inner argument\n--- go ---\n%s", rendered)
+	}
+}
+
+// TestLowerGoClosureCapturingLoopCarriedBlockParam: a closure defined inside a
+// loop, capturing the loop-carried binding, must lower to Go. The optimizer
+// threads the closure's fn-template AND its captured loop var through the loop
+// header as block-parameters (:block-arg); closure-info must follow that
+// block-param lineage back through branch-target-args to the originating
+// :const template. Before the fix it hit :else nil and the whole body fell back
+// as "unsupported function body shape".
+func TestLowerGoClosureCapturingLoopCarriedBlockParam(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn lc [xs]
+		(loop [seen #{}]
+			(let [more (filter (fn* [x] (not (seen x))) xs)]
+				(if (empty? more) seen (recur (into seen more))))))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		reason := result.ValueAt(vm.Keyword("reason"))
+		t.Fatalf("expected closure-over-loop-block-param to lower; got status=%v reason=%v", got, reason)
 	}
 }
 
@@ -521,5 +545,207 @@ func TestLowerGoStrictNestedDestructureDefn(t *testing.T) {
 	rendered := bindAndRenderGoDecl(t, result)
 	if !strings.Contains(rendered, "rt.AddValue") && !strings.Contains(rendered, "+") {
 		t.Fatalf("expected arithmetic in lowered body\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestLowerGoNoSelfAssignment(t *testing.T) {
+	ensureLoader()
+	fn := buildLispIR(t, `(defn test-loop [x y]
+	                       (loop [a x b y]
+	                         (if (not= a 0)
+	                           (recur a b)
+	                           b)))`)
+	seedArgTypes(t, fn, "[:int :int]")
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":strict")
+	rendered := bindAndRenderGoDecl(t, result)
+	for _, line := range strings.Split(rendered, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.Contains(trimmed, "=") && !strings.HasPrefix(trimmed, "//") {
+			parts := strings.Split(trimmed, "=")
+			if len(parts) == 2 {
+				lhs := strings.TrimSpace(parts[0])
+				rhs := strings.TrimSpace(parts[1])
+				if lhs != "" && lhs == rhs {
+					t.Fatalf("self-assignment emitted: %q\n--- go ---\n%s", trimmed, rendered)
+				}
+			}
+		}
+	}
+}
+
+func TestBlockParamsCarrySourceName(t *testing.T) {
+	ensureLoader()
+	fn := buildLispIR(t, `(defn sum [n] (loop [i 0 acc 0] (if (= i n) acc (recur (+ i 1) (+ acc i)))))`)
+	seedArgTypes(t, fn, "[:int]")
+	passVarCounter++
+	v := fmt.Sprintf("*bp-%d*", passVarCounter)
+	rt.NS(rt.NameCoreNS).Def(v, fn)
+	out := runLispExpr(t, fmt.Sprintf(`
+	  (let [f %s
+	        params (mapcat (fn [b] (ir/block-params b f)) (ir/blocks f))
+	        named  (filter (fn [p]
+	                         (some (fn [si] (ir/source-info-symbol si))
+	                               (ir/source-infos p f)))
+	                       params)]
+	    (pr-str [(count params) (count named)]))`, v))
+	s := string(out.(vm.String))
+	if strings.HasSuffix(s, " 0]") {
+		t.Fatalf("no block params carry a source name: %s", s)
+	}
+}
+
+func TestLowerGoCoalescesLineageByName(t *testing.T) {
+	ensureLoader()
+	fn := buildLispIR(t, `(defn sum [n] (loop [i 0 acc 0] (if (= i n) acc (recur (+ i 1) (+ acc i)))))`)
+	seedArgTypes(t, fn, "[:int]")
+	optimizeLispIR(t, fn)
+	rendered := bindAndRenderGoDecl(t, lowerGo(t, fn, ":strict"))
+	if regexp.MustCompile(`acc_\d+`).MatchString(rendered) {
+		t.Fatalf("expected coalesced `acc`, found versioned acc_NN:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "acc") {
+		t.Fatalf("expected `acc`:\n%s", rendered)
+	}
+}
+
+func TestLowerGoReassignsInPlaceNoDiscardNet(t *testing.T) {
+	ensureLoader()
+	fn := buildLispIR(t, `(defn sum [n] (loop [i 0 acc 0] (if (= i n) acc (recur (+ i 1) (+ acc i)))))`)
+	seedArgTypes(t, fn, "[:int]")
+	optimizeLispIR(t, fn)
+	rendered := bindAndRenderGoDecl(t, lowerGo(t, fn, ":strict"))
+	// The `_, _, ... = v3, v6` discard net masks declared-but-unread locals
+	// instead of not declaring them. Read-set gating must make it unnecessary.
+	if regexp.MustCompile(`(?m)^\s*_(, _)+ = `).MatchString(rendered) {
+		t.Fatalf("discard net still present\n--- go ---\n%s", rendered)
+	}
+}
+
+// writeOnlyLocals returns declared locals (`var NAME T`) that are never read in
+// the rendered Go: every occurrence is either the declaration or an assignment
+// LHS. Such a local is a dead store — Go would reject it as declared-and-not-used
+// (or ineffassign would flag it). callErr is excused (error plumbing).
+func writeOnlyLocals(rendered string) []string {
+	declRe := regexp.MustCompile(`^\s*var (\w+) `)
+	declared := []string{}
+	reads := map[string]int{}
+	lines := strings.Split(rendered, "\n")
+	for _, ln := range lines {
+		if m := declRe.FindStringSubmatch(ln); m != nil {
+			if m[1] != "callErr" {
+				declared = append(declared, m[1])
+			}
+			continue
+		}
+		// Assignment? Split on the first " = " (not ":=", not "==").
+		rhs := ln
+		if idx := strings.Index(ln, " = "); idx >= 0 && !strings.Contains(ln[:idx], ":") {
+			rhs = ln[idx+3:]
+		}
+		for _, name := range declared {
+			if regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`).MatchString(rhs) {
+				reads[name]++
+			}
+		}
+	}
+	var dead []string
+	for _, name := range declared {
+		if reads[name] == 0 {
+			dead = append(dead, name)
+		}
+	}
+	return dead
+}
+
+func TestLowerGoDeadCallResultRoutedToBlank(t *testing.T) {
+	ensureLoader()
+	// `(vec (reverse path))` is built with the `(reverse path)` subexpression
+	// duplicated; one copy is dead. The dead side-effecting call must be
+	// discarded via `_, callErr =`, never stored in a declared-but-unread local.
+	fn := buildLispIR(t, `(defn f [path] (vec (reverse path)))`)
+	seedArgTypes(t, fn, "[:string]")
+	optimizeLispIR(t, fn)
+	rendered := bindAndRenderGoDecl(t, lowerGo(t, fn, ":strict"))
+	if dead := writeOnlyLocals(rendered); len(dead) > 0 {
+		t.Fatalf("declared-but-unread locals (dead stores): %v\n--- go ---\n%s", dead, rendered)
+	}
+}
+
+func TestLowerGoCapturedNameNotShadowedByBlockParam(t *testing.T) {
+	ensureLoader()
+	// `bad` is captured by the closure AND used inside an if-branch, so it is
+	// threaded through a block-param. If that param coalesces to "bad", it
+	// shadows the lexical capture and (the init copy being a self-assign) is
+	// never assigned — the closure then reads a zero value, and the outer `bad`
+	// becomes unused. Captured names must stay versioned so the copy is real.
+	fn := buildLispIR(t, `(defn h [xs] (let [bad (count xs)] (map (fn* [s] (if s (contains? bad s) nil)) xs)))`)
+	optimizeLispIR(t, fn)
+	rendered := bindAndRenderGoDecl(t, lowerGo(t, fn, ":strict"))
+	if n := strings.Count(rendered, "var bad vm.Value"); n > 1 {
+		t.Fatalf("captured `bad` shadowed by an inner block-param local (%d decls)\n--- go ---\n%s", n, rendered)
+	}
+}
+
+func TestLowerGoInlinesConstantBlockParams(t *testing.T) {
+	ensureLoader()
+	// `:k` is carried through a staircase of merge block-params, each holding
+	// only the constant. A constant block-param is freely re-materializable
+	// (consts are block-free), so it must lower to the literal inline — no local,
+	// no `vN = vm.Keyword("k")` forwarding copy. The function just returns :k.
+	fn := buildLispIR(t, `(defn f [a b] (if a :k (if b :k :k)))`)
+	seedArgTypes(t, fn, "[:any :any]")
+	optimizeLispIR(t, fn)
+	rendered := bindAndRenderGoDecl(t, lowerGo(t, fn, ":strict"))
+	if m := regexp.MustCompile(`(?m)^\s*v\d+ = vm\.Keyword\("k"\)$`).FindString(rendered); m != "" {
+		t.Fatalf("constant block-param not inlined: %q\n--- go ---\n%s", strings.TrimSpace(m), rendered)
+	}
+	if !strings.Contains(rendered, `return vm.Keyword("k")`) {
+		t.Fatalf("expected `return vm.Keyword(\"k\")` (inlined const param)\n--- go ---\n%s", rendered)
+	}
+}
+
+func TestLowerGoFallsBackOnUnloweredSideEffectingCall(t *testing.T) {
+	ensureLoader()
+	// push-binding! takes a `(var *ns*)` arg that gogen cannot lower, so
+	// call-assign-stmts returns nil. A side-effecting call must NOT be silently
+	// dropped (which would change behavior and leave its arg a dead store) — the
+	// whole function must fall back to bytecode instead.
+	fn := buildLispIR(t, `(defn cf [form caller-ns]
+	  (do
+	    (push-binding! (var *ns*) (first caller-ns))
+	    (let [r (do (count form))]
+	      (do (pop-binding! (var *ns*)) r))))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("fallback") {
+		t.Fatalf("expected :fallback for un-lowerable side-effecting push-binding!, got %v\n%s",
+			got, bindAndRenderGoDecl(t, result))
+	}
+}
+
+// TestLowerGoCharLiteral (ITER-0001): character literals lower to vm.Char, and
+// in a primitive-typed (char-returning) context they UNBOX to a vm.Char-typed
+// return rather than vm.Value — consistent with int. Before the fix, build-form
+// had no char? case and threw "unrecognized form".
+func TestLowerGoCharLiteral(t *testing.T) {
+	ensureLoader()
+
+	fn := buildLispIR(t, `(defn whitespace? [c] (or (= c \space) (= c \tab)))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":bridge")
+	if got := result.ValueAt(vm.Keyword("status")); got != vm.Keyword("lowered") {
+		t.Fatalf("char-literal defn should lower; got %v reason=%v", got, result.ValueAt(vm.Keyword("reason")))
+	}
+	if r := bindAndRenderGoDecl(t, result); !strings.Contains(r, `vm.Char(' ')`) {
+		t.Fatalf("expected vm.Char(' ')\n%s", r)
+	}
+
+	fn2 := buildLispIR(t, `(defn ch [] \a)`)
+	optimizeLispIR(t, fn2)
+	result2 := lowerGo(t, fn2, ":bridge")
+	r2 := bindAndRenderGoDecl(t, result2)
+	if !strings.Contains(r2, "func ch() vm.Char") {
+		t.Fatalf("expected char return to UNBOX to vm.Char\n%s", r2)
 	}
 }

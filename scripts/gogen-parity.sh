@@ -29,10 +29,15 @@ set -euo pipefail
 
 MODE="${1:-default}"
 case "$MODE" in
-    --quick)     RUN_JANK=1; RUN_LOWERGO=0; RUN_IRCOMPILE=0 ;;
-    --jank-only) RUN_JANK=1; RUN_LOWERGO=0; RUN_IRCOMPILE=0 ;;
-    --full)      RUN_JANK=1; RUN_LOWERGO=1; RUN_IRCOMPILE=1 ;;
-    default)     RUN_JANK=1; RUN_LOWERGO=1; RUN_IRCOMPILE=0 ;;
+    --quick)      RUN_JANK=1; RUN_LOWERGO=0; RUN_IRCOMPILE=0 ;;
+    --jank-only)  RUN_JANK=1; RUN_LOWERGO=0; RUN_IRCOMPILE=0 ;;
+    # ir-compile only: the IR-optimizing bytecode path (binds *ir-compile*),
+    # which runs the native passes under -tags gogen_ir and is byte-stable
+    # across engines — unlike lower-go, whose AOT run trips the wall-clock
+    # *typeinfer-budget-ms* and flakes. This is the CI-safe parity gate.
+    --ir-compile) RUN_JANK=0; RUN_LOWERGO=0; RUN_IRCOMPILE=1 ;;
+    --full)       RUN_JANK=1; RUN_LOWERGO=1; RUN_IRCOMPILE=1 ;;
+    default)      RUN_JANK=1; RUN_LOWERGO=1; RUN_IRCOMPILE=0 ;;
     -h|--help)
         sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
         exit 0
@@ -42,6 +47,12 @@ case "$MODE" in
         exit 2
         ;;
 esac
+
+# The gogen_ir lowered tree (pkg/rt/core_go_lowered/) is a gitignored build
+# artifact, so regenerate it before any `-tags gogen_ir` build below. Cheap
+# relative to the parity runs; non-determinism is irrelevant here (we compare
+# program output across engines, not the generated Go bytes).
+go run -tags bootstrap ./cmd/lgbgen --target=go >/dev/null
 
 # IR corpus used by ir-stress. Order matters (data.lg must load first).
 IR_CORPUS=(

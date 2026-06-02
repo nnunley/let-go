@@ -93,15 +93,22 @@ clojure-compat-report: $(GO)
 #
 # All three are anchor-normalized — see cmd/bench-ratchet/main.go
 # and docs/perf/ratchet.md.
+# Regenerate the gitignored gogen_ir lowered tree (a build artifact, not
+# committed — see check-generated). Any target that builds -tags gogen_ir
+# depends on this. Cheap relative to the runs that follow.
+.PHONY: lowered
+lowered:
+	@go run -tags bootstrap ./cmd/lgbgen --target=go >/dev/null
+
 # Default gate (~1 min): the jank suite under BOTH VM variants (bytecode +
 # gogen_ir-lowered) + the calibration anchor. This is what CI runs.
-bench-ratchet:
+bench-ratchet: lowered
 	go run ./cmd/bench-ratchet check
 
-bench-ratchet-update:
+bench-ratchet-update: lowered
 	go run ./cmd/bench-ratchet update
 
-bench-ratchet-show:
+bench-ratchet-show: lowered
 	go run ./cmd/bench-ratchet show
   
 # Parity checks: untagged vs -tags gogen_ir across jank + ir-stress.
@@ -119,10 +126,10 @@ parity-full:
 # Manual deep-dive (~25 min): the entire pkg/vm micro-benchmark fleet plus the
 # suite under -tags. Not gated in CI — run by hand when investigating a specific
 # regression. Pair with `update` to refresh the full baseline.
-bench-ratchet-full:
+bench-ratchet-full: lowered
 	go run ./cmd/bench-ratchet -full check
 
-bench-ratchet-full-update:
+bench-ratchet-full-update: lowered
 	go run ./cmd/bench-ratchet -full update
 
 clean:
@@ -162,12 +169,14 @@ install-hooks:
 #     old check-lowered-fresh pointed at a path that no longer exists and had
 #     been a silent no-op).
 #
-#   * core_go_lowered/ is NOT byte-deterministic — its self-lower trips the
-#     wall-clock *typeinfer-budget-ms*, so the same form flips
-#     :ok<->unsupported between runs and a content diff would flake. The
-#     COMMITTED tree is gated behaviorally instead: it must compile under
-#     -tags gogen_ir. (A stronger native-dispatch assertion lands with the
-#     branch that wires native overrides.)
+#   * core_go_lowered/ (+ the gogen_ir wireup files) is NOT committed — it is
+#     a build artifact, regenerated on demand and gitignored. Its self-lower
+#     trips the wall-clock *typeinfer-budget-ms*, so the bytes are not
+#     reproducible and committing it would churn. Here it is regenerated fresh,
+#     then gated behaviorally: it must compile under -tags gogen_ir AND
+#     dispatch natively (dce -> NativeFn). gogen_ir consumers (this gate, the
+#     parity job, any -tags gogen_ir build) regenerate it first; the untagged
+#     build and the shipped bytecode binary never need it.
 #
 # This is the gate CI runs. After a merge/rebase touching pkg/rt/core/**, run
 # `make check-generated` (or `make generate` to refresh, then commit).
@@ -184,9 +193,18 @@ check-generated: $(GO)
 		echo "       Run 'make generate' and commit the regenerated bundle."; \
 		exit 1; \
 	fi
-	@echo ">> lowered tree: committed tree must compile under -tags gogen_ir"
+	@echo ">> lowered tree: regenerate (gitignored build artifact), then compile + dispatch natively under -tags gogen_ir"
+	@go run -tags bootstrap ./cmd/lgbgen --target=go >/dev/null
 	@go build -tags gogen_ir ./...
-	@echo "OK: core_go_lowered/ compiles under -tags gogen_ir."
+	@out=$$(printf '(require (quote ir.passes.dce)) (println "DCE-TYPE:" (type ir.passes.dce/dce))' \
+	        | go run -tags gogen_ir . /dev/stdin 2>&1); \
+	if echo "$$out" | grep -q "DCE-TYPE: let-go.lang.NativeFn"; then \
+		echo "OK: core_go_lowered/ compiles + dispatches natively (dce -> NativeFn)."; \
+	else \
+		echo "FAIL: ir.passes.dce/dce did not dispatch to a NativeFn override"; \
+		echo "$$out" | tail -5; \
+		exit 1; \
+	fi
 
 # PHONY targets are for ones that have conflicting files/dirs present:
 .PHONY: test bench-ratchet bench-ratchet-update bench-ratchet-show install-hooks check-generated

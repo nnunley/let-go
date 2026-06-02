@@ -84,6 +84,16 @@ const (
 	suitePackage = "github.com/nooga/let-go/test"
 	suiteFilter  = "^BenchmarkClojureTestSuite$"
 	anchorFilter = "^BenchmarkRatchetAnchor$"
+
+	// IR-compile throughput: the IR-optimizing compile path (build →
+	// optimize-fn → bytecode) over a fixed corpus, measured under both VM
+	// variants. Unlike the jank suite (runtime execution of unlowered
+	// clojure.core), this is the workload the gogen_ir pass overrides
+	// actually run — the yardstick for "is the lowered-Go IR usable?".
+	// Its pkg/ir test binary links the lowered tree via the generated
+	// zz_gogen_ir_wire_test.go, so the gogen_ir variant dispatches native.
+	irCompilePackage = "github.com/nooga/let-go/pkg/ir"
+	irCompileFilter  = "^BenchmarkIRCompile$"
 )
 
 // defaultPackages is the scope when no -packages flag is given.
@@ -95,12 +105,15 @@ const (
 //     clojure-test-suite corpus. Catches compile + run regressions
 //     that pkg/vm micro-benches don't see.
 //
-// We deliberately do NOT default-benchmark compile time
-// (pkg/compiler), bytecode decoding (pkg/bytecode), or IR pipeline
-// internals (pkg/ir) — those are measured by other tooling (parity
-// scripts, `make build`). Keeping the ratchet scope narrow means a
-// slow compiler change doesn't trip it AND each in-scope bench gets
-// more of the sample budget.
+// We deliberately keep the -full default scope narrow: no broad
+// compile-time (pkg/compiler) or bytecode-decode (pkg/bytecode)
+// fleet. The ONE IR-pipeline benchmark we do gate is the targeted
+// BenchmarkIRCompile (pkg/ir), and only in the fast gate under both VM
+// variants — it is the yardstick for native-IR usability and the number
+// Part-2 (direct-call rewrite) must move. Everything else in pkg/ir
+// internals stays measured by other tooling (parity scripts, `make
+// build`). Narrow scope means a slow compiler change doesn't trip the
+// ratchet AND each in-scope bench gets more of the sample budget.
 var defaultPackages = []string{
 	"github.com/nooga/let-go/pkg/vm",
 	"github.com/nooga/let-go/test",
@@ -581,12 +594,18 @@ func buildJobs(packages, tags string, full, manual bool, filterRE *regexp.Regexp
 		if err != nil {
 			return nil, "", fmt.Errorf("suite filter: %w", err)
 		}
+		irCompileRE, err := regexp.Compile(irCompileFilter)
+		if err != nil {
+			return nil, "", fmt.Errorf("ir-compile filter: %w", err)
+		}
 		jobs := []captureJob{
 			{pkg: anchorPackage, tags: "", filter: anchorRE},
 			{pkg: suitePackage, tags: "", filter: suiteRE, variant: "bytecode"},
 			{pkg: suitePackage, tags: "gogen_ir", filter: suiteRE, variant: "gogen_ir"},
+			{pkg: irCompilePackage, tags: "", filter: irCompileRE, variant: "bytecode"},
+			{pkg: irCompilePackage, tags: "gogen_ir", filter: irCompileRE, variant: "gogen_ir"},
 		}
-		return jobs, "fast gate (jank ×2 + anchor)", nil
+		return jobs, "fast gate (jank ×2 + ir-compile ×2 + anchor)", nil
 	}
 }
 

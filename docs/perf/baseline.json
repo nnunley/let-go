@@ -16,6 +16,22 @@
     "iterations": 642407599
   },
   "benchmarks": {
+    "github.com/nooga/let-go/pkg/ir.BenchmarkIRCompile [bytecode]": {
+      "ns_per_op": 23970144.000000004,
+      "allocs_per_op": 306882,
+      "bytes_per_op": 10371329,
+      "ratio_to_anchor": 23662531.09575519,
+      "best_since_sha": "d7b70df596cd",
+      "best_since_at": "2026-05-31T19:19:34Z"
+    },
+    "github.com/nooga/let-go/pkg/ir.BenchmarkIRCompile [gogen_ir]": {
+      "ns_per_op": 23871151,
+      "allocs_per_op": 306880,
+      "bytes_per_op": 10371221,
+      "ratio_to_anchor": 23564808.489634752,
+      "best_since_sha": "d7b70df596cd",
+      "best_since_at": "2026-05-31T19:19:34Z"
+    },
     "github.com/nooga/let-go/pkg/vm.BenchmarkConj/ArrayVector": {
       "ns_per_op": 9192.8,
       "allocs_per_op": 216,

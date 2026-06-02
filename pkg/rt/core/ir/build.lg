@@ -213,6 +213,7 @@
               (integer? form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (float?   form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (string?  form)  (add-inst! ctx (ctx-block ctx) :const [] form)
+              (char?    form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (keyword? form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (boolean? form)  (add-inst! ctx (ctx-block ctx) :const [] form)
               (symbol?  form)  (build-symbol form ctx)
@@ -578,14 +579,16 @@
         join-blk  (ir/add-block f)
         ;; Emit one BlockArg per capture in each child block — identical
         ;; shape across both branches.
-        then-params (mapv (fn [_sym]
+        then-params (mapv (fn [sym]
                             (let [pid (add-inst! ctx then-blk :block-arg [] (count (ir/block-params then-blk f)))]
                               (ir/add-block-param! f then-blk pid)
+                              (ir/add-source-info! f pid (ir/new-named-source-info (str sym)))
                               pid))
                           all-caps)
-        else-params (mapv (fn [_sym]
+        else-params (mapv (fn [sym]
                             (let [pid (add-inst! ctx else-blk :block-arg [] (count (ir/block-params else-blk f)))]
                               (ir/add-block-param! f else-blk pid)
+                              (ir/add-source-info! f pid (ir/new-named-source-info (str sym)))
                               pid))
                           all-caps)
         ;; Materialize the test in the parent block.
@@ -650,6 +653,7 @@
                       cap-pids (mapv (fn [i]
                                        (let [pid (add-inst! ctx join-blk :block-arg [] (inc i))]
                                          (ir/add-block-param! f join-blk pid)
+                                         (ir/add-source-info! f pid (ir/new-named-source-info (str (nth all-caps i))))
                                          pid))
                                      (range (count all-caps)))]
                   ;; Rebind in the CURRENT top scope so future lookup-local
@@ -683,12 +687,14 @@
         loop-param-ids (mapv (fn [i]
                                (let [pid (add-inst! ctx header :block-arg [] i)]
                                  (ir/add-block-param! f header pid)
+                                 (ir/add-source-info! f pid (ir/new-named-source-info (str (nth bindings (* i 2)))))
                                  pid))
                              (range n-slots))
         ;; Emit BlockArg + Param for each capture (positions n-slots..n-slots+n-caps-1).
         cap-param-ids  (mapv (fn [i]
                                (let [pid (add-inst! ctx header :block-arg [] (+ n-slots i))]
                                  (ir/add-block-param! f header pid)
+                                 (ir/add-source-info! f pid (ir/new-named-source-info (str (nth body-caps i))))
                                  pid))
                              (range n-caps))
         ;; Evaluate initial values in the PRE-loop block. Each build-form

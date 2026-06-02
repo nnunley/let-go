@@ -271,4 +271,11 @@ func postCoreInit() {
 	})
 
 	// test, walk, etc. are demand-loaded via resolver when required
+
+	// gogen_ir: the core bundle has now replayed every clojure.core
+	// def/defn onto coreNS. Drain any Go-native overrides registered by
+	// blank-imported lowered packages (lg_gogen_ir.go), clobbering the
+	// bytecode-produced vars with NativeFn wrappers. No-op on untagged
+	// builds — pendingGoOverrides is empty, so this is one map lookup.
+	rt.ApplyGoOverrides(coreNS)
 }
