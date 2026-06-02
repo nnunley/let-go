@@ -111,14 +111,21 @@
 (defn gte? [a b] (not (lt? a b)))
 
 ;; --- restriction grammar ---
-;; A restriction is space-AND-composed comparator clauses:
-;;   ">=1.9.0 <2.0.0 !=1.9.3"
-;; Comparators: >= <= < > = != . A bare version ("1.9.0") means ">=1.9.0".
-;; The author writes their own bounds to exclude dead versions, e.g. a yanked
-;; 2.x that sorts above 1.9.0: ">=1.9.0 <2.0.0".
+;; A restriction is one or more space-AND-composed tokens, optionally split into
+;; alternatives by "||" (OR). A token is a comparator clause, a bare/partial
+;; version, an x-range, or npm-style caret/tilde sugar:
+;;   ">=1.9.0 <2.0.0 !=1.9.3"   comparators (>= <= < > = !=), AND by spaces
+;;   "1.9.0"                     bare-complete version means ">=1.9.0"
+;;   "1.2.x"  "1.x"  "*"         x-ranges (a "*"/"x"/missing component is "any")
+;;   "^1.2.3"                    caret: >=1.2.3 <2.0.0 (up to next non-zero bump)
+;;   "~1.2.3"                    tilde: >=1.2.3 <1.3.0 (patch-level changes)
+;;   "^1.0.0 || ^2.0.0"          OR-composition
+;; Caret/tilde/x-ranges operate on numeric M.N.P; use explicit comparators for
+;; pre-release bounds. Hyphen ranges ("1.2.3 - 2.3.4") are intentionally not
+;; supported (ambiguous with the "-pre" separator).
 
 (defn- parse-clause
-  "Split a token into [op version-string]; bare version implies >=."
+  "Split a comparator token into [op version-string]; bare version implies >=."
   [tok]
   (cond
     (str/starts-with? tok ">=") [">=" (subs tok 2)]
@@ -142,12 +149,87 @@
       (= op "!=") (not (= c 0))
       :else       false)))
 
+;; --- Layer 4: caret / tilde / x-range desugaring ---
+
+(defn- x-part?
+  "A version component that means 'any': empty, x, X, or *."
+  [s]
+  (or (= s "") (= s "x") (= s "X") (= s "*")))
+
+(defn- parse-partial
+  "Parse a possibly-partial / x- version token into [major minor patch], using
+   nil for an absent or x/* component. Tolerates a leading 'v' (mirroring parse)
+   so v-prefixed sugar like ^v1.0.0 / ~v1.2.3 / v1.x matches instead of silently
+   failing. \"1.2\" -> [1 2 nil]; \"1.x\" -> [1 nil nil]; \"*\" -> [nil nil nil]."
+  [s]
+  (let [s     (if (and (pos? (count s)) (= "v" (subs s 0 1))) (subs s 1) s)
+        parts (split s ".")
+        at    (fn [i] (let [p (get parts i)]
+                        (if (or (nil? p) (x-part? p)) nil (parse-int p))))]
+    [(at 0) (at 1) (at 2)]))
+
+(defn- caret-clauses
+  "^M.N.P -> [>=floor <ceil], ceil bumps the leftmost non-zero component."
+  [s]
+  (let [[maj minr pat] (parse-partial s)
+        lo (str maj "." (or minr 0) "." (or pat 0))
+        hi (cond
+             (and maj (not (zero? maj))) (str (inc maj) ".0.0")
+             (nil? minr)                 "1.0.0"               ; ^0
+             (not (zero? minr))          (str "0." (inc minr) ".0")
+             (nil? pat)                  "0.1.0"               ; ^0.0
+             (not (zero? pat))           (str "0.0." (inc pat))
+             :else                       "0.0.1")]             ; ^0.0.0
+    [[">=" lo] ["<" hi]]))
+
+(defn- tilde-clauses
+  "~M.N.P / ~M.N -> >=floor <M.(N+1).0 ; ~M -> >=M.0.0 <(M+1).0.0."
+  [s]
+  (let [[maj minr pat] (parse-partial s)
+        lo (str maj "." (or minr 0) "." (or pat 0))
+        hi (if minr
+             (str maj "." (inc minr) ".0")
+             (str (inc maj) ".0.0"))]
+    [[">=" lo] ["<" hi]]))
+
+(defn- xrange-clauses
+  "Bare/partial/x token -> clauses. * -> >=0.0.0 ; 1.x -> >=1.0.0 <2.0.0 ;
+   1.2.x -> >=1.2.0 <1.3.0 ; a complete M.N.P stays bare-complete (=> >=)."
+  [s]
+  (let [[maj minr pat] (parse-partial s)]
+    (cond
+      (nil? maj)  [[">=" "0.0.0"]]
+      (nil? minr) [[">=" (str maj ".0.0")] ["<" (str (inc maj) ".0.0")]]
+      (nil? pat)  [[">=" (str maj "." minr ".0")] ["<" (str maj "." (inc minr) ".0")]]
+      :else       [[">=" (str maj "." minr "." pat)]])))
+
+(defn- comparator-token?
+  [tok]
+  (some (fn [p] (str/starts-with? tok p)) [">=" "<=" "!=" ">" "<" "="]))
+
+(defn- desugar-token
+  "Expand one restriction token into a list of plain [op version-string] clauses."
+  [tok]
+  (cond
+    (str/starts-with? tok "^") (caret-clauses (subs tok 1))
+    (str/starts-with? tok "~") (tilde-clauses (subs tok 1))
+    (comparator-token? tok)    [(parse-clause tok)]
+    :else                      (xrange-clauses tok)))
+
 (defn satisfies-range?
-  "True when v (Version or string) satisfies every clause of restriction."
+  "True when v (Version or string) satisfies restriction. Supports comparators,
+   bare/partial versions, x-ranges, caret ^, tilde ~, space-AND composition, and
+   || OR composition. See the grammar note above."
   [v restriction]
   (let [actual (version v)
-        toks   (remove empty? (split (str/trim restriction) " "))]
-    (every? (fn [tok] (clause-ok? actual (parse-clause tok))) toks)))
+        alts   (split restriction "||")]
+    (boolean
+      (some (fn [alt]
+              (let [toks    (remove empty? (split (str/trim alt) " "))
+                    clauses (mapcat desugar-token toks)]
+                (and (seq clauses)
+                     (every? (fn [c] (clause-ok? actual c)) clauses))))
+            alts))))
 
 ;; --- commit-sha matching ---
 
@@ -180,3 +262,71 @@
   []
   (let [c (System/getProperty "let-go.commit")]
     (when (and c (not= c "none")) c)))
+
+;; --- Layer 3: require-letgo (host version / commit assertion) ---
+;; A file that needs a minimum let-go build asserts it with one line, failing at
+;; load time with a single clear message instead of a "can't resolve" cascade.
+;; The spec is auto-detected (the character classes are disjoint): a bare 7-40
+;; hex string is a commit pin (prefix-matched); anything containing . < > = ^ ~
+;; is a semver range. Checks skip (warn-and-pass) when the relevant build
+;; property is unknown — a "dev" version or "none" commit — so files using this
+;; stay loadable while hacking on let-go itself; known mismatches hard-fail.
+;; require-letgo is let-go-specific, so guard call sites for portability:
+;;   #?(:lg (require-letgo ">=1.9.0"))
+
+(defn- sha-spec?
+  "True when spec is a bare commit sha (7-40 hex chars), not a semver range."
+  [spec]
+  (boolean (re-matches #"[0-9a-fA-F]{7,40}" spec)))
+
+(defn enforce
+  "Pure host-requirement check. running-version is a Version or nil; running-commit
+   is a commit string or nil (nil = an unknown dev/none build). Returns :ok,
+   [:skip reason], or [:fail message]. A sha-shaped spec is prefix-matched against
+   running-commit; otherwise spec is a semver range checked with satisfies-range?."
+  [running-version running-commit spec]
+  (if (sha-spec? spec)
+    (cond
+      (nil? running-commit)
+      [:skip (str "require-letgo: running build commit unknown; skipping SHA pin " spec)]
+      (sha-match? running-commit spec) :ok
+      :else
+      [:fail (str "require-letgo: this file requires commit " spec
+                  " but running " running-commit)])
+    (cond
+      (nil? running-version)
+      [:skip (str "require-letgo: running build version unknown (dev); skipping " spec)]
+      (satisfies-range? running-version spec) :ok
+      :else
+      [:fail (str "require-letgo: this file requires " spec
+                  " but running v" (render running-version))])))
+
+(defn enforce!
+  "Effectful companion to enforce: carry out the host-requirement decision for
+   running-version / running-commit against spec. Returns nil on :ok; warns on
+   stderr and returns nil on :skip; on :fail throws an ex-info whose message is
+   the one-line human diagnostic and whose data is
+   {:required spec :found <running version-or-commit> :check-type :semver|:sha},
+   so a catcher can handle the failure programmatically while still reading the
+   same message. Splitting this from require-letgo keeps the throw path testable
+   without a release build (it takes the running values as arguments)."
+  [running-version running-commit spec]
+  (let [result (enforce running-version running-commit spec)]
+    (cond
+      (= :ok result)           nil
+      (= :skip (first result)) (do (write! *err* (str (second result) "\n")) nil)
+      :else
+      (let [sha? (sha-spec? spec)]
+        (throw (ex-info (second result)
+                        {:required   spec
+                         :found      (if sha? running-commit running-version)
+                         :check-type (if sha? :sha :semver)}))))))
+
+(defn require-letgo
+  "Assert at load time that the running let-go build satisfies spec, or throw a
+   single clear message (an ex-info carrying {:required :found :check-type}; see
+   enforce!). Warns on stderr and passes when the build property under check is
+   unknown (a dev/none build). Returns nil. Guard call sites for portability:
+   #?(:lg (require-letgo \">=1.9.0\"))."
+  [spec]
+  (enforce! (current) (current-commit) spec))

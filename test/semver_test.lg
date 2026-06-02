@@ -105,3 +105,135 @@
     ;; the test binary carries default rt.Version=dev / rt.Commit=none
     (is (nil? (semver/current)))
     (is (nil? (semver/current-commit)))))
+
+;; --- Layer 4: npm/cargo range sugar (caret, tilde, x-ranges, ||) ---
+
+(deftest range-sugar-caret
+  (testing "^1.2.3 := >=1.2.3 <2.0.0"
+    (is (semver/satisfies-range? "1.2.3" "^1.2.3"))
+    (is (semver/satisfies-range? "1.9.9" "^1.2.3"))
+    (is (not (semver/satisfies-range? "1.2.2" "^1.2.3")))
+    (is (not (semver/satisfies-range? "2.0.0" "^1.2.3"))))
+  (testing "^0.2.3 := >=0.2.3 <0.3.0 (leftmost non-zero is minor)"
+    (is (semver/satisfies-range? "0.2.5" "^0.2.3"))
+    (is (not (semver/satisfies-range? "0.3.0" "^0.2.3")))
+    (is (not (semver/satisfies-range? "0.2.2" "^0.2.3"))))
+  (testing "^0.0.3 := >=0.0.3 <0.0.4 (leftmost non-zero is patch)"
+    (is (semver/satisfies-range? "0.0.3" "^0.0.3"))
+    (is (not (semver/satisfies-range? "0.0.4" "^0.0.3")))))
+
+(deftest range-sugar-tilde
+  (testing "~1.2.3 := >=1.2.3 <1.3.0"
+    (is (semver/satisfies-range? "1.2.9" "~1.2.3"))
+    (is (not (semver/satisfies-range? "1.3.0" "~1.2.3")))
+    (is (not (semver/satisfies-range? "1.2.2" "~1.2.3"))))
+  (testing "~1.2 := >=1.2.0 <1.3.0"
+    (is (semver/satisfies-range? "1.2.0" "~1.2"))
+    (is (not (semver/satisfies-range? "1.3.0" "~1.2"))))
+  (testing "~1 := >=1.0.0 <2.0.0"
+    (is (semver/satisfies-range? "1.9.0" "~1"))
+    (is (not (semver/satisfies-range? "2.0.0" "~1")))))
+
+(deftest range-sugar-xrange
+  (testing "1.2.x := >=1.2.0 <1.3.0"
+    (is (semver/satisfies-range? "1.2.9" "1.2.x"))
+    (is (not (semver/satisfies-range? "1.3.0" "1.2.x")))
+    (is (semver/satisfies-range? "1.2.0" "1.2.*")))
+  (testing "1.x := >=1.0.0 <2.0.0"
+    (is (semver/satisfies-range? "1.9.9" "1.x"))
+    (is (not (semver/satisfies-range? "2.0.0" "1.x"))))
+  (testing "* matches anything"
+    (is (semver/satisfies-range? "0.0.1" "*"))
+    (is (semver/satisfies-range? "99.0.0" "*"))))
+
+(deftest range-sugar-leading-v
+  ;; parse-clause routes >=/<= suffixes through parse (which strips a leading v),
+  ;; but caret/tilde/x-range tokens go through parse-partial — which must strip v
+  ;; too, or v-prefixed sugar silently mismatches (returns false, no diagnostic).
+  (testing "caret tolerates a leading v (uniform with comparators)"
+    (is (semver/satisfies-range? "1.5.0" "^v1.0.0"))
+    (is (= (semver/satisfies-range? "1.5.0" "^1.0.0")
+           (semver/satisfies-range? "1.5.0" "^v1.0.0"))))
+  (testing "tilde tolerates a leading v"
+    (is (semver/satisfies-range? "1.2.9" "~v1.2.3"))
+    (is (not (semver/satisfies-range? "1.3.0" "~v1.2.3"))))
+  (testing "x-range tolerates a leading v"
+    (is (semver/satisfies-range? "1.9.9" "v1.x"))
+    (is (not (semver/satisfies-range? "2.0.0" "v1.x")))))
+
+(deftest range-sugar-or
+  (testing "|| is OR-composition across alternatives"
+    (is (semver/satisfies-range? "1.5.0" "^1.0.0 || ^2.0.0"))
+    (is (semver/satisfies-range? "2.5.0" "^1.0.0 || ^2.0.0"))
+    (is (not (semver/satisfies-range? "3.0.0" "^1.0.0 || ^2.0.0"))))
+  (testing "each alternative is still space-AND-composed"
+    (is (semver/satisfies-range? "1.7.0" ">=1.5.0 <1.8.0 || >=2.0.0"))
+    (is (semver/satisfies-range? "2.3.0" ">=1.5.0 <1.8.0 || >=2.0.0"))
+    (is (not (semver/satisfies-range? "1.9.0" ">=1.5.0 <1.8.0 || >=2.0.0")))))
+
+(deftest range-sugar-backcompat
+  (testing "plain comparators and bare-complete (>=) still behave as in #160"
+    (is (semver/satisfies-range? "2.0.0" "1.9.0"))          ; bare-complete => >=
+    (is (semver/satisfies-range? "1.9.5" ">=1.9.0 <2.0.0"))
+    (is (not (semver/satisfies-range? "2.0.0" ">=1.9.0 <2.0.0")))))
+
+;; --- Layer 3: enforce (pure) + require-letgo (load-time wrapper) ---
+
+(deftest enforce-semver
+  (testing ":ok when the running version satisfies the range"
+    (is (= :ok (semver/enforce (semver/version "1.9.0") "cd4ce1216a9b" ">=1.9.0")))
+    (is (= :ok (semver/enforce (semver/version "1.9.5") "cd4ce1216a9b" "^1.9.0"))))
+  (testing "[:fail msg] with the exact one-line message on a known mismatch"
+    (is (= [:fail "require-letgo: this file requires >=1.9.0 but running v1.8.0"]
+           (semver/enforce (semver/version "1.8.0") nil ">=1.9.0"))))
+  (testing "[:skip ...] when the running version is unknown (dev)"
+    (is (= :skip (first (semver/enforce nil nil ">=1.9.0"))))))
+
+(deftest enforce-sha
+  (testing ":ok when the running commit has the pinned prefix"
+    (is (= :ok (semver/enforce (semver/version "1.9.0") "cd4ce1216a9b" "cd4ce12"))))
+  (testing "[:fail msg] with the exact message when the commit prefix differs"
+    (is (= [:fail "require-letgo: this file requires commit ff00aa1 but running cd4ce1216a9b"]
+           (semver/enforce (semver/version "1.9.0") "cd4ce1216a9b" "ff00aa1"))))
+  (testing "[:skip ...] when the running commit is unknown (none)"
+    (is (= :skip (first (semver/enforce (semver/version "1.9.0") nil "cd4ce12"))))))
+
+(deftest require-letgo-dev-skips
+  (testing "on the dev/none test binary, require-letgo warns-and-passes (no throw)"
+    ;; version is unknown (dev) -> semver checks skip
+    (is (nil? (semver/require-letgo ">=1.9.0")))
+    (is (nil? (semver/require-letgo "<0.0.1")))
+    ;; commit is unknown (none) -> SHA pins skip
+    (is (nil? (semver/require-letgo "cd4ce12")))))
+
+;; enforce! is the effectful companion to the pure enforce: it performs the
+;; load-time decision. :ok -> nil, :skip -> warn+nil, :fail -> throw an ex-info
+;; carrying {:required :found :check-type} with the same one-line human message.
+;; This gives the throw path automated coverage without a release build.
+
+(deftest enforce!-ok-and-skip-return-nil
+  (testing ":ok returns nil"
+    (is (nil? (semver/enforce! (semver/version "1.9.0") "cd4ce1216a9b" ">=1.9.0"))))
+  (testing ":skip (unknown build) returns nil"
+    (is (nil? (semver/enforce! nil nil ">=1.9.0")))
+    (is (nil? (semver/enforce! (semver/version "1.9.0") nil "cd4ce12")))))
+
+(deftest enforce!-fail-throws-ex-info
+  (testing "semver mismatch throws ex-info with the one-line message and structured data"
+    (let [e (try (semver/enforce! (semver/version "1.8.0") nil ">=1.9.0")
+                 (catch ex ex))]
+      (is (= "require-letgo: this file requires >=1.9.0 but running v1.8.0"
+             (ex-message e)))
+      (is (= {:required ">=1.9.0"
+              :found (semver/version "1.8.0")
+              :check-type :semver}
+             (ex-data e)))))
+  (testing "SHA mismatch throws ex-info tagged :sha carrying the running commit"
+    (let [e (try (semver/enforce! (semver/version "1.9.0") "cd4ce1216a9b" "ff00aa1")
+                 (catch ex ex))]
+      (is (= "require-letgo: this file requires commit ff00aa1 but running cd4ce1216a9b"
+             (ex-message e)))
+      (is (= {:required "ff00aa1"
+              :found "cd4ce1216a9b"
+              :check-type :sha}
+             (ex-data e))))))

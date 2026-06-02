@@ -68,9 +68,16 @@ pkg/rt/core_go_lowered/ir_lower_go/ir_lower_go.go: $(CORE-LG-FILES) $(LGBGEN-SOU
 generate: build
 	./lg scripts/generate.lg --go "$$(command -v go)" --lg ./lg --source-paths examples/go-gen
 
+# Short commit for `-X main.commit` so SHA-pin require-letgo checks can fire on
+# `make` builds. Release builds get this from goreleaser; a bare `make` build
+# previously reported commit="none", so SHA pins always warn-and-skipped.
+# `version` deliberately stays "dev" (no honest release version on an untagged
+# build). Falls back to "none" outside a git checkout.
+COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+
 $(LG): $(GO) lg.go pkg/**/* pkg/rt/core_compiled.lgb
 	which go
-	go build -ldflags="-s -w" -o $@ .
+	go build -ldflags="-s -w -X main.commit=$(COMMIT)" -o $@ .
 
 test: pkg/**/* pkg/rt/core_compiled.lgb $(GO)
 	$(GO-TEST-ENV) go test $(GO-TEST-FLAGS) -count=1 -v ./test
