@@ -63,6 +63,33 @@
 (defn module-bytes [metrics m]
   (let [e (get (:modules metrics) m)] (if e (:bytes e) 0)))
 
+(defn read-baseline [path]
+  (when (file-exists? path) (read-string (slurp path))))
+
+;; items in seq `a` not present in seq `b`
+(defn set-diff [a b]
+  (let [bset (set b)]
+    (vec (filter (fn [x] (not (contains? bset x))) a))))
+
+;; sum of CURRENT bytes over only the modules present in the baseline (tracked set)
+(defn gated-total [current baseline]
+  (reduce + 0 (map (fn [m] (module-bytes current m)) (keys (:modules baseline)))))
+
+(defn limit-for [baseline-bytes]
+  (quot (* baseline-bytes (+ 100 threshold-pct)) 100))
+
+(defn compare-result [current baseline]
+  (let [base-mods (keys (:modules baseline))
+        cur-mods  (keys (:modules current))
+        gated     (gated-total current baseline)
+        limit     (limit-for (:total-bytes baseline))]
+    {:status   (if (> gated limit) :regression :ok)
+     :gated    gated
+     :baseline (:total-bytes baseline)
+     :limit    limit
+     :new      (sort (set-diff cur-mods base-mods))
+     :removed  (sort (set-diff base-mods cur-mods))}))
+
 ;; Build {module {:bytes :loc :files}} + totals over the tree + present wireup files.
 (defn collect-metrics [tree-dir wireup]
   (let [tree-files (list-go-files tree-dir)
@@ -107,6 +134,21 @@
   (print (metrics->edn (collect-metrics tree-dir wireup-files)))
   (os/exit 0))
 
+(defn do-check []
+  (regen!)
+  (let [current  (collect-metrics tree-dir wireup-files)
+        baseline (read-baseline baseline-path)]
+    (when-not baseline (die (str "no baseline at " baseline-path " — run 'update' first")))
+    (let [r (compare-result current baseline)]
+      (println (str "tracked gated bytes: " (:gated r) " / limit " (:limit r)
+                    " (baseline " (:baseline r) " +" threshold-pct "%)"))
+      (when (seq (:new r))     (println (str "NEW modules (exempt): " (:new r))))
+      (when (seq (:removed r)) (println (str "removed modules: " (:removed r))))
+      (if (= :regression (:status r))
+        (do (println "FANOUT REGRESSION: tracked modules grew beyond band.") (os/exit 1))
+        (do (println "OK: tracked fanout within band.") (os/exit 0))))))
+
 (cond
-  (= subcommand "show") (do-show)
+  (= subcommand "show")  (do-show)
+  (= subcommand "check") (do-check)
   :else (die (str "unknown subcommand " (pr-str subcommand) " — use check|update|show")))

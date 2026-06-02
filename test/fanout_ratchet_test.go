@@ -87,3 +87,60 @@ func TestFanoutShow(t *testing.T) {
 		t.Errorf("expected module \"a\" in output:\n%s", out)
 	}
 }
+
+// baseline: a=1000, b=1000, total 2000.
+const fixtureBaseline = `{:total-bytes 2000
+ :total-loc 2
+ :files 2
+ :modules {
+            "a" {:bytes 1000 :loc 1 :files 1}
+            "b" {:bytes 1000 :loc 1 :files 1}
+           }}
+`
+
+func TestFanoutCheckWithinBand(t *testing.T) {
+	tree := t.TempDir()
+	writeModule(t, tree, "a", 1000)
+	writeModule(t, tree, "b", 1020) // +2% on b; gated 2020 <= limit 2100
+	bl := filepath.Join(t.TempDir(), "base.edn")
+	writeBaseline(t, bl, fixtureBaseline)
+	out, code := runRatchet(t, "check", "--no-regen", "--no-wireup", "--tree-dir", tree, "--baseline", bl)
+	if code != 0 {
+		t.Fatalf("check exit=%d, want 0 (within band)\n%s", code, out)
+	}
+	if !strings.Contains(out, "OK") {
+		t.Errorf("expected OK in output:\n%s", out)
+	}
+}
+
+func TestFanoutCheckOverBand(t *testing.T) {
+	tree := t.TempDir()
+	writeModule(t, tree, "a", 1000)
+	writeModule(t, tree, "b", 1200) // gated 2200 > limit 2100
+	bl := filepath.Join(t.TempDir(), "base.edn")
+	writeBaseline(t, bl, fixtureBaseline)
+	out, code := runRatchet(t, "check", "--no-regen", "--no-wireup", "--tree-dir", tree, "--baseline", bl)
+	if code != 1 {
+		t.Fatalf("check exit=%d, want 1 (over band)\n%s", code, out)
+	}
+	if !strings.Contains(out, "REGRESSION") {
+		t.Errorf("expected REGRESSION in output:\n%s", out)
+	}
+}
+
+// The key requirement: a new module never causes failure, even when large.
+func TestFanoutCheckNewModuleExempt(t *testing.T) {
+	tree := t.TempDir()
+	writeModule(t, tree, "a", 1000)
+	writeModule(t, tree, "b", 1000)
+	writeModule(t, tree, "c", 50000) // brand new, huge — must NOT fail
+	bl := filepath.Join(t.TempDir(), "base.edn")
+	writeBaseline(t, bl, fixtureBaseline)
+	out, code := runRatchet(t, "check", "--no-regen", "--no-wireup", "--tree-dir", tree, "--baseline", bl)
+	if code != 0 {
+		t.Fatalf("check exit=%d, want 0 (new module exempt)\n%s", code, out)
+	}
+	if !strings.Contains(out, "NEW") || !strings.Contains(out, "c") {
+		t.Errorf("expected NEW module c reported:\n%s", out)
+	}
+}
