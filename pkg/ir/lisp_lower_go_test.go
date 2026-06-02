@@ -820,3 +820,44 @@ func TestLowerGoCallDefaultStaysInvokeValue(t *testing.T) {
 		t.Fatalf("expected InvokeValue when *lowered-siblings* is nil:\n%s", got)
 	}
 }
+
+// End-to-end: lower-ns-to-go discovers the lowered sibling and lifts the
+// intra-ns call (caller -> callee) to a direct Go call.
+func TestLowerNsToGoLiftsIntraNsCall(t *testing.T) {
+	ensureLoader()
+	// Intern the siblings into the target ns BEFORE lowering, mirroring the real
+	// loader (which defs every fn into its ns before lowering runs). This makes
+	// the unqualified `callee` call resolve to directtest/callee — not the
+	// clojure.core fallback — so the intra-ns direct-call match fires. Done in a
+	// single eval with explicit (intern ns sym) so it doesn't depend on in-ns
+	// persisting across separate runLispExpr calls.
+	v := runLispExpr(t,
+		`(do (create-ns (quote directtest))
+		     (intern (quote directtest) (quote callee))
+		     (intern (quote directtest) (quote caller))
+		     (ir.passes.pipeline/lower-ns-to-go "directtest" (quote directtest)
+		       [(quote (defn callee [x] x)) (quote (defn caller [y] (callee y)))]))`)
+	got := string(v.(vm.String))
+	// With two-pass lowering in place:
+	// - pass 1 discovers callee as override-eligible (single-arity, vm.Value uniform)
+	// - pass 2 re-lowers with *lowered-siblings* bound
+	// - caller should emit a direct callee(...) call, NOT InvokeValue+LookupVar
+	hasDirectCall := strings.Contains(got, "callee(") && !regexp.MustCompile(`InvokeValue\([^\n]*LookupVar\([^\n]*"callee"`).MatchString(got)
+	if !hasDirectCall {
+		t.Fatalf("expected direct callee(...) call (no InvokeValue+LookupVar for callee) in:\n%s", got)
+	}
+}
+
+// Scope guard: a cross-namespace callee (clojure.core/count) is NOT lifted —
+// it stays on the InvokeValue path (slice 1 is intra-ns only).
+func TestLowerNsToGoLeavesCrossNsCall(t *testing.T) {
+	ensureLoader()
+	runLispExpr(t, `(create-ns (quote directtest2))`)
+	v := runLispExpr(t,
+		`(ir.passes.pipeline/lower-ns-to-go "directtest2" (quote directtest2)
+		   [(quote (defn caller2 [y] (count y)))])`)
+	got := string(v.(vm.String))
+	if !regexp.MustCompile(`InvokeValue\([^\n]*LookupVar\([^\n]*"count"`).MatchString(got) {
+		t.Fatalf("expected cross-ns count call to stay on InvokeValue:\n%s", got)
+	}
+}
