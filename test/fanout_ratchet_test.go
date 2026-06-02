@@ -144,3 +144,65 @@ func TestFanoutCheckNewModuleExempt(t *testing.T) {
 		t.Errorf("expected NEW module c reported:\n%s", out)
 	}
 }
+
+func TestFanoutUpdateTightens(t *testing.T) {
+	tree := t.TempDir()
+	writeModule(t, tree, "a", 800) // shrank from 1000
+	writeModule(t, tree, "b", 1000)
+	bl := filepath.Join(t.TempDir(), "base.edn")
+	writeBaseline(t, bl, fixtureBaseline)
+	_, code := runRatchet(t, "update", "--no-regen", "--no-wireup", "--tree-dir", tree, "--baseline", bl)
+	if code != 0 {
+		t.Fatalf("update exit=%d, want 0", code)
+	}
+	got, _ := os.ReadFile(bl)
+	s := string(got)
+	if !strings.Contains(s, ":total-bytes 1800") {
+		t.Errorf("expected total-bytes tightened to 1800:\n%s", s)
+	}
+	if !strings.Contains(s, "\"a\" {:bytes 800") {
+		t.Errorf("expected a tightened to 800:\n%s", s)
+	}
+}
+
+func TestFanoutUpdateFoldsNewModule(t *testing.T) {
+	tree := t.TempDir()
+	writeModule(t, tree, "a", 1000)
+	writeModule(t, tree, "b", 1000)
+	writeModule(t, tree, "c", 500) // new module
+	bl := filepath.Join(t.TempDir(), "base.edn")
+	writeBaseline(t, bl, fixtureBaseline)
+	_, code := runRatchet(t, "update", "--no-regen", "--no-wireup", "--tree-dir", tree, "--baseline", bl)
+	if code != 0 {
+		t.Fatalf("update exit=%d, want 0", code)
+	}
+	got, _ := os.ReadFile(bl)
+	s := string(got)
+	if !strings.Contains(s, "\"c\" {:bytes 500") {
+		t.Errorf("expected new module c folded in:\n%s", s)
+	}
+	if !strings.Contains(s, ":total-bytes 2500") {
+		t.Errorf("expected total-bytes 2500 (1000+1000+500):\n%s", s)
+	}
+}
+
+func TestFanoutUpdateDeterministic(t *testing.T) {
+	tree := t.TempDir()
+	writeModule(t, tree, "b", 1000)
+	writeModule(t, tree, "a", 1000)
+	writeModule(t, tree, "c", 1000)
+	bl := filepath.Join(t.TempDir(), "base.edn")
+	writeBaseline(t, bl, fixtureBaseline)
+	runRatchet(t, "update", "--no-regen", "--no-wireup", "--tree-dir", tree, "--baseline", bl)
+	first, _ := os.ReadFile(bl)
+	runRatchet(t, "update", "--no-regen", "--no-wireup", "--tree-dir", tree, "--baseline", bl)
+	second, _ := os.ReadFile(bl)
+	if string(first) != string(second) {
+		t.Errorf("update output not byte-stable:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+	s := string(first)
+	ia, ib, ic := strings.Index(s, "\"a\""), strings.Index(s, "\"b\""), strings.Index(s, "\"c\"")
+	if !(ia < ib && ib < ic) {
+		t.Errorf("modules not sorted a<b<c:\n%s", s)
+	}
+}

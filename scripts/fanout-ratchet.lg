@@ -148,7 +148,39 @@
         (do (println "FANOUT REGRESSION: tracked modules grew beyond band.") (os/exit 1))
         (do (println "OK: tracked fanout within band.") (os/exit 0))))))
 
+;; MIN-merge current into baseline: existing modules tighten (MIN per metric),
+;; new modules added at current size, removed modules drop. :total-bytes is
+;; DERIVED from the merged module map (never MIN'd independently), so total and
+;; modules can never disagree.
+(defn merge-baseline [current baseline]
+  (let [base-mods (:modules baseline)
+        merged (reduce
+                 (fn [acc pair]
+                   (let [m (first pair) cur-e (second pair)
+                         base-e (get base-mods m)]
+                     (assoc acc m
+                       (if base-e
+                         {:bytes (min (:bytes base-e) (:bytes cur-e))
+                          :loc   (min (:loc base-e) (:loc cur-e))
+                          :files (:files cur-e)}
+                         cur-e))))
+                 {} (:modules current))]
+    {:total-bytes (reduce + 0 (map :bytes (vals merged)))
+     :total-loc   (reduce + 0 (map :loc   (vals merged)))
+     :files       (reduce + 0 (map :files (vals merged)))
+     :modules     merged}))
+
+(defn do-update []
+  (regen!)
+  (let [current  (collect-metrics tree-dir wireup-files)
+        baseline (read-baseline baseline-path)
+        merged   (if baseline (merge-baseline current baseline) current)]
+    (spit baseline-path (metrics->edn merged))
+    (println (str "wrote " baseline-path " (total-bytes " (:total-bytes merged) ")"))
+    (os/exit 0)))
+
 (cond
-  (= subcommand "show")  (do-show)
-  (= subcommand "check") (do-check)
+  (= subcommand "show")   (do-show)
+  (= subcommand "check")  (do-check)
+  (= subcommand "update") (do-update)
   :else (die (str "unknown subcommand " (pr-str subcommand) " — use check|update|show")))
