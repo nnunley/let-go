@@ -18,17 +18,18 @@
 ;; Returns f (same object — passes mutate in place).
 
 (ns ir.passes.pipeline
-  (:require ir.build
-            [ir.passes.constfold :refer [constfold]]
-            [ir.passes.cse :refer [cse]]
-            [ir.passes.dce :refer [dce]]
-            [ir.passes.licm :refer [licm]]
-            [ir.passes.typeinfer :refer [typeinfer]]
-            [ir.passes.infer-arg-types :refer [infer-arg-types]]
-            [ir.validate :refer [validate-fn!]]
-            [ir.lower :as lower]
-            [ir.lower-go :as lower-go]
-            [graph :as g]))
+  (:require
+   [graph :as g]
+   [ir.build]
+   [ir.lower :as lower]
+   [ir.lower-go :as lower-go]
+   [ir.passes.constfold :refer [constfold]]
+   [ir.passes.cse :refer [cse]]
+   [ir.passes.dce :refer [dce]]
+   [ir.passes.infer-arg-types :refer [infer-arg-types]]
+   [ir.passes.licm :refer [licm]]
+   [ir.passes.typeinfer :refer [typeinfer]]
+   [ir.validate :refer [validate-fn!]]))
 
 (defn optimize-fn [f]
   (validate-fn! f "build")
@@ -70,20 +71,20 @@
   ;; accept seq? not list? if we want to feed it Cons-shaped output.
   (cond
     (seq? form)
-      (let [head (first form)]
-        (if (contains? build-known-heads head)
-          (apply list head (doall (map expand-all (rest form))))
-          (let [expanded (expand-fully form)]
-            (if (seq? expanded)
-              (if (= 'quote (first expanded))
-                expanded
-                (apply list (first expanded)
-                       (doall (map expand-all (rest expanded)))))
-              (expand-all expanded)))))
+    (let [head (first form)]
+      (if (contains? build-known-heads head)
+        (apply list head (doall (map expand-all (rest form))))
+        (let [expanded (expand-fully form)]
+          (if (seq? expanded)
+            (if (= 'quote (first expanded))
+              expanded
+              (apply list (first expanded)
+                     (doall (map expand-all (rest expanded)))))
+            (expand-all expanded)))))
     (vector? form)
-      (vec (doall (map expand-all form)))
+    (vec (doall (map expand-all form)))
     (map? form)
-      (into {} (doall (map (fn [[k v]] [(expand-all k) (expand-all v)]) form)))
+    (into {} (doall (map (fn [[k v]] [(expand-all k) (expand-all v)]) form)))
     :else form))
 
 (def ^:dynamic *target* :bytecode)
@@ -123,15 +124,15 @@
       (let [arities   (drop (if has-doc? 3 2) form)]
         (if go-target?
           (let [fn-templates (mapv (fn [arity-form]
-                                    (let [args-vec   (first arity-form)
-                                          body-forms (map expand-all (rest arity-form))
-                                          expanded   (apply list 'defn name-sym args-vec body-forms)
-                                          ir-fn      (-> expanded ir.build/build-fn optimize-fn)
-                                          result     (lower-go/lower ir-fn :bridge)]
-                                      (if (= :lowered (:status result))
-                                        {:fn (:decl result)}
-                                        result)))
-                                  arities)]
+                                     (let [args-vec   (first arity-form)
+                                           body-forms (map expand-all (rest arity-form))
+                                           expanded   (apply list 'defn name-sym args-vec body-forms)
+                                           ir-fn      (-> expanded ir.build/build-fn optimize-fn)
+                                           result     (lower-go/lower ir-fn :bridge)]
+                                       (if (= :lowered (:status result))
+                                         {:fn (:decl result)}
+                                         result)))
+                               arities)]
             {:kind :multi-fn-template :fns fn-templates})
           (let [fn-vals   (mapv (fn [arity-form]
                                   (let [args-vec   (first arity-form)
@@ -192,16 +193,16 @@
     (letfn [(visit [x]
               (cond
                 (seq? x)
-                  (let [head (first x)]
-                    (when (symbol? head)
-                      (swap! acc conj (str head)))
-                    (doseq [el (rest x)] (visit el)))
+                (let [head (first x)]
+                  (when (symbol? head)
+                    (swap! acc conj (str head)))
+                  (doseq [el (rest x)] (visit el)))
                 (vector? x)
-                  (doseq [el x] (visit el))
+                (doseq [el x] (visit el))
                 (map? x)
-                  (doseq [entry x]
-                    (visit (key entry))
-                    (visit (val entry)))
+                (doseq [entry x]
+                  (visit (key entry))
+                  (visit (val entry)))
                 :else nil))]
       (visit form))
     @acc))
@@ -280,11 +281,11 @@
         len-call     (gogen/call (gogen/ident "len") [args-id])
         msg          (str fn-name ": wrong number of arguments %d (expected " arity ")")
         arity-mismatch
-          (gogen/return-stmt
-            [(gogen/ident "nil")
-             (gogen/call
-               (gogen/field-sel (gogen/ident "fmt") "Errorf")
-               [(gogen/string-lit msg) len-call])])
+        (gogen/return-stmt
+          [(gogen/ident "nil")
+           (gogen/call
+             (gogen/field-sel (gogen/ident "fmt") "Errorf")
+             [(gogen/string-lit msg) len-call])])
         len-check    (gogen/if-stmt
                        nil
                        (gogen/binary "!=" len-call (gogen/int-lit arity))
@@ -357,6 +358,39 @@
    {:path "github.com/nooga/let-go/pkg/vm" :alias "vm"}
    {:path "fmt" :alias nil}])
 
+(defn- lower-defn-forms
+  "Lower each defn form via the Go pipeline; return the vector of result maps.
+   Independent of *lowered-siblings* — the caller binds it for pass 2."
+  [defn-forms]
+  (loop [remaining defn-forms out []]
+    (if (empty? remaining)
+      out
+      (let [form (first remaining)
+            result (try
+                     (binding [*target* :go]
+                       (compile-form* form))
+                     (catch e
+                       (println (str "WARNING: lowering failed for "
+                                     (pr-str (try (second form) (catch _ form)))
+                                     ": " e))
+                       nil))]
+        (cond
+          (nil? result)
+          (recur (rest remaining) out)
+          (= :lowered (:status result))
+          (recur (rest remaining) (conj out result))
+          (= :multi-fn-template (:kind result))
+          ;; Flatten multi-arity templates into individual decls.
+          (let [flat (reduce (fn [acc entry]
+                               (if-let [d (:fn entry)]
+                                 (conj acc {:status :lowered :decl d :imports []})
+                                 acc))
+                             []
+                             (:fns result))]
+            (recur (rest remaining) (into out flat)))
+          :else
+          (recur (rest remaining) out))))))
+
 (defn lower-ns-to-go [pkg-name ns-name defn-forms]
   "Process defn forms through the Go-lowering pipeline and return rendered
    Go source for a package. pkg-name is the Go package name string,
@@ -364,34 +398,19 @@
    a vector of raw (defn ...) list forms."
   (binding [*ns* (the-ns ns-name)]
     (let [defn-forms (order-defn-forms defn-forms)
-          results (loop [remaining defn-forms out []]
-                    (if (empty? remaining)
-                      out
-                      (let [form (first remaining)
-                            result (try
-                                     (binding [*target* :go]
-                                       (compile-form* form))
-                                     (catch e
-                                       (println (str "WARNING: lowering failed for "
-                                                     (pr-str (try (second form) (catch _ form)))
-                                                     ": " e))
-                                       nil))]
-                        (cond
-                          (nil? result)
-                            (recur (rest remaining) out)
-                          (= :lowered (:status result))
-                            (recur (rest remaining) (conj out result))
-                          (= :multi-fn-template (:kind result))
-                            ;; Flatten multi-arity templates into individual decls.
-                            (let [flat (reduce (fn [acc entry]
-                                                 (if-let [d (:fn entry)]
-                                                   (conj acc {:status :lowered :decl d :imports []})
-                                                   acc))
-                                               []
-                                               (:fns result))]
-                              (recur (rest remaining) (into out flat)))
-                          :else
-                            (recur (rest remaining) out)))))
+          ;; Pass 1 discovers lowered single-arity vm.Value-uniform siblings
+          ;; (:override-eligible?) — the intra-ns calls slice 1 can lift.
+          pass1 (lower-defn-forms defn-forms)
+          siblings {:ns (str ns-name)
+                    :fns (reduce (fn [m r]
+                                   (if (:override-eligible? r)
+                                     (assoc m (:fn-name r) {:arity (:arity r) :go-name (:go-name r) :needs-error? (:needs-error? r)})
+                                     m))
+                                 {} pass1)}
+          ;; Pass 2 re-lowers with the sibling set visible so intra-ns calls
+          ;; lower to direct Go calls.
+          results (binding [lower-go/*lowered-siblings* siblings]
+                    (lower-defn-forms defn-forms))
           ;; Filter out results with nil decls (failures that slipped through).
           valid-results (filterv (fn [r] (some? (:decl r))) results)
           ;; gogen_ir: append a __gogen_wrap helper + init() that
