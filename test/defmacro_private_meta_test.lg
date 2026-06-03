@@ -1,0 +1,35 @@
+;; defmacro ^:private — reader metadata on a macro name must compile and thread
+;; :private onto the macro's var. Regression guard: previously
+;; `(defmacro ^:private m [] ...)` panicked in varCompiler because defmacro fed
+;; the reader-emitted `(with-meta sym {..})` form straight into `(var name)`,
+;; which casts `.First()` to a Symbol and got a List instead. `def`/`defn`
+;; already handled the wrapper via `def-meta-name`; defmacro did not.
+(ns test.defmacro-private-meta-test
+  (:require
+   [test :refer :all]))
+
+;; The form that used to panic at compile time.
+(defmacro ^:private priv-macro [] :priv)
+
+;; Explicit attr-map private form — already worked; guard it stays working.
+(defmacro attr-priv-macro {:private true} [] :attr)
+
+;; Plain macro — no metadata; ensure the common path is untouched.
+(defmacro plain-macro [x] (list 'inc x))
+
+(deftest defmacro-reader-private-expands
+  (testing "^:private macro expands and is callable"
+    (is (= :priv (priv-macro)))))
+
+(deftest defmacro-reader-private-threads-meta
+  (testing "^:private threads :private onto the macro var"
+    (is (= true (:private (meta (var priv-macro)))))))
+
+(deftest defmacro-attrmap-private-still-works
+  (testing "attr-map private macro is unaffected"
+    (is (= :attr (attr-priv-macro)))
+    (is (= true (:private (meta (var attr-priv-macro)))))))
+
+(deftest defmacro-plain-unaffected
+  (testing "plain macro path untouched"
+    (is (= 6 (plain-macro 5)))))
