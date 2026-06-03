@@ -1,0 +1,59 @@
+;; disasm-bundle.lg — disassemble a compiled .lgb bytecode bundle into a
+;; LAZY SEQUENCE of in-memory EDN data, one record per namespace.
+;;
+;; Reuses the runtime's own module-import path: (disasm/decode-bundle path)
+;; decodes the file via bytecode.DecodeToExecUnit (the same decoder that loads
+;; core at startup) and returns boxed *CodeChunks plus a projected const pool.
+;; (disasm/disassemble-resolved chunk) then turns each chunk into EDN rows with
+;; LOAD_CONST/LOAD_VAR operands resolved INLINE to their identifier.
+;;
+;; Output is valid, DETERMINISTIC EDN (no heap pointers): const-pool values are
+;; projected to identities — symbols/keywords/strings/numbers pass through, a
+;; Var becomes its qualified symbol, a Func becomes [:fn name], anything else a
+;; [:opaque "Type"] tag. The const pool is emitted ONCE (all chunks share it),
+;; then one record per namespace:
+;;   {:bundle-consts [ ... ]}
+;;   {:ns "ir.build" :chunk-index 17
+;;    :code [[:LOAD_ARG 0] [:LOAD_VAR 51 clojure.core/seq] [:INVOKE 1] ...]}
+;;
+;; Usage (standalone — a `lg disasm <file>` verb would need lg.go subcommand
+;; dispatch, deferred until this moves into a core namespace):
+;;   ./lg scripts/disasm-bundle.lg pkg/rt/core_compiled.lgb
+;;   DISASM_LGB=pkg/rt/core_compiled.lgb ./lg scripts/disasm-bundle.lg
+;;
+;; Programmatic: (disasm-bundle "p.lgb") returns the lazy ns seq, so
+;;   (take 2 (disasm-bundle ...)) realizes (and disassembles) only 2 namespaces.
+
+(defn- lazy-entries
+  "Lazy seq over decoded namespace entries; each element's disassembly is
+   deferred until the element is realized (so `take` bounds the work)."
+  [entries]
+  (lazy-seq
+    (when (seq entries)
+      (let [e (first entries)]
+        (cons {:ns          (:ns e)
+               :chunk-index (:chunk-index e)
+               :code        (disasm/disassemble-resolved (:chunk e))}
+              (lazy-entries (rest entries)))))))
+
+(defn disasm-bundle
+  "Lazy seq of per-namespace EDN disassembly records (with resolved operands)
+   for the .lgb file at `path`."
+  [path]
+  (lazy-entries (:namespaces (disasm/decode-bundle path))))
+
+(defn bundle-consts
+  "The bundle's shared const pool, projected to EDN-safe identities."
+  [path]
+  (:consts (disasm/decode-bundle path)))
+
+;; --- standalone entry: stream EDN to stdout -------------------------------
+(let [path (or (System/getenv "DISASM_LGB")
+               (last os/args))]
+  (if (or (nil? path) (not (ends-with? (str path) ".lgb")))
+    (do (println "usage: lg scripts/disasm-bundle.lg <file.lgb>   (or set DISASM_LGB)")
+        (System/exit 1))
+    (let [b (disasm/decode-bundle path)]
+      (prn {:bundle-consts (:consts b)})
+      (doseq [entry (lazy-entries (:namespaces b))]
+        (prn entry)))))
