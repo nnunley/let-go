@@ -1,0 +1,30 @@
+;; `binding` must restore dynamic vars on EVERY exit from its body, including a
+;; non-local exit via `throw` — Clojure wraps the body in try/finally. Without
+;; that, a throwing body leaks the binding: e.g. `*ns*` stays pointed at a
+;; scratch namespace, which silently corrupts later unqualified-symbol
+;; resolution in any code that shares the runtime (the bug this guards).
+(ns test.binding-unwind-test
+  (:require
+   [test :refer :all]))
+
+(def ^:dynamic *probe* :root)
+
+(deftest binding-restores-on-throw
+  (testing "a custom dynamic var is restored after the body throws"
+    (is (= :root *probe*))
+    (try (binding [*probe* :bound] (throw (ex-info "boom" {})))
+         (catch e nil))
+    (is (= :root *probe*) "dynamic var must be restored after a throwing body")))
+
+(deftest binding-restores-ns-on-throw
+  (testing "*ns* is restored after a throwing binding body"
+    (let [before (str *ns*)]
+      (try (binding [*ns* (the-ns 'clojure.core)] (throw (ex-info "x" {})))
+           (catch e nil))
+      (is (= before (str *ns*)) "*ns* must be restored after a throwing binding body"))))
+
+(deftest binding-normal-still-works
+  (testing "the non-throwing path still binds and restores, and yields the body value"
+    (is (= :root *probe*))
+    (is (= :bound (binding [*probe* :bound] *probe*)))
+    (is (= :root *probe*))))
