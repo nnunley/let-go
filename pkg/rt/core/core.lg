@@ -873,12 +873,20 @@
         attr  (if (map? (first forms)) (first forms) nil)
         forms (if (map? (first forms)) (next forms) forms)
         args  (first forms)
-        body  (next forms)]
+        body  (next forms)
+        ;; `name` may be the reader-emitted `(with-meta sym {..})` form when
+        ;; the macro is declared with metadata (e.g. `^:private`). Pass that
+        ;; wrapped form to the inner `defn` (it threads the metadata onto the
+        ;; var via `def-meta-name`), but unwrap to the bare symbol for the
+        ;; `(var ..)` ref — `var` only accepts a Symbol.
+        bare  (if (and (seq? name) (= 'with-meta (first name)))
+                (first (next name))
+                name)]
     (list 'do
           (cons 'defn (cons name (concat (if (string? doc) (list doc) nil)
                                          (if (nil? attr) nil (list attr))
                                          (cons args body))))
-          (list 'set-macro! (list 'var name)))))
+          (list 'set-macro! (list 'var bare)))))
 
 (defmacro while [test & body]
   `(loop* [] (when ~test ~@body (recur))))
