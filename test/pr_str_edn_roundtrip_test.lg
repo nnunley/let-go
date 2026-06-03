@@ -1,0 +1,31 @@
+;; pr-str must emit EDN-conformant string escapes so its output round-trips
+;; through the reader. Regression guard: String.String() previously used Go's
+;; fmt %q, which emits \xNN / \a / \v for control chars — sequences the reader
+;; rejects ("unknown escape sequence \x") and which are not valid EDN. So
+;; pr-str could not round-trip its own output (notably ANSI-colored strings
+;; like "[32m..."). The fix emits \uXXXX for control chars instead.
+(ns test.pr-str-edn-roundtrip-test
+  (:require
+   [clojure.string :as str]
+   [test :refer :all]))
+
+(deftest pr-str-roundtrips-control-chars
+  (testing "every control char round-trips through pr-str -> read-string"
+    (let [s (apply str (map char [27 9 10 13 8 12 0 127]))]
+      (is (= s (read-string (pr-str s)))))))
+
+(deftest pr-str-roundtrips-ansi
+  (testing "ANSI-colored string round-trips (the %q regression case)"
+    (let [s (str (char 27) "[32mgreen" (char 27) "[0m")]
+      (is (= s (read-string (pr-str s)))))))
+
+(deftest pr-str-emits-edn-escapes-not-go-hex
+  (testing "control chars emit \\uXXXX, never Go's \\xNN"
+    (let [out (pr-str (str (char 27)))]
+      (is (not (str/includes? out "\\x")))
+      (is (str/includes? out "\\u001B")))))
+
+(deftest pr-str-leaves-printable-unchanged
+  (testing "printable ASCII and Unicode pass through unescaped"
+    (is (= "hello" (read-string (pr-str "hello"))))
+    (is (= "héllo→λ" (read-string (pr-str "héllo→λ"))))))

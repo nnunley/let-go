@@ -1,0 +1,97 @@
+(ns malli-shims.prelude)
+
+;; Host-class / JVM-stdlib shims that let stock metosin/malli load and run on
+;; let-go. Loaded (require'd) before malli.core. The in-ns excursions install
+;; functions into core/string/host-class namespaces and patch malli.impl.util.
+
+(in-ns 'TimeUnit) (def MILLISECONDS :millis)
+(in-ns 'System) (defn arraycopy [src spos dst dpos len] (dotimes [i len] (aset dst (+ dpos i) (aget src (+ spos i)))) nil)
+(in-ns 'core)
+(register-host-class! "java.util.Map" (type {})) (register-host-class! "java.util.AbstractList" (type [])) (register-host-class! "java.util.Vector" (type [])) (register-host-class! "CharSequence" (type ""))
+;; java.util.regex.Pattern -> let-go's Regex type (malli keys :re schema on it).
+(register-host-class! "Pattern" (type #"x"))
+;; java.lang.Number coercion methods malli's regex cache calls on positions
+;; via :clj-only splices (e.g. (.longValue ^Long pos)); identity on let-go.
+(register-host-method! (type 0) 'longValue (fn [n] n))
+(register-host-method! (type 0) 'intValue (fn [n] n))
+(register-host-method! (type 0.0) 'longValue (fn [n] n))
+(register-host-method! (type 0.0) 'doubleValue (fn [n] n))
+(def class type) (register-host-method! (type (type {})) 'isArray (fn [_] false))
+(defmulti print-method (fn [v w] :default))
+;; unchecked-{inc,dec,add,multiply}-int now ship in core (dropped here).
+(defn indexed? [c] (or (vector? c) (string? c)))
+;; uri? has no host type on let-go (no java.net.URI); stubbed false so the :uri
+;; schema exists but never matches. (bytes?, ns-resolve, *unchecked-math*,
+;; eduction, every-pred, ->MapEntry all now ship in core — dropped here.)
+(defn uri? [x] false)
+;; hash-combine: KEEP this override. core's hash-combine is the faithful
+;; clojure.core one — [x y] mixing two hash codes; it does NOT hash its args.
+;; But malli.impl.regex's :bb path calls (hash-combine acc raw-value) relying on
+;; hash-combine hashing its 2nd argument (see the comment in its source), so
+;; malli needs this internal-hashing variant. Intentionally shadows core's.
+(defn hash-combine [seed x]
+  (bit-and 0x7fffffff
+           (bit-xor seed (+ (hash x) 0x9e3779b9 (bit-shift-left seed 6) (bit-shift-right seed 2)))))
+;; java.util.ArrayDeque used as a mutable stack by malli.impl.regex's parser drivers.
+(deftype LGArrayDeque [^:mutable items])
+(defn ->ArrayDeque [] (->LGArrayDeque (list)))
+(register-host-method! LGArrayDeque 'push (fn [d x] (set-field! d 'items (cons x (.items d))) nil))
+(register-host-method! LGArrayDeque 'pop (fn [d] (let [its (.items d)] (set-field! d 'items (rest its)) (first its))))
+(register-host-method! LGArrayDeque 'isEmpty (fn [d] (empty? (.items d))))
+(deftype LGFutureTask [thunk result]) (defn ->FutureTask [f] (->LGFutureTask f (promise)))
+(deftype LGThread [task]) (defn ->Thread [task] (->LGThread task))
+(register-host-method! LGThread 'start (fn [t] (let [tk (.task t)] (future (deliver (.result tk) ((.thunk tk)))) nil)))
+(register-host-method! LGFutureTask 'get (fn [tk ms _] (deref (.result tk) ms :timeout)))
+(register-host-method! LGFutureTask 'cancel (fn [tk _] true))
+(deftype LGHashMap [^:mutable m]) (defn ->HashMap ([] (->LGHashMap {})) ([_] (->LGHashMap {})) ([_ _] (->LGHashMap {})))
+(register-host-method! LGHashMap 'putAll (fn [hm o] (set-field! hm 'm (merge (.m hm) o)) hm))
+(register-host-method! LGHashMap 'get (fn [hm k] (get (.m hm) k)))
+;; malli.impl.util/-vmap uses java.util.Iterator interop (.iterator/.hasNext/
+;; .next) on its input. Pre-require util and override -vmap with a pure-Clojure
+;; mapv — same result, no host iterator seam needed.
+(require 'malli.impl.util)
+(in-ns 'malli.impl.util)
+(defn -vmap ([os] (mapv identity os)) ([f os] (mapv f os)))
+(in-ns 'core)
+
+;; --- java.time / java.util shims for malli.transform ----------------------
+;; let-go has no JVM date/uuid/uri/decimal types. These let the transform ns
+;; LOAD (its formatter defs run at load time) and degrade those coercions to
+;; identity; the common string<->scalar coercions (int/double/keyword/boolean/
+;; symbol) work normally. malli wraps every host coercion in (if (string? x)
+;; ... (catch _ x)), so an opaque/identity stub is a safe no-op.
+(defn inst-ms [_] 0)
+;; Opaque java.time formatter: a deftype whose builder/formatter methods are
+;; all fluent no-ops, so (-> (DateTimeFormatterBuilder.) .appendPattern ...
+;; .toFormatter) yields a value that is simply never exercised off the date path.
+(deftype LGDateFmt [])
+(doseq [m '(appendPattern optionalStart optionalEnd appendFraction appendOffset
+             parseDefaulting withZone toFormatter)]
+  (register-host-method! LGDateFmt m (fn [d & _] d)))
+(register-host-method! LGDateFmt 'parse  (fn [_ s] s))
+(register-host-method! LGDateFmt 'format (fn [_ x] (str x)))
+(defn ->DateTimeFormatterBuilder [] (->LGDateFmt))
+;; Degrading constructors for (URI. x) / (BigDecimal. x): return input unchanged.
+(defn ->URI [x] x)
+(defn ->BigDecimal [x] x)
+(defn ->IllegalArgumentException [& _] (ex-info "IllegalArgumentException" {}))
+;; (Object.) is used as a fresh-identity not-found sentinel (compared with
+;; identical?); each call must yield a unique object. A fresh deftype instance
+;; has unique reference identity, so it serves the same role.
+(deftype LGObject [])
+(defn ->Object [& _] (->LGObject))
+;; Long/parseLong & Float/parseFloat: the real string->number coercions. Throw
+;; on an unparseable string so malli's surrounding catch returns the input
+;; unchanged (parse-long/parse-double return nil there, which would differ).
+(in-ns 'Long)  (defn parseLong  [s] (core/or (core/parse-long s)   (throw (core/ex-info "NumberFormatException" {}))))
+(in-ns 'Float) (defn parseFloat [s] (core/or (core/parse-double s) (throw (core/ex-info "NumberFormatException" {}))))
+(in-ns 'core)
+;; Class/STATIC members resolve as <Class>/<member> — i.e. an in-ns'd namespace.
+(in-ns 'DateTimeFormatter) (defn ofPattern [& _] (core/->LGDateFmt))
+(in-ns 'ChronoField) (def MICRO_OF_SECOND :micro) (def HOUR_OF_DAY :hour) (def OFFSET_SECONDS :offset)
+(in-ns 'ZoneId) (defn of [& _] :utc)
+(in-ns 'UUID) (defn fromString [s] s)
+(in-ns 'Instant) (defn from [x] x) (defn ofEpochMilli [x] x)
+(in-ns 'Date) (defn from [x] x)
+(in-ns 'core)
+;; clojure.string/replace-first now ships in let-go's string ns (dropped here).
