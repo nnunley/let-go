@@ -53,6 +53,15 @@ func TestRunner(t *testing.T) {
 	// example libraries like gogen.
 	rt.SetNSLoader(resolver.NewNSResolver(loaderCtx, []string{".", "../examples/go-gen"}))
 
+	// Per-file isolation baseline: a snapshot of the (clean) dynamic-binding
+	// state taken before any test file runs. Each file is executed within this
+	// scope and *ns* is reset below, so a file that leaves a dynamic var dirty
+	// — e.g. *ns* left pointing at a scratch namespace by an in-ns or a
+	// throwing (binding [*ns* ...] ...) body — cannot corrupt the unqualified
+	// symbol resolution of files that run after it in this shared runtime.
+	cleanBindings := vm.SnapshotBindings()
+	coreNS := rt.NS(rt.NameCoreNS)
+
 	file, err := os.Open("./")
 	assert.NoError(t, err)
 	// removed unused names := file.Readdirnames(0)
@@ -78,20 +87,29 @@ func TestRunner(t *testing.T) {
 		}
 		name := info.Name()
 		t.Run(name, func(t *testing.T) {
-			// reset registry for per-file isolation
-			_, _, cerr := compiler.NewCompiler(consts, rt.NS("test")).CompileMultiple(strings.NewReader("(clear-registered-tests!)"))
-			assert.NoError(t, cerr)
+			// Reset *ns* to a clean baseline (clojure.core) so a prior file's
+			// leaked current-namespace doesn't carry over, then run the file's
+			// compile+test cycle within the clean dynamic-binding scope so any
+			// bindings it leaks are dropped afterward. Together these isolate
+			// each file's runtime state from the next.
+			rt.CurrentNS.SetRoot(coreNS)
+			_, _ = vm.RunWithBindings(cleanBindings, func() (vm.Value, error) {
+				// reset registry for per-file isolation
+				_, _, cerr := compiler.NewCompiler(consts, rt.NS("test")).CompileMultiple(strings.NewReader("(clear-registered-tests!)"))
+				assert.NoError(t, cerr)
 
-			// compile the file to define tests
-			cerr = runFile(path)
-			assert.NoError(t, cerr)
+				// compile the file to define tests
+				cerr = runFile(path)
+				assert.NoError(t, cerr)
 
-			// run only this file's tests
-			outcomeVar := rt.NS("test").Lookup("*test-result*").(*vm.Var)
-			_, _, cerr = compiler.NewCompiler(consts, rt.NS("test")).CompileMultiple(strings.NewReader("(run-tests)"))
-			assert.NoError(t, cerr)
-			outcome := bool(outcomeVar.Deref().(vm.Boolean))
-			assert.True(t, outcome, "some tests failed in "+name)
+				// run only this file's tests
+				outcomeVar := rt.NS("test").Lookup("*test-result*").(*vm.Var)
+				_, _, cerr = compiler.NewCompiler(consts, rt.NS("test")).CompileMultiple(strings.NewReader("(run-tests)"))
+				assert.NoError(t, cerr)
+				outcome := bool(outcomeVar.Deref().(vm.Boolean))
+				assert.True(t, outcome, "some tests failed in "+name)
+				return vm.NIL, nil
+			})
 		})
 		return nil
 	})
