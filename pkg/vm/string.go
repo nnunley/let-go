@@ -163,6 +163,40 @@ func (l String) ValueAtOr(key Value, dflt Value) Value {
 	return Char(r[numkey])
 }
 
+// String returns the EDN/Clojure-readable form: surrounded by double quotes
+// with EDN-conformant escapes. NOTE: Go's %q emits \xNN / \a / \v for control
+// chars, which the reader rejects ("unknown escape sequence \x") and which are
+// not valid EDN — so %q did not round-trip its own output (e.g. ANSI-colored
+// strings like "\x1b[32m..."). Escapes here match the reader's accepted set
+// (reader.go): \" \\ \t \r \n \b \f, and \uXXXX for everything else below
+// 0x20 plus DEL; printable Unicode passes through as raw UTF-8.
 func (l String) String() string {
-	return fmt.Sprintf("%q", string(l))
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range string(l) {
+		switch r {
+		case '"':
+			b.WriteString(`\"`)
+		case '\\':
+			b.WriteString(`\\`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\f':
+			b.WriteString(`\f`)
+		default:
+			if r < 0x20 || r == 0x7f {
+				fmt.Fprintf(&b, `\u%04X`, r)
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
