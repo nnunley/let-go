@@ -579,13 +579,19 @@
   (let [pairs (partition 2 bindings)
         pushes (map (fn [p] (list 'push-binding! (list 'var (first p)) (second p))) pairs)
         pops   (map (fn [p] (list 'pop-binding! (list 'var (first p)))) pairs)]
+    ;; The pops MUST run on every exit from the body — including a non-local
+    ;; exit via `throw`. Clojure guarantees this with try/finally; without it
+    ;; a throwing body leaks the dynamic bindings (e.g. *ns* left pointing at
+    ;; a scratch namespace), which corrupts later unqualified-symbol
+    ;; resolution. `try` yields the body value; `finally` runs the pops for
+    ;; effect on both normal and exceptional unwind.
     (concat-list
       (list 'do)
       (concat-list
         (vec pushes)
-        (cons (list 'let ['binding__result (cons 'do body)]
-                    (cons 'do (concat-list (vec pops) (list 'binding__result))))
-              nil)))))
+        (list (list 'try
+                    (cons 'do body)
+                    (cons 'finally pops)))))))
 
 (defmacro bound-fn [& fntail]
   (list 'bound-fn* (cons 'fn fntail)))

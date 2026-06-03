@@ -19,9 +19,6 @@
 # Local sandboxed Go build cache used by Codex/test runs
 .gocache/
 
-# Go interop lazy binary (build artifact)
-go_interop_lazy
-
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
@@ -179,6 +176,7 @@ pkg/rt/.core_compiled.lgb.committed
 # `lgbgen --target=go` (via `make generate` / `make check-generated`). Their
 # self-lower is wall-clock-nondeterministic, so committing them would churn;
 # the untagged build and shipped bytecode binary never need them.
+pkg/rt/generated.provenance
 pkg/rt/core_go_lowered/
 /lg_gogen_ir.go
 /cmd/lgbgen/main_gogen_ir.go
