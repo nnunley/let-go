@@ -61,18 +61,38 @@ jobs:
           echo "snapshot_name=${snapshot_name}" >> "${GITHUB_OUTPUT}"
           echo "snapshot_tmp=${snapshot_tmp}" >> "${GITHUB_OUTPUT}"
 
-      - name: Commit perf snapshot and page
+      # Timeline snapshots are append-only data, NOT source. Publishing them
+      # to main would (a) be rejected by branch protection ("changes must go
+      # through a PR") and (b) bloat main with a multi-thousand-line JSON per
+      # commit. Instead we push to a dedicated, unprotected `perf-data` branch
+      # holding only docs/perf/timeline/*.json. The live "Are we fast yet?"
+      # page (pages.yml) reads the timeline from this branch at deploy time.
+      - name: Publish snapshot to perf-data branch
         run: |
-          git checkout -B main origin/main
-          git pull --rebase origin main
-          mkdir -p docs/perf/timeline
-          cp "${{ steps.perf.outputs.snapshot_tmp }}" "docs/perf/timeline/${{ steps.perf.outputs.snapshot_name }}"
-          go run ./cmd/perf-page -out docs/perf/index.html
+          set -euo pipefail
+          snapshot_tmp="${{ steps.perf.outputs.snapshot_tmp }}"
+          snapshot_name="${{ steps.perf.outputs.snapshot_name }}"
+          remote="https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git"
+          wt="${RUNNER_TEMP}/perf-data"
 
-          git add docs/perf/timeline docs/perf/index.html
-          if git diff --cached --quiet; then
+          if git ls-remote --exit-code --heads "$remote" perf-data >/dev/null 2>&1; then
+            git clone --depth 1 --branch perf-data "$remote" "$wt"
+          else
+            # First run: create the orphan branch with no history/files.
+            git clone --depth 1 "$remote" "$wt"
+            git -C "$wt" checkout --orphan perf-data
+            git -C "$wt" rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          mkdir -p "$wt/timeline"
+          cp "$snapshot_tmp" "$wt/timeline/$snapshot_name"
+
+          git -C "$wt" config user.name "github-actions[bot]"
+          git -C "$wt" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$wt" add timeline
+          if git -C "$wt" diff --cached --quiet; then
             echo "No perf changes to commit."
             exit 0
           fi
-          git commit -m "perf: record timeline snapshot for ${{ github.sha }}"
-          git push origin HEAD:main
+          git -C "$wt" commit -m "perf: record timeline snapshot for ${{ github.sha }}"
+          git -C "$wt" push "$remote" HEAD:perf-data

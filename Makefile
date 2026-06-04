@@ -237,5 +237,18 @@ fanout-ratchet-update: build
 fanout-ratchet-show: build
 	./lg scripts/fanout-ratchet.lg show --go "$$(command -v go)"
 
+# Combined speed + size gates. Both ratchets need the gogen_ir lowered tree, and
+# each would otherwise regenerate it (the dominant cost). `ratchets` regenerates
+# it ONCE via `lowered`, runs the speed gate against it, then runs the size gate
+# with --no-regen so it reuses the same tree — ~halving wall time vs running
+# `make bench-ratchet fanout-ratchet`. Use this in CI.
+ratchets: build lowered
+	go run ./cmd/bench-ratchet check
+	./lg scripts/fanout-ratchet.lg check --go "$$(command -v go)" --no-regen
+
+ratchets-update: build lowered
+	go run ./cmd/bench-ratchet update
+	./lg scripts/fanout-ratchet.lg update --go "$$(command -v go)" --no-regen
+
 # PHONY targets are for ones that have conflicting files/dirs present:
-.PHONY: test bench-ratchet bench-ratchet-update bench-ratchet-show perf-page perf-snapshot install-hooks check-generated fanout-ratchet fanout-ratchet-update fanout-ratchet-show
+.PHONY: test bench-ratchet bench-ratchet-update bench-ratchet-show perf-page perf-snapshot install-hooks check-generated fanout-ratchet fanout-ratchet-update fanout-ratchet-show ratchets ratchets-update

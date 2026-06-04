@@ -909,18 +909,28 @@
                        (- (count args) 1)   ; only & doesn't count; rest-sym occupies a frame slot
                        (count args)))]
     (if *ir-compile*
-      (let [_          (intern (deref #'*ns*) name)
-            whole-form (apply list 'defn name forms)
-            cf-var     (resolve 'ir.passes.pipeline/compile-form)
-            _          (when (nil? cf-var)
-                         (throw "*ir-compile* is true but ir.passes.pipeline isn't loaded; (require 'ir.passes.pipeline) first"))
-            result     (cf-var whole-form (deref #'*ns*))]
-        (if single?
-          ;; Single-arity: result is a lowered chunk
-          (let [fn-val (chunk->fn arity variadic? result)]
-            (list 'def def-name fn-val))
-          ;; Multi-arity: result is the raw *MultiArityFn value
-          (list 'def def-name result)))
+      (let [cf-var (resolve 'ir.passes.pipeline/compile-form)]
+        (when (nil? cf-var)
+          (throw "*ir-compile* is true but ir.passes.pipeline isn't loaded; (require 'ir.passes.pipeline) first"))
+        ;; HYBRID: attempt to lower this body through the IR pipeline, but fall
+        ;; back to the standard bytecode compile when compile-form can't handle
+        ;; it (interop, unsupported forms, …). Without this, a single
+        ;; unlowerable defn aborts compilation — turning *ir-compile* into an
+        ;; all-or-nothing switch that collapses over real corpora. compile-form
+        ;; returns a non-chunk (an error String) on failure and chunk->fn then
+        ;; throws; the try captures both that and any pipeline error.
+        (or (try
+              (let [_          (intern (deref #'*ns*) name)
+                    whole-form (apply list 'defn name forms)
+                    result     (cf-var whole-form (deref #'*ns*))]
+                (if single?
+                  ;; Single-arity: result is a lowered chunk
+                  (list 'def def-name (chunk->fn arity variadic? result))
+                  ;; Multi-arity: result is the raw *MultiArityFn value
+                  (list 'def def-name result)))
+              (catch e nil))
+            ;; Fallback: standard bytecode compile (same as *ir-compile* off).
+            `(def ~def-name (fn ~@forms))))
       `(def ~def-name (fn ~@forms)))))
 
 (defmacro defmacro [name & forms]

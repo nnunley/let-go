@@ -527,6 +527,21 @@ type captureJob struct {
 	tags    string
 	filter  *regexp.Regexp
 	variant string
+	// count overrides the CLI -count for this job. 0 means "use the
+	// CLI/default count". Slow whole-corpus jobs (the Clojure test suite)
+	// pin this to 1 so they don't run a multi-minute pass three times.
+	count int
+	// env is extra KEY=VALUE entries appended to the `go test` environment for
+	// this job, e.g. "LG_SUITE_IR=1" to select an IR-compile suite variant.
+	env []string
+}
+
+// effectiveCount returns the per-job count override when set, else def.
+func (j captureJob) effectiveCount(def int) int {
+	if j.count > 0 {
+		return j.count
+	}
+	return def
 }
 
 // buildJobs decides what gets benchmarked:
@@ -563,12 +578,13 @@ func buildJobs(packages, tags string, full, manual bool, filterRE *regexp.Regexp
 		}
 		jobs := []captureJob{
 			{pkg: anchorPackage, tags: tags, filter: filterRE},
-			{pkg: suitePackage, tags: "", filter: suiteRE, variant: "bytecode"},
-			{pkg: suitePackage, tags: "gogen_ir", filter: suiteRE, variant: "gogen_ir"},
+			{pkg: suitePackage, tags: "", filter: suiteRE, variant: "bytecode", count: 1},
+			{pkg: suitePackage, tags: "", filter: suiteRE, variant: "ir_bytecode", count: 1, env: []string{"LG_SUITE_IR=1"}},
+			{pkg: suitePackage, tags: "gogen_ir", filter: suiteRE, variant: "aot_native", count: 1, env: []string{"LG_SUITE_IR=1"}},
 			{pkg: irCompilePackage, tags: "", filter: irCompileRE, variant: "bytecode"},
 			{pkg: irCompilePackage, tags: "gogen_ir", filter: irCompileRE, variant: "gogen_ir"},
 		}
-		return jobs, "full profile (vm fleet + jank ×2 + ir-compile ×2)", nil
+		return jobs, "full profile (vm fleet + jank ×3 + ir-compile ×2)", nil
 	default:
 		anchorRE, err := regexp.Compile(anchorFilter)
 		if err != nil {
@@ -584,12 +600,13 @@ func buildJobs(packages, tags string, full, manual bool, filterRE *regexp.Regexp
 		}
 		jobs := []captureJob{
 			{pkg: anchorPackage, tags: "", filter: anchorRE},
-			{pkg: suitePackage, tags: "", filter: suiteRE, variant: "bytecode"},
-			{pkg: suitePackage, tags: "gogen_ir", filter: suiteRE, variant: "gogen_ir"},
+			{pkg: suitePackage, tags: "", filter: suiteRE, variant: "bytecode", count: 1},
+			{pkg: suitePackage, tags: "", filter: suiteRE, variant: "ir_bytecode", count: 1, env: []string{"LG_SUITE_IR=1"}},
+			{pkg: suitePackage, tags: "gogen_ir", filter: suiteRE, variant: "aot_native", count: 1, env: []string{"LG_SUITE_IR=1"}},
 			{pkg: irCompilePackage, tags: "", filter: irCompileRE, variant: "bytecode"},
 			{pkg: irCompilePackage, tags: "gogen_ir", filter: irCompileRE, variant: "gogen_ir"},
 		}
-		return jobs, "fast gate (jank ×2 + ir-compile ×2 + anchor)", nil
+		return jobs, "fast gate (jank ×3 + ir-compile ×2 + anchor)", nil
 	}
 }
 
@@ -609,8 +626,15 @@ func captureJobs(jobs []captureJob, count int, benchtime, timeout, outPath strin
 		if j.tags != "" {
 			label += " -tags " + j.tags
 		}
+		jobCount := j.effectiveCount(count)
+		if jobCount != count {
+			label += fmt.Sprintf(" (count=%d)", jobCount)
+		}
+		for _, e := range j.env {
+			label += " " + e
+		}
 		fmt.Fprintf(os.Stderr, "  [%d/%d] %s ... ", i+1, len(jobs), label)
-		n, err := captureOnePackage(j.pkg, count, benchtime, timeout, j.tags, j.filter, j.variant, enc, out)
+		n, err := captureOnePackage(j.pkg, jobCount, benchtime, timeout, j.tags, j.filter, j.variant, j.env, enc, out)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warn: %v (%d records captured)\n", err, n)
 			continue
@@ -627,7 +651,7 @@ func captureJobs(jobs []captureJob, count int, benchtime, timeout, outPath strin
 // Returns the number of records written. An error indicates the go
 // test invocation itself failed (timeout, build error, missing
 // package). Partial results before the failure are still flushed.
-func captureOnePackage(pkg string, count int, benchtime, timeout, tags string, filter *regexp.Regexp, variant string, enc *json.Encoder, sync *os.File) (int, error) {
+func captureOnePackage(pkg string, count int, benchtime, timeout, tags string, filter *regexp.Regexp, variant string, env []string, enc *json.Encoder, sync *os.File) (int, error) {
 	args := []string{
 		"test",
 		"-run", "^$",
@@ -642,6 +666,9 @@ func captureOnePackage(pkg string, count int, benchtime, timeout, tags string, f
 	}
 	args = append(args, pkg)
 	cmd := exec.Command("go", args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return 0, fmt.Errorf("stdout pipe: %w", err)

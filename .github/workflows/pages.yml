@@ -19,6 +19,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The perf trend snapshots live on the unprotected `perf-data` branch
+      # (written by perf-timeline.yml), NOT on main. Pull them into the path
+      # perf-page reads by default (docs/perf/timeline) so the "Are we fast
+      # yet?" charts render. Missing branch / no snapshots yet → empty charts.
+      - name: Fetch perf timeline from perf-data branch
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin perf-data >/dev/null 2>&1; then
+            git fetch --depth 1 origin perf-data
+            rm -rf docs/perf/timeline
+            mkdir -p docs/perf
+            if git checkout FETCH_HEAD -- timeline 2>/dev/null; then
+              mv timeline docs/perf/timeline
+              echo "Loaded $(ls docs/perf/timeline | wc -l) timeline snapshot(s) from perf-data."
+            else
+              mkdir -p docs/perf/timeline
+              echo "perf-data has no timeline/ yet; charts will be empty."
+            fi
+          else
+            echo "perf-data branch does not exist yet; charts will be empty."
+          fi
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
