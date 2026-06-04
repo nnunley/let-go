@@ -60,9 +60,10 @@ func (r *LGReader) String() string {
 
 // LGWriter wraps any io.Writer with optional buffering and close.
 type LGWriter struct {
-	raw    io.Writer
-	bw     *bufio.Writer
-	closer io.Closer
+	raw      io.Writer
+	bw       *bufio.Writer
+	closer   io.Closer
+	readably bool
 }
 
 func newLGWriter(w io.Writer, closer io.Closer) *LGWriter {
@@ -78,6 +79,12 @@ func (w *LGWriter) Buffered() *bufio.Writer {
 
 func (w *LGWriter) Write(p []byte) (int, error) {
 	return w.raw.Write(p)
+}
+
+// WriteString writes s to the underlying writer. Gives .lg callers a
+// string-typed write (Go's Write takes []byte); used by print-method methods.
+func (w *LGWriter) WriteString(s string) (int, error) {
+	return w.raw.Write([]byte(s))
 }
 
 func (w *LGWriter) Flush() error {
@@ -361,6 +368,54 @@ func installIoNS() {
 		return vm.NewBoxed(newLGReader(resp.Body, resp.Body)), nil
 	})
 	ReadableProto.Extend(urlMapping.RecType, protoImplMap("make-reader", urlReaderImpl))
+
+	// Extend IReadable for io/resource handles. Resource is a boxed Go value
+	// (not a Record), so the protocol is extended on the boxed type handle —
+	// vm.NewBoxed(&Resource{}).Type() resolves to the cached type shared by
+	// every boxed *Resource.
+	resourceReaderImpl, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		b, ok := vs[0].(*vm.Boxed)
+		if !ok {
+			return vm.NIL, fmt.Errorf("make-reader expected resource handle")
+		}
+		res, ok := b.Unbox().(*Resource)
+		if !ok {
+			return vm.NIL, fmt.Errorf("make-reader expected resource handle")
+		}
+		rc, found := res.Open()
+		if !found {
+			return vm.NIL, fmt.Errorf("resource not found: %s", res.Name)
+		}
+		return vm.NewBoxed(newLGReader(rc, rc)), nil
+	})
+	ReadableProto.Extend(vm.NewBoxed(&Resource{}).Type(), protoImplMap("make-reader", resourceReaderImpl))
+
+	// io/resource — locate a resource by name on the current ResourceProvider.
+	// Returns a reader-coercible handle, or nil if the resource is absent (no
+	// provider installed, name escapes the root, or not found).
+	resourcef, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.NIL, fmt.Errorf("io/resource expects 1 arg")
+		}
+		name, ok := vs[0].(vm.String)
+		if !ok {
+			return vm.NIL, fmt.Errorf("io/resource expected String name, got %s", vs[0].Type().Name())
+		}
+		clean, ok := NormalizeResourceName(string(name))
+		if !ok {
+			return vm.NIL, nil
+		}
+		p := GetResourceProvider()
+		if p == nil {
+			return vm.NIL, nil
+		}
+		rc, found := p.Open(clean)
+		if !found {
+			return vm.NIL, nil
+		}
+		rc.Close()
+		return vm.NewBoxed(NewResource(clean, p)), nil
+	})
 
 	// io/reader — coerce to reader
 	reader, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
@@ -731,6 +786,9 @@ func installIoNS() {
 	// File helpers
 	ns.Def("read-lines", readLines)
 	ns.Def("write-lines", writeLines)
+
+	// Resources
+	ns.Def("resource", resourcef)
 
 	// --- URL ---
 

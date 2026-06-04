@@ -200,6 +200,25 @@
 (defn unchecked-inc [x] (unchecked-add x 1))
 (defn unchecked-dec [x] (unchecked-subtract x 1))
 
+;; *-int variants: on the JVM these select 32-bit int overflow semantics.
+;; let-go has no 32-bit int (all ints are int64), so they collapse to the
+;; same native unchecked-* ops, just like unchecked-inc / unchecked-dec.
+(defn unchecked-inc-int [x] (unchecked-add x 1))
+(defn unchecked-dec-int [x] (unchecked-subtract x 1))
+(defn unchecked-add-int [x y] (unchecked-add x y))
+(defn unchecked-multiply-int [x y] (unchecked-multiply x y))
+
+;; *unchecked-math*: a JVM compiler knob toggling unchecked arithmetic for
+;; the +/-/* family. let-go has no such compile mode, so this is an honest
+;; no-op dynamic var (default false), present so code that `set!`s it loads.
+(def ^:dynamic *unchecked-math* false)
+
+;; hash-combine: mixes two hash codes into one, order-sensitive. The faithful
+;; clojure.core/hash-combine (clojure.lang.Util/hashCombine) — takes two ints,
+;; does not hash its arguments.
+(defn hash-combine [x y]
+  (bit-xor x (+ y 0x9e3779b9 (bit-shift-left x 6) (bit-shift-right x 2))))
+
 (defn num [x]
   (if (nil? x) nil
     (if (number? x) x
@@ -560,13 +579,19 @@
   (let [pairs (partition 2 bindings)
         pushes (map (fn [p] (list 'push-binding! (list 'var (first p)) (second p))) pairs)
         pops   (map (fn [p] (list 'pop-binding! (list 'var (first p)))) pairs)]
+    ;; The pops MUST run on every exit from the body — including a non-local
+    ;; exit via `throw`. Clojure guarantees this with try/finally; without it
+    ;; a throwing body leaks the dynamic bindings (e.g. *ns* left pointing at
+    ;; a scratch namespace), which corrupts later unqualified-symbol
+    ;; resolution. `try` yields the body value; `finally` runs the pops for
+    ;; effect on both normal and exceptional unwind.
     (concat-list
       (list 'do)
       (concat-list
         (vec pushes)
-        (cons (list 'let ['binding__result (cons 'do body)]
-                    (cons 'do (concat-list (vec pops) (list 'binding__result))))
-              nil)))))
+        (list (list 'try
+                    (cons 'do body)
+                    (cons 'finally pops)))))))
 
 (defmacro bound-fn [& fntail]
   (list 'bound-fn* (cons 'fn fntail)))
@@ -589,23 +614,23 @@
     (cond
       (nil? ctor-var)
       (throw
-       (ex-info
-        (str "new: no constructor var " ctor-sym " for " class)
-        {:class class
-         :constructor ctor-sym
-         :check-type :constructor}))
+        (ex-info
+          (str "new: no constructor var " ctor-sym " for " class)
+          {:class class
+           :constructor ctor-sym
+           :check-type :constructor}))
 
       (ifn? ctor-var)
       (apply ctor-var args)
 
       :else
       (throw
-       (ex-info
-        (str "new: constructor var " ctor-sym " is not invokable")
-        {:class class
-         :constructor ctor-sym
-         :value ctor-var
-         :check-type :constructor})))))
+        (ex-info
+          (str "new: constructor var " ctor-sym " is not invokable")
+          {:class class
+           :constructor ctor-sym
+           :value ctor-var
+           :check-type :constructor})))))
 
 (defmacro new [class & args]
   `(let-go-new '~class ~@args))
@@ -904,12 +929,20 @@
         attr  (if (map? (first forms)) (first forms) nil)
         forms (if (map? (first forms)) (next forms) forms)
         args  (first forms)
-        body  (next forms)]
+        body  (next forms)
+        ;; `name` may be the reader-emitted `(with-meta sym {..})` form when
+        ;; the macro is declared with metadata (e.g. `^:private`). Pass that
+        ;; wrapped form to the inner `defn` (it threads the metadata onto the
+        ;; var via `def-meta-name`), but unwrap to the bare symbol for the
+        ;; `(var ..)` ref — `var` only accepts a Symbol.
+        bare  (if (and (seq? name) (= 'with-meta (first name)))
+                (first (next name))
+                name)]
     (list 'do
           (cons 'defn (cons name (concat (if (string? doc) (list doc) nil)
                                          (if (nil? attr) nil (list attr))
                                          (cons args body))))
-          (list 'set-macro! (list 'var name)))))
+          (list 'set-macro! (list 'var bare)))))
 
 (defmacro while [test & body]
   `(loop* [] (when ~test ~@body (recur))))
@@ -1254,6 +1287,15 @@
   ([xform coll]
    (transformer-seq* xform coll)))
 
+;; eduction: (eduction xform* coll) — compose the leading transducers and
+;; apply them to the trailing coll. The JVM returns a reusable reducible
+;; Eduction (re-runs the xform on every reduce, resetting stateful xforms);
+;; let-go has no reducible type, so this returns the seqable/reducible
+;; transformer-seq from `sequence`. Correct for single-pass use (seq/reduce
+;; once), which covers all current callers.
+(defn eduction [& xforms]
+  (sequence (apply comp (butlast xforms)) (last xforms)))
+
 ;; rseq is a native builtin (supports vectors, sorted-map, sorted-set)
 
 ;; some-fn: complement of every-pred — returns first truthy result or false
@@ -1265,6 +1307,11 @@
    (fn [& args]
      (or (some p1 args) (some p2 args) (some p3 args)
          (some (fn [p] (some p args)) ps) false))))
+
+;; every-pred: complement of some-fn — the returned fn is true iff EVERY
+;; predicate holds for EVERY argument.
+(defn every-pred [& ps]
+  (fn [& args] (every? (fn [p] (every? p args)) ps)))
 
 (defn merge
   ([] nil)
@@ -1353,6 +1400,30 @@
     ;; not satisfy that protocol — (key [:a 1]) must throw — so build a real
     ;; MapEntry here, matching every other entry-yielding path (first/seq/reduce).
     (clojure.lang.MapEntry/create key (get m key))))
+
+;; ->MapEntry: constructor for let-go's first-class MapEntry type (already
+;; mapped to a 2-element [k v] everywhere via MapEntryKV). Also what
+;; (MapEntry. k v) lowers to via let-go-new. The 3-arg arity exists for
+;; host-compat callers that pass a trailing value; the extra is ignored.
+(defn ->MapEntry
+  ([k v] (clojure.lang.MapEntry/create k v))
+  ([k v _] (clojure.lang.MapEntry/create k v)))
+
+;; ns-resolve: resolve a symbol as if from another namespace. Built on the
+;; native resolve/ns-name — a fully-qualified symbol resolves through the
+;; global namespace registry and yields nil for an absent ns or var (so this
+;; is lenient where the JVM's the-ns would throw). The 3-arg arity takes a
+;; &env-style map; a symbol shadowed by env resolves to nil (matches Clojure).
+(defn ns-resolve
+  ([ns sym] (ns-resolve ns nil sym))
+  ([ns env sym]
+   (when-not (and env (contains? env sym))
+     (resolve (symbol (str (if (symbol? ns) ns (ns-name ns)) "/" (name sym)))))))
+
+;; inst-ms: epoch-millisecond value of a let-go time value (e.g. (now), a
+;; boxed Go time.Time). Real, backed by Go time rather than a stub.
+(defn inst-ms [inst]
+  (.UnixMilli inst))
 
 (defn select-keys
   [map keyseq]
@@ -2505,6 +2576,50 @@
 ;; (defmethod name dispatch-val [args] body)
 (defmacro defmethod [name dispatch-val & fn-tail]
   (list 'set! name (list 'defmethod* name dispatch-val (cons 'fn fn-tail))))
+
+;; print-method: customizable printing. Dispatch on (type obj). The :default
+;; method is the native leaf renderer (-print-method-default), installed
+;; directly as an IFn (no .lg frame) for fast dispatch. Collection types get
+;; .lg methods (added in a later task) that recurse via pr-on.
+(defmulti print-method (fn [obj writer] (type obj)) :default :default)
+(set! print-method (defmethod* print-method :default -print-method-default))
+
+;; pr-on: route one value through print-method. *print-dup* is a standard
+;; clojure.core var whose faithful impl (a separate print-dup multimethod + #=
+;; reader forms) is deferred (tracked in issue #176); rather than silently
+;; ignore it, error clearly if it is set true.
+(defn pr-on [obj writer]
+  (when *print-dup*
+    (throw "print-dup is not supported yet (see issue #176); bind *print-dup* to false"))
+  (print-method obj writer))
+
+;; print-method collection methods: recurse through pr-on to honor custom
+;; element printing.
+(defn- pr-sequential [items open close w]
+  (.WriteString w open)
+  (loop [xs (seq items) first? true]
+    (when xs
+      (when-not first? (.WriteString w " "))
+      (pr-on (first xs) w)
+      (recur (next xs) false)))
+  (.WriteString w close))
+
+(defmethod print-method (type [])  [v w] (pr-sequential v "[" "]" w))
+(defmethod print-method (type (list)) [v w] (pr-sequential v "(" ")" w))
+(defmethod print-method (type #{}) [v w] (pr-sequential v "#{" "}" w))
+(defmethod print-method (type (range 0)) [v w] (pr-sequential v "(" ")" w))
+
+(defmethod print-method (type {}) [m w]
+  (.WriteString w "{")
+  (loop [es (seq m) first? true]
+    (when es
+      (when-not first? (.WriteString w ", "))
+      (let [e (first es)]
+        (pr-on (key e) w)
+        (.WriteString w " ")
+        (pr-on (val e) w))
+      (recur (next es) false)))
+  (.WriteString w "}"))
 
 ;; --- Array macros ---
 

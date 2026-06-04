@@ -341,6 +341,7 @@ func init() {
 	// happens from zz_run_installers.go::init which sorts last
 	// alphabetically so every file has registered first.
 	installLangNS()
+	installNativeDirectNS()
 	// walk namespace is embedded via WalkSrc and will be loaded on demand
 }
 
@@ -3035,25 +3036,6 @@ func installLangNS() {
 		return vm.NIL, nil
 	})
 
-	printlnf, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		b := &strings.Builder{}
-		for i := range vs {
-			if i > 0 {
-				b.WriteRune(' ')
-			}
-			if vs[i].Type() == vm.StringType {
-				b.WriteString(string(vs[i].(vm.String)))
-				continue
-			} else if vs[i].Type() == vm.CharType {
-				b.WriteRune(rune(vs[i].(vm.Char)))
-				continue
-			}
-			b.WriteString(vs[i].String())
-		}
-		fmt.Println(b)
-		return vm.NIL, nil
-	})
-
 	str, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
 		b := &strings.Builder{}
 		for i := range vs {
@@ -4843,79 +4825,40 @@ func installLangNS() {
 
 	// pr-str: print readably to string (with quotes on strings)
 	prStr, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		b := &strings.Builder{}
-		for i := range vs {
-			if i > 0 {
-				b.WriteRune(' ')
-			}
-			b.WriteString(vs[i].String())
-		}
-		return vm.String(b.String()), nil
+		return prThroughToString(vs, true)
 	})
 
-	// prn: print readably + newline
+	// prn: print readably + newline to stdout
 	prn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		b := &strings.Builder{}
-		for i := range vs {
-			if i > 0 {
-				b.WriteRune(' ')
-			}
-			b.WriteString(vs[i].String())
+		s, err := prThroughToString(vs, true)
+		if err != nil {
+			return vm.NIL, err
 		}
-		fmt.Println(b)
+		fmt.Fprintln(os.Stdout, string(s.(vm.String)))
 		return vm.NIL, nil
 	})
 
 	// prn-str: print readably + newline to string
 	prnStr, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		b := &strings.Builder{}
-		for i := range vs {
-			if i > 0 {
-				b.WriteRune(' ')
-			}
-			b.WriteString(vs[i].String())
+		s, err := prThroughToString(vs, true)
+		if err != nil {
+			return vm.NIL, err
 		}
-		b.WriteRune('\n')
-		return vm.String(b.String()), nil
+		return vm.String(string(s.(vm.String)) + "\n"), nil
 	})
 
 	// print-str: print human-readably to string (no quotes on strings)
 	printStr, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		b := &strings.Builder{}
-		for i := range vs {
-			if i > 0 {
-				b.WriteRune(' ')
-			}
-			if vs[i].Type() == vm.StringType {
-				b.WriteString(string(vs[i].(vm.String)))
-				continue
-			} else if vs[i].Type() == vm.CharType {
-				b.WriteRune(rune(vs[i].(vm.Char)))
-				continue
-			}
-			b.WriteString(vs[i].String())
-		}
-		return vm.String(b.String()), nil
+		return prThroughToString(vs, false)
 	})
 
 	// println-str: print human-readably + newline to string
 	printlnStr, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		b := &strings.Builder{}
-		for i := range vs {
-			if i > 0 {
-				b.WriteRune(' ')
-			}
-			if vs[i].Type() == vm.StringType {
-				b.WriteString(string(vs[i].(vm.String)))
-				continue
-			} else if vs[i].Type() == vm.CharType {
-				b.WriteRune(rune(vs[i].(vm.Char)))
-				continue
-			}
-			b.WriteString(vs[i].String())
+		s, err := prThroughToString(vs, false)
+		if err != nil {
+			return vm.NIL, err
 		}
-		b.WriteRune('\n')
-		return vm.String(b.String()), nil
+		return vm.String(string(s.(vm.String)) + "\n"), nil
 	})
 
 	// re-find: find first match of regex in string
@@ -5193,6 +5136,11 @@ func installLangNS() {
 		}
 		m, ok := vs[0].(vm.IMeta)
 		if !ok {
+			// Non-IMeta values pass through unchanged. This is load-bearing:
+			// let-go compiles value-position type hints (e.g. `^long x`) into
+			// runtime with-meta calls, so erroring here would break every
+			// hinted scalar. Reference types (deftype/reify instances,
+			// protocols, collections) ARE IMeta and carry metadata for real.
 			return vs[0], nil
 		}
 		return m.WithMeta(vs[1]), nil
@@ -5506,29 +5454,33 @@ func installLangNS() {
 		return vm.MakeInt(c), nil
 	})
 
-	// print — like println but no newline, space-separated
+	// print — print human-readably to stdout, no newline
 	printf, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		for i, v := range vs {
-			if i > 0 {
-				fmt.Print(" ")
-			}
-			if s, ok := v.(vm.String); ok {
-				fmt.Print(string(s))
-			} else {
-				fmt.Print(v.String())
-			}
+		s, err := prThroughToString(vs, false)
+		if err != nil {
+			return vm.NIL, err
 		}
+		fmt.Fprint(os.Stdout, string(s.(vm.String)))
 		return vm.NIL, nil
 	})
 
-	// pr — print readably (like prn without newline)
+	// pr — print readably to stdout, no newline
 	prf, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		for i, v := range vs {
-			if i > 0 {
-				fmt.Print(" ")
-			}
-			fmt.Print(v.String())
+		s, err := prThroughToString(vs, true)
+		if err != nil {
+			return vm.NIL, err
 		}
+		fmt.Fprint(os.Stdout, string(s.(vm.String)))
+		return vm.NIL, nil
+	})
+
+	// println — print human-readably to stdout with newline
+	printlnf, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		s, err := prThroughToString(vs, false)
+		if err != nil {
+			return vm.NIL, err
+		}
+		fmt.Fprintln(os.Stdout, string(s.(vm.String)))
 		return vm.NIL, nil
 	})
 
@@ -6311,6 +6263,7 @@ func installLangNS() {
 	ns.Def("defmulti*", defMulti)
 	ns.Def("defmethod*", defMethod)
 	ns.Def("methods", methods)
+	ns.Def("-print-method-default", printMethodDefault)
 	ns.Def("pr-str", prStr)
 	ns.Def("prn", prn)
 	ns.Def("prn-str", prnStr)
@@ -7216,6 +7169,18 @@ func installLangNS() {
 		return vm.Boolean(ok), nil
 	})
 	ns.Def("array?", isArrayf)
+
+	// bytes?: true iff the value is a byte-kind TypedArray (backing []byte).
+	// array? doesn't distinguish element kind, and a TypedArray's Kind() is
+	// not reachable from .lg, so this lives in Go alongside array?.
+	bytesP, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+		if len(vs) != 1 {
+			return vm.FALSE, nil
+		}
+		a, ok := vs[0].(*vm.TypedArray)
+		return vm.Boolean(ok && a.Kind() == vm.ArrayByte), nil
+	})
+	ns.Def("bytes?", bytesP)
 
 	// alter-var-root — alter a var's root binding via (f root & args).
 	// Reads/writes the root, bypassing any current dynamic binding.
