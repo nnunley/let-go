@@ -85,3 +85,73 @@ func TestWriteBaselineWritesAtomicallyReadableJSON(t *testing.T) {
 		t.Fatalf("left temporary files: %v", matches)
 	}
 }
+
+func TestEffectiveCountPrefersJobOverride(t *testing.T) {
+	if got := (captureJob{}).effectiveCount(3); got != 3 {
+		t.Fatalf("zero override should fall back to default: got %d, want 3", got)
+	}
+	if got := (captureJob{count: 1}).effectiveCount(3); got != 1 {
+		t.Fatalf("job override should win: got %d, want 1", got)
+	}
+}
+
+// The full + fast profiles run the Clojure test suite once per execution mode
+// (count=1): a single suite pass takes minutes and run-to-run variance is
+// negligible, so 3 samples would just triple wall time. The cheap,
+// benchtime-bounded vm/ir jobs keep the CLI default (count=0 → -count flag).
+//
+// There are exactly three suite modes, distinguished by the LG_SUITE_IR env
+// toggle crossed with the gogen_ir build tag:
+//   - bytecode    : *ir-compile* off, untagged
+//   - ir_bytecode : *ir-compile* on  (LG_SUITE_IR=1), untagged
+//   - aot_native  : *ir-compile* on  (LG_SUITE_IR=1), -tags gogen_ir
+func TestSuiteJobsPinCountToOne(t *testing.T) {
+	hasEnv := func(env []string, want string) bool {
+		for _, e := range env {
+			if e == want {
+				return true
+			}
+		}
+		return false
+	}
+	for _, full := range []bool{true, false} {
+		jobs, _, err := buildJobs("", "", full, false, nil)
+		if err != nil {
+			t.Fatalf("buildJobs(full=%v): %v", full, err)
+		}
+		suite := map[string]captureJob{}
+		for _, j := range jobs {
+			if j.pkg == suitePackage {
+				if j.count != 1 {
+					t.Errorf("full=%v: suite job [%s] count = %d, want 1", full, j.variant, j.count)
+				}
+				suite[j.variant] = j
+			} else if j.count != 0 {
+				t.Errorf("full=%v: non-suite job %s [%s] count = %d, want 0 (use CLI default)", full, j.pkg, j.variant, j.count)
+			}
+		}
+		if len(suite) != 3 {
+			t.Fatalf("full=%v: expected 3 suite variants (bytecode, ir_bytecode, aot_native), got %d: %v", full, len(suite), keysOf(suite))
+		}
+		// bytecode: no IR toggle, untagged.
+		if j := suite["bytecode"]; len(j.env) != 0 || j.tags != "" {
+			t.Errorf("full=%v: bytecode variant want no env/tags, got env=%v tags=%q", full, j.env, j.tags)
+		}
+		// ir_bytecode: IR on, still untagged (passes run as bytecode).
+		if j := suite["ir_bytecode"]; !hasEnv(j.env, "LG_SUITE_IR=1") || j.tags != "" {
+			t.Errorf("full=%v: ir_bytecode want LG_SUITE_IR=1 + untagged, got env=%v tags=%q", full, j.env, j.tags)
+		}
+		// aot_native: IR on AND gogen_ir tag (passes dispatch to native Go).
+		if j := suite["aot_native"]; !hasEnv(j.env, "LG_SUITE_IR=1") || j.tags != "gogen_ir" {
+			t.Errorf("full=%v: aot_native want LG_SUITE_IR=1 + -tags gogen_ir, got env=%v tags=%q", full, j.env, j.tags)
+		}
+	}
+}
+
+func keysOf(m map[string]captureJob) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
+}
