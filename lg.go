@@ -14,6 +14,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/nooga/let-go/pkg/bytecode"
@@ -603,8 +604,11 @@ func init() {
 	flag.StringVar(&bundleBase, "bundle-base", "", "path to target-platform lg binary for cross-OS bundling (defaults to current executable)")
 	flag.StringVar(&wasmOutput, "w", "", "build .lg file into a WASM web app (specify output directory)")
 	flag.StringVar(&sourcePaths, "source-paths", "",
-		"additional namespace search paths separated by the OS path-list separator "+
-			"(':' on Unix, ';' on Windows). Falls back to LG_SOURCE_PATHS if unset.")
+		"namespace search paths separated by the OS path-list separator "+
+			"(':' on Unix, ';' on Windows). When given, fully defines the search "+
+			"path: the current directory is NOT searched implicitly — include '.' "+
+			"to search it. Falls back to LG_SOURCE_PATHS if unset. "+
+			"If flag or env var not given, it defaults to '.'")
 	flag.StringVar(&resourcePaths, "resource-paths", "",
 		"resource root directories for io/resource, separated by the OS path-list "+
 			"separator (':' on Unix, ';' on Windows). Falls back to LG_RESOURCE_PATHS "+
@@ -612,8 +616,14 @@ func init() {
 }
 
 // buildSearchPaths resolves the resolver's path list from the -source-paths
-// flag (preferred), the LG_SOURCE_PATHS env var, or deps.edn in the
-// current directory (fallback). Always includes "." as the first entry.
+// flag (preferred), the LG_SOURCE_PATHS env var, or deps.edn in the current
+// directory (fallback). When the path is supplied explicitly — the
+// -source-paths flag is present, or LG_SOURCE_PATHS is set (even to an empty
+// value) — it fully defines the search path: "." is NOT included implicitly
+// (list it to search the current directory), and an empty value yields no
+// paths. Only a truly absent env var with no flag falls through to deps.edn
+// and the "." default. Presence is detected the same way on both channels:
+// flag.Visit for the flag, os.LookupEnv for the env var.
 func buildSearchPaths() []string {
 	explicitSet := false
 	flag.Visit(func(f *flag.Flag) {
@@ -621,8 +631,21 @@ func buildSearchPaths() []string {
 			explicitSet = true
 		}
 	})
-	if explicitSet || os.Getenv("LG_SOURCE_PATHS") != "" {
-		return resolver.PathsFromInputs(sourcePaths, os.Getenv("LG_SOURCE_PATHS"), explicitSet)
+	envVal, envSet := os.LookupEnv("LG_SOURCE_PATHS")
+	if explicitSet || envSet {
+		paths := resolver.PathsFromInputs(sourcePaths, envVal, explicitSet)
+		// Transition notice for the dropped implicit ".". Tooling that owns the
+		// search path deliberately omits "." and can set
+		// LG_SUPPRESS_SOURCE_PATHS_WARNING to silence this; the notice is
+		// removed in a future release.
+		if !slices.Contains(paths, ".") && os.Getenv("LG_SUPPRESS_SOURCE_PATHS_WARNING") == "" {
+			fmt.Fprintln(os.Stderr, `WARNING: the current directory (".") is no `+
+				`longer added to the namespace search path automatically when `+
+				`-source-paths or LG_SOURCE_PATHS is set; add "." to the list to `+
+				`keep searching it. This notice will be removed in a future release `+
+				`(set LG_SUPPRESS_SOURCE_PATHS_WARNING=1 to silence).`)
+		}
+		return paths
 	}
 	if depsPaths := resolver.PathsFromDepsEdn("."); depsPaths != nil {
 		return append([]string{"."}, depsPaths...)
