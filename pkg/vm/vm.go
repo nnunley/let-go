@@ -560,7 +560,7 @@ func (f *Frame) Run() (Value, error) {
 				if err != nil {
 					return NIL, NewExecutionError("popping arguments failed").Wrap(err)
 				}
-				out, err = InvokeWith(f.ec, fn, a)
+				out, err = f.ec.Invoke(fn, a)
 				if err != nil {
 					srcInfo := f.code.LookupSource(f.ip)
 					wrapped := NewExecutionError(fmt.Sprintf("calling %s", fnName(fn))).WithSource(srcInfo).Wrap(err)
@@ -587,7 +587,7 @@ func (f *Frame) Run() (Value, error) {
 				if !ok {
 					return NIL, NewTypeError(fraw, "is not a function", nil)
 				}
-				out, err = InvokeWith(f.ec, fn, nil)
+				out, err = f.ec.Invoke(fn, nil)
 				if err != nil {
 					srcInfo := f.code.LookupSource(f.ip)
 					wrapped := NewExecutionError(fmt.Sprintf("calling %s", fnName(fn))).WithSource(srcInfo).Wrap(err)
@@ -625,7 +625,7 @@ func (f *Frame) Run() (Value, error) {
 					return NIL, NewExecutionError("popping arguments failed").Wrap(err)
 				}
 				if _, ok := fn.(*Func); !ok {
-					out, err = InvokeWith(f.ec, fn, a)
+					out, err = f.ec.Invoke(fn, a)
 					if err != nil {
 						srcInfo := f.code.LookupSource(f.ip)
 						wrapped := NewExecutionError(fmt.Sprintf("calling %s", fnName(fn))).WithSource(srcInfo).Wrap(err)
@@ -686,7 +686,7 @@ func (f *Frame) Run() (Value, error) {
 					return NIL, NewTypeError(fraw, "is not a function", nil)
 				}
 				if _, ok := fn.(*Func); !ok {
-					out, err = InvokeWith(f.ec, fn, nil)
+					out, err = f.ec.Invoke(fn, nil)
 					if err != nil {
 						srcInfo := f.code.LookupSource(f.ip)
 						wrapped := NewExecutionError(fmt.Sprintf("calling %s", fnName(fn))).WithSource(srcInfo).Wrap(err)
@@ -807,7 +807,7 @@ func (f *Frame) Run() (Value, error) {
 			if int(idx) >= f.constsc {
 				return NIL, NewExecutionError("const lookup out of bounds")
 			}
-			err := f.push(f.consts.get(int(idx)).(*Var).Deref())
+			err := f.push(f.ec.deref(f.consts.get(int(idx)).(*Var)))
 			if err != nil {
 				return NIL, NewExecutionError("const push failed").Wrap(err)
 			}

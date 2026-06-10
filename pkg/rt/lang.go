@@ -5086,7 +5086,10 @@ func installLangNS() {
 		return vm.NewLazySeq(fn), nil
 	})
 
-	pushBinding, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	// push-binding!/pop-binding! resolve against the *active* ExecContext
+	// (ec.Invoke routes it in), so a `binding` form inside an isolated child
+	// context pushes onto that context, not the shared root.
+	pushBinding := vm.NewCtxNativeFn("push-binding!", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 2 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
@@ -5094,11 +5097,11 @@ func installLangNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf("push-binding expected Var")
 		}
-		v.PushBinding(vs[1])
+		ec.PushBinding(v, vs[1])
 		return vm.NIL, nil
 	})
 
-	popBinding, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	popBinding := vm.NewCtxNativeFn("pop-binding!", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
@@ -5106,7 +5109,7 @@ func installLangNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf("pop-binding expected Var")
 		}
-		v.PopBinding()
+		ec.PopBinding(v)
 		return vm.NIL, nil
 	})
 

@@ -6,52 +6,107 @@
 
 package vm
 
-// ExecContext is the per-execution state that the eval loop and builtins need
-// to resolve dynamic state, threaded explicitly through execution rather than
-// looked up by goroutine id. It currently carries the dynamic-var binding
-// stack; the structured-concurrency Scope folds in later (see
-// docs/design/exec-context-threading.md).
+// ExecContext is the single object that resolves an execution's dynamic state —
+// dynamic-var bindings now, the structured-concurrency Scope later (see
+// docs/design/exec-context-threading.md). It is the *implementer* of
+// invocation and of binding resolution: the eval loop, builtins, and goroutine
+// spawn all go through an ExecContext rather than looking state up by goroutine
+// id.
 //
-// Threading model: the root frame of a Run holds an ExecContext; each Fn call
-// propagates it to the callee's frame via InvokeCtx; a spawned goroutine seeds
-// a fresh child ExecContext from a snapshot of its parent's. A nil ExecContext
-// means "no execution context installed" — callers fall back to the process
-// state, which is how the system behaves until the binding path is migrated
-// onto ec.
+// There is always an ExecContext in play. RootExecContext is the process
+// default — its binding stack is the shared global one, so code that never asks
+// for isolation behaves exactly as it always has. Per-goroutine isolation is
+// opt-in: a spawn hands the child a fresh ExecContext seeded from a snapshot of
+// the parent's (ec.Child()), so the two cannot interleave each other's
+// bindings, with no goroutine-id lookup and no reuse hazard.
 type ExecContext struct {
 	bindings *bindingStack
 }
 
-// NewExecContext returns an ExecContext with an empty binding stack.
+// globalBindingStack backs RootExecContext (and the package-level Var binding
+// API used by host/lowered code). Sharing it is what makes the root context
+// behave like the historical process-global binding store.
+var globalBindingStack = newBindingStack()
+
+// RootExecContext is the always-available default context. Frames with no more
+// specific context resolve against it.
+var RootExecContext = &ExecContext{bindings: globalBindingStack}
+
+// NewExecContext returns a context with a fresh, empty binding stack.
 func NewExecContext() *ExecContext {
 	return &ExecContext{bindings: newBindingStack()}
 }
 
-// child returns a fresh ExecContext seeded from a snapshot of this one's
+// Child returns a fresh ExecContext seeded from a snapshot of this one's
 // bindings — the explicit-propagation primitive used at goroutine boundaries.
-// A nil receiver yields a fresh empty context.
-func (ec *ExecContext) child() *ExecContext {
-	c := NewExecContext()
-	if ec != nil && ec.bindings != nil {
-		c.bindings.installSnapshot(ec.bindings.snapshot())
+// A nil receiver seeds from the root context.
+func (ec *ExecContext) Child() *ExecContext {
+	src := ec
+	if src == nil {
+		src = RootExecContext
 	}
+	c := NewExecContext()
+	c.bindings.installSnapshot(src.bindings.snapshot())
 	return c
 }
 
-// CtxFn is the optional, additive calling convention for functions that need
-// the ExecContext: closures use it to propagate ec to their child frame;
-// builtins that read dynamic vars use it to resolve against ec. Functions that
-// don't implement it are invoked context-free via Invoke, unchanged.
-type CtxFn interface {
-	InvokeCtx(ec *ExecContext, args []Value) (Value, error)
+// orRoot normalises a possibly-nil context to the root.
+func (ec *ExecContext) orRoot() *ExecContext {
+	if ec == nil {
+		return RootExecContext
+	}
+	return ec
 }
 
-// InvokeWith calls fn with the ExecContext when fn opts into CtxFn, else falls
-// back to the plain context-free Invoke. This is the single chokepoint the
-// eval loop uses at every Fn call site.
-func InvokeWith(ec *ExecContext, fn Fn, args []Value) (Value, error) {
-	if cf, ok := fn.(CtxFn); ok {
-		return cf.InvokeCtx(ec, args)
+// --- dynamic-var resolution (ec owns the binding state) ---------------------
+
+// deref returns v's current value in this context: the top dynamic binding if
+// any, else v's root.
+func (ec *ExecContext) deref(v *Var) Value {
+	ec = ec.orRoot()
+	if v.isDynamic {
+		if val, ok := ec.bindings.current(v); ok {
+			return val
+		}
 	}
-	return fn.Invoke(args)
+	return v.Root()
+}
+
+func (ec *ExecContext) pushBinding(v *Var, val Value) {
+	v.isDynamic = true
+	ec.orRoot().bindings.push(v, val)
+}
+
+func (ec *ExecContext) popBinding(v *Var) {
+	ec.orRoot().bindings.pop(v)
+}
+
+func (ec *ExecContext) hasBinding(v *Var) bool {
+	return ec.orRoot().bindings.hasBinding(v)
+}
+
+// Exported entry points for runtime builtins (pkg/rt) that resolve dynamic
+// vars against an ExecContext handed to them by ec.Invoke.
+func (ec *ExecContext) PushBinding(v *Var, val Value) { ec.pushBinding(v, val) }
+func (ec *ExecContext) PopBinding(v *Var)             { ec.popBinding(v) }
+func (ec *ExecContext) Deref(v *Var) Value            { return ec.deref(v) }
+
+// --- invocation (ec is the implementer) -------------------------------------
+
+// Invoke runs fn with args in this context. Closures propagate the context to
+// their child frame; context-aware natives receive it; pure functions are
+// invoked unchanged. This is the single dispatch site the eval loop uses.
+func (ec *ExecContext) Invoke(fn Fn, args []Value) (Value, error) {
+	ec = ec.orRoot()
+	switch f := fn.(type) {
+	case *Func:
+		return f.invokeIn(ec, args)
+	case *NativeFn:
+		if f.ctxProxy != nil {
+			return f.invokeCtx(ec, args)
+		}
+		return f.Invoke(args)
+	default:
+		return fn.Invoke(args)
+	}
 }

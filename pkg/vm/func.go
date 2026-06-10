@@ -70,6 +70,13 @@ func (l *Func) Arity() int {
 }
 
 func (l *Func) Invoke(pargs []Value) (result Value, err error) {
+	return l.invokeIn(RootExecContext, pargs)
+}
+
+// invokeIn runs the function with the given ExecContext active in its frame,
+// so dynamic bindings propagate into the call. Invoke is invokeIn against the
+// root context.
+func (l *Func) invokeIn(ec *ExecContext, pargs []Value) (result Value, err error) {
 	args := pargs
 	if l.isVariadric {
 		if len(args) < l.arity-1 {
@@ -86,6 +93,7 @@ func (l *Func) Invoke(pargs []Value) (result Value, err error) {
 		return NIL, NewExecutionError(fmt.Sprintf("function %s expected %d args, got %d", l, l.arity, len(args)))
 	}
 	f := NewFrame(l.chunk, args)
+	f.ec = ec
 	result, err = f.Run()
 	ReleaseFrame(f)
 	return result, err
