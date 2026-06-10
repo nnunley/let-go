@@ -3472,7 +3472,7 @@ func installLangNS() {
 				// Async (go ...) error — route to *err*. Previously
 				// fmt.Println, which targets stdout despite being error
 				// output: double-wrong.
-				_ = WriteToErr(fmt.Sprintln(err))
+				_ = WriteToErr(nil, fmt.Sprintln(err))
 			}
 			// The result send is cancellable via the registry. (Channel
 			// ops <!/>! INSIDE the block are still synchronous and not yet
@@ -4833,12 +4833,12 @@ func installLangNS() {
 	})
 
 	// prn: print readably + newline through *out*
-	prn, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	prn := vm.NewCtxNativeFn("prn", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		s, err := prThroughToString(vs, true)
 		if err != nil {
 			return vm.NIL, err
 		}
-		return vm.NIL, WriteToOut(string(s.(vm.String)) + "\n")
+		return vm.NIL, WriteToOut(ec, string(s.(vm.String))+"\n")
 	})
 
 	// prn-str: print readably + newline to string
@@ -5113,7 +5113,7 @@ func installLangNS() {
 		return vm.NIL, nil
 	})
 
-	boundFnStar, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	boundFnStar := vm.NewCtxNativeFn("bound-fn*", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("bound-fn* expects 1 arg")
 		}
@@ -5121,14 +5121,17 @@ func installLangNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf("bound-fn* expected Fn")
 		}
-		snap := vm.SnapshotBindings()
+		// Capture the caller's bindings (not the root's) so bound-fn closes
+		// over the dynamic scope active where it was created.
+		snap := ec.BindingSnapshot()
 		if len(snap) == 0 {
 			return fn, nil
 		}
 		wrapped, _ := vm.NativeFnType.Wrap(func(args []vm.Value) (vm.Value, error) {
-			return vm.RunWithBindings(snap, func() (vm.Value, error) {
-				return fn.Invoke(args)
-			})
+			// Re-establish the captured bindings in a fresh context on every
+			// call, so invocations (possibly on different goroutines) stay
+			// isolated from one another and from the global stack.
+			return vm.NewExecContextFrom(snap).Invoke(fn, args)
 		})
 		return wrapped, nil
 	})
@@ -5461,30 +5464,30 @@ func installLangNS() {
 	})
 
 	// print — print human-readably through *out*, no newline
-	printf, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	printf := vm.NewCtxNativeFn("print", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		s, err := prThroughToString(vs, false)
 		if err != nil {
 			return vm.NIL, err
 		}
-		return vm.NIL, WriteToOut(string(s.(vm.String)))
+		return vm.NIL, WriteToOut(ec, string(s.(vm.String)))
 	})
 
 	// pr — print readably through *out*, no newline
-	prf, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	prf := vm.NewCtxNativeFn("pr", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		s, err := prThroughToString(vs, true)
 		if err != nil {
 			return vm.NIL, err
 		}
-		return vm.NIL, WriteToOut(string(s.(vm.String)))
+		return vm.NIL, WriteToOut(ec, string(s.(vm.String)))
 	})
 
 	// println — print human-readably through *out* with newline
-	printlnf, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	printlnf := vm.NewCtxNativeFn("println", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		s, err := prThroughToString(vs, false)
 		if err != nil {
 			return vm.NIL, err
 		}
-		return vm.NIL, WriteToOut(string(s.(vm.String)) + "\n")
+		return vm.NIL, WriteToOut(ec, string(s.(vm.String))+"\n")
 	})
 
 	// --- Bitwise ops ---
@@ -5712,7 +5715,7 @@ func installLangNS() {
 
 	// future — run body in a goroutine, return a promise that delivers the result
 	// (future* thunk) — internal, macro wraps body
-	futureStar, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	futureStar := vm.NewCtxNativeFn("future*", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("future* expects 1 arg (thunk fn)")
 		}
@@ -5720,12 +5723,15 @@ func installLangNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf("future* expected Fn")
 		}
-		snap := vm.SnapshotBindings()
+		// Each future runs under its own child context, seeded from a snapshot
+		// of the spawning context's current bindings. Capturing the caller's ec
+		// (not the root) means a future spawned inside another future inherits
+		// the enclosing dynamic bindings; concurrent futures still cannot see or
+		// clobber each other's, since each gets an independent child stack.
+		child := ec.Child()
 		p := vm.NewPromise()
 		vm.CurrentScope().Go(func(ctx context.Context) {
-			v, err := vm.RunWithBindings(snap, func() (vm.Value, error) {
-				return fn.Invoke(nil)
-			})
+			v, err := child.Invoke(fn, nil)
 			if err != nil {
 				p.Deliver(vm.NIL)
 			} else {

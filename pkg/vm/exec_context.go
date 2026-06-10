@@ -50,6 +50,28 @@ func (ec *ExecContext) Child() *ExecContext {
 	return c
 }
 
+// BindingSnapshot returns a snapshot of this context's current bindings,
+// suitable for passing to NewExecContextFrom to isolate a child context.
+// A nil receiver uses the root context.
+func (ec *ExecContext) BindingSnapshot() BindingSnapshot {
+	src := ec
+	if src == nil {
+		src = RootExecContext
+	}
+	return src.bindings.snapshot()
+}
+
+// NewExecContextFrom returns a fresh context whose binding stack is seeded from
+// snap. It is the per-call isolation primitive: bound-fn* captures a snapshot
+// once and builds a fresh context from it on every invocation, so the wrapped
+// function always re-establishes exactly the captured bindings and never leaks
+// pushes between calls or across goroutines.
+func NewExecContextFrom(snap BindingSnapshot) *ExecContext {
+	c := NewExecContext()
+	c.bindings.installSnapshot(snap)
+	return c
+}
+
 // orRoot normalises a possibly-nil context to the root.
 func (ec *ExecContext) orRoot() *ExecContext {
 	if ec == nil {
@@ -64,7 +86,7 @@ func (ec *ExecContext) orRoot() *ExecContext {
 // any, else v's root.
 func (ec *ExecContext) deref(v *Var) Value {
 	ec = ec.orRoot()
-	if v.isDynamic {
+	if v.isDynamic.Load() {
 		if val, ok := ec.bindings.current(v); ok {
 			return val
 		}
@@ -73,7 +95,7 @@ func (ec *ExecContext) deref(v *Var) Value {
 }
 
 func (ec *ExecContext) pushBinding(v *Var, val Value) {
-	v.isDynamic = true
+	v.isDynamic.Store(true)
 	ec.orRoot().bindings.push(v, val)
 }
 
@@ -100,6 +122,10 @@ func (ec *ExecContext) Invoke(fn Fn, args []Value) (Value, error) {
 	ec = ec.orRoot()
 	switch f := fn.(type) {
 	case *Func:
+		return f.invokeIn(ec, args)
+	case *Closure:
+		return f.invokeIn(ec, args)
+	case *MultiArityFn:
 		return f.invokeIn(ec, args)
 	case *NativeFn:
 		if f.ctxProxy != nil {

@@ -20,15 +20,19 @@ type Var struct {
 	// curr holds the current dynamic top binding (nil = use root); it is
 	// kept in sync with the bindings stack by push/pop/RunWithBindings
 	// under bindingsMu (the cold path).
-	root      atomic.Pointer[Value] // root binding (lock-free read)
-	curr      atomic.Pointer[Value] // current dynamic top binding; nil = use root
-	bindings  []Value               // full dynamic binding stack (guarded by bindingsMu)
-	nsref     *Namespace
-	ns        string
-	name      string
-	meta      Value
-	isMacro   bool
-	isDynamic bool
+	root     atomic.Pointer[Value] // root binding (lock-free read)
+	curr     atomic.Pointer[Value] // current dynamic top binding; nil = use root
+	bindings []Value               // full dynamic binding stack (guarded by bindingsMu)
+	nsref    *Namespace
+	ns       string
+	name     string
+	meta     Value
+	isMacro  bool
+	// isDynamic is atomic: push-binding/deref of a var can happen on different
+	// goroutines concurrently (e.g. two futures both `(binding [*v* ...] ...)`),
+	// so the dynamic flag is read on the hot deref path while being set by a
+	// concurrent bind. A plain bool here is a data race.
+	isDynamic atomic.Bool
 	isPrivate bool
 	mu        sync.Mutex // guards meta + watches
 	watches   map[Value]Fn
@@ -211,7 +215,7 @@ func (v *Var) IsMacro() bool {
 }
 
 func (v *Var) IsDynamic() bool {
-	return v.isDynamic
+	return v.isDynamic.Load()
 }
 
 func (v *Var) IsPrivate() bool {
@@ -260,7 +264,7 @@ func (v *Var) SetMacro() {
 }
 
 func (v *Var) SetDynamic() {
-	v.isDynamic = true
+	v.isDynamic.Store(true)
 }
 
 func (v *Var) SetPrivate() {
