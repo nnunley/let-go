@@ -50,3 +50,8 @@
           (with-out-str (print *x*))]))))
 
 (println (scenarios))
+
+;; No-op in let-go; releases Clojure's future thread-pool so the JVM exits
+;; promptly instead of lingering ~60s on the agent keep-alive (this script is
+;; only run under real Clojure when re-deriving the gold via LETGO_GOLD_REDERIVE).
+(shutdown-agents)

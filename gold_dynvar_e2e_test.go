@@ -8,109 +8,99 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
 )
 
-// dynvarThreadsGold is the verified reference output of
-// test/gold/dynvar_threads.cljc under Clojure 1.12 and babashka. let-go must
-// emit exactly this. The scenarios cover dynamic-var (namespace variable)
-// binding propagation across nested threads: future binding conveyance,
-// isolation from later rebinds, nested-future inheritance, concurrent
-// non-interference, bound-fn capture, and thread-local set! mutation
-// (visibility within the binding, no leak past it, per-future isolation).
+// Gold differential tests: the SAME .cljc script run under let-go must produce
+// byte-for-byte the same last-output line as Clojure. The verified Clojure 1.12
+// / babashka reference output lives in a committed test/gold/<name>.out file.
 //
-// The script deliberately stays inside the subset where let-go and Clojure
+// By DEFAULT these tests are clojure-free: each runs its script under let-go and
+// compares the result to the committed .out file. No JVM, no network, no
+// `clojure` dependency — fast and deterministic in CI.
+//
+// Re-deriving the .out goldens from a live `clojure` is opt-in via
+// LETGO_GOLD_REDERIVE=1 (clojure must be on PATH). In that mode each test runs
+// the script under real Clojure, OVERWRITES its .out file, and then runs the
+// usual let-go assertion against the refreshed gold — so one
+// `LETGO_GOLD_REDERIVE=1 go test` both refreshes the goldens and verifies let-go
+// still matches. Trigger it by hand, or via the CI `gold-differential` job that
+// fires on workflow_dispatch or when the resolved clojure version changes.
+//
+// Scenario coverage of each script:
+//   - dynvar_threads.cljc:   dynamic-var (namespace variable) binding
+//     propagation across nested threads — future conveyance, isolation from
+//     later rebinds, nested-future inheritance, concurrent non-interference,
+//     bound-fn capture, thread-local set! mutation.
+//   - ns_threads.cljc:       *ns* conveying into futures, isolating across
+//     concurrent futures, inheriting through nested futures, in-ns mutation.
+//   - dynvar_callbacks.cljc: dynamic bindings conveying through EAGER
+//     callback-invoking builtins (mapv, filterv, reduce, run!, sort-by, swap!,
+//     transducer application, with-out-str) when the binding lives in a child
+//     ExecContext (inside a future). A context-free Fn.Invoke at any of those
+//     sites resolves the var against the root context and breaks every scenario.
+//
+// The scripts deliberately stay inside the subset where let-go and Clojure
 // agree. let-go is intentionally MORE PERMISSIVE than Clojure in two spots the
-// script avoids: (a) set! with no active binding (Clojure throws; let-go
-// mutates the root — load-bearing for test.lg), and (b) set! on a conveyed
-// binding in a future that opened no binding of its own (Clojure throws; let-go
-// permits it). See the script header for details.
-const dynvarThreadsGold = "[:a :b :inner [:p :q] :captured :m [:fm :base] [:ma :mb :base] [:pm :pm] :root]"
+// scripts avoid: (a) set! with no active binding (Clojure throws; let-go mutates
+// the root — load-bearing for test.lg), and (b) set! on a conveyed binding in a
+// future that opened no binding of its own (Clojure throws; let-go permits it).
 
-const dynvarThreadsScript = "test/gold/dynvar_threads.cljc"
+const (
+	dynvarThreadsScript   = "test/gold/dynvar_threads.cljc"
+	nsThreadsScript       = "test/gold/ns_threads.cljc"
+	dynvarCallbacksScript = "test/gold/dynvar_callbacks.cljc"
+)
 
-// TestGoldDynvarThreadsMatchesClojure is a differential gold test: the SAME
-// script run under let-go must produce byte-for-byte the same output as
-// Clojure. The golden constant is pinned, and when a `clojure` runtime is on
-// PATH we re-derive it from real Clojure so the constant cannot silently drift.
-func TestGoldDynvarThreadsMatchesClojure(t *testing.T) {
-	lg := buildLG(t)
+// rederiveGoldEnv, when set to "1", makes the gold tests re-derive their .out
+// files from a live `clojure` before asserting let-go against them.
+const rederiveGoldEnv = "LETGO_GOLD_REDERIVE"
 
-	got := lastNonEmptyLine(stdoutOf(t, lg, dynvarThreadsScript))
-	if got != dynvarThreadsGold {
-		t.Fatalf("let-go output = %q, want %q (dynamic-var/thread semantics diverged from Clojure)", got, dynvarThreadsGold)
-	}
+func TestGoldDynvarThreadsMatchesClojure(t *testing.T)   { checkGold(t, dynvarThreadsScript) }
+func TestGoldNsThreadsMatchesClojure(t *testing.T)       { checkGold(t, nsThreadsScript) }
+func TestGoldDynvarCallbacksMatchesClojure(t *testing.T) { checkGold(t, dynvarCallbacksScript) }
 
-	// Keep the golden honest: if real Clojure is available, its output must
-	// equal the pinned constant too. Otherwise the constant could rot.
-	if clj, err := exec.LookPath("clojure"); err == nil {
-		ref := lastNonEmptyLine(stdoutOf(t, clj, "-M", dynvarThreadsScript))
-		if ref != dynvarThreadsGold {
-			t.Fatalf("clojure reference drifted to %q; update dynvarThreadsGold (and re-verify let-go) if this is an intended Clojure change", ref)
-		}
-	} else {
-		t.Log("clojure not on PATH; compared let-go against the pinned golden only")
-	}
+// goldPath maps a .cljc script to its committed expected-output file:
+// test/gold/foo.cljc -> test/gold/foo.out.
+func goldPath(script string) string {
+	return strings.TrimSuffix(script, ".cljc") + ".out"
 }
 
-// nsThreadsGold is the verified Clojure 1.12 / babashka output of
-// test/gold/ns_threads.cljc: the *ns* (current namespace) dynamic var conveying
-// into futures, isolating across concurrent futures, inheriting through nested
-// futures, and being mutated thread-locally by in-ns. The script avoids the
-// in-ns-as-first-body-form case, which let-go's compiler switches globally at
-// compile time (a pre-existing compiler/runtime *ns*-root conflation, separate
-// from the dynamic-binding thread work).
-const nsThreadsGold = "[gold.a [gold.a gold.b user] gold.b [gold.b user]]"
+// checkGold runs script under let-go and asserts its last non-empty output line
+// equals the committed gold file. With LETGO_GOLD_REDERIVE=1 it first re-derives
+// that gold file from real Clojure (which must then be on PATH).
+func checkGold(t *testing.T, script string) {
+	t.Helper()
+	gold := goldPath(script)
 
-const nsThreadsScript = "test/gold/ns_threads.cljc"
-
-// TestGoldNsThreadsMatchesClojure validates that *ns* isolation/conveyance
-// across nested threads matches Clojure, the same differential way as
-// TestGoldDynvarThreadsMatchesClojure.
-func TestGoldNsThreadsMatchesClojure(t *testing.T) {
-	lg := buildLG(t)
-
-	got := lastNonEmptyLine(stdoutOf(t, lg, nsThreadsScript))
-	if got != nsThreadsGold {
-		t.Fatalf("let-go output = %q, want %q (*ns* thread isolation diverged from Clojure)", got, nsThreadsGold)
-	}
-
-	if clj, err := exec.LookPath("clojure"); err == nil {
-		ref := lastNonEmptyLine(stdoutOf(t, clj, "-M", nsThreadsScript))
-		if ref != nsThreadsGold {
-			t.Fatalf("clojure reference drifted to %q; update nsThreadsGold if this is an intended Clojure change", ref)
+	if os.Getenv(rederiveGoldEnv) == "1" {
+		clj, err := exec.LookPath("clojure")
+		if err != nil {
+			t.Fatalf("%s=1 but no `clojure` on PATH: %v", rederiveGoldEnv, err)
 		}
-	}
-}
-
-// dynvarCallbacksGold is the verified Clojure 1.12 / babashka output of
-// test/gold/dynvar_callbacks.cljc: dynamic bindings conveying through EAGER
-// callback-invoking builtins (mapv, filterv, reduce, run!, sort-by, swap!,
-// transducer application, with-out-str) when the binding lives in a child
-// ExecContext (inside a future). A context-free Fn.Invoke at any of those
-// sites resolves the var against the root context and breaks every scenario.
-const dynvarCallbacksGold = "[[100 100] [:keep] 200 [100] true (1 2 3) 100 [100] 100]"
-
-const dynvarCallbacksScript = "test/gold/dynvar_callbacks.cljc"
-
-// TestGoldDynvarCallbacksMatchesClojure validates eager-HOF binding
-// conveyance against Clojure, the same differential way as
-// TestGoldDynvarThreadsMatchesClojure.
-func TestGoldDynvarCallbacksMatchesClojure(t *testing.T) {
-	lg := buildLG(t)
-
-	got := lastNonEmptyLine(stdoutOf(t, lg, dynvarCallbacksScript))
-	if got != dynvarCallbacksGold {
-		t.Fatalf("let-go output = %q, want %q (eager-callback binding conveyance diverged from Clojure)", got, dynvarCallbacksGold)
-	}
-
-	if clj, err := exec.LookPath("clojure"); err == nil {
-		ref := lastNonEmptyLine(stdoutOf(t, clj, "-M", dynvarCallbacksScript))
-		if ref != dynvarCallbacksGold {
-			t.Fatalf("clojure reference drifted to %q; update dynvarCallbacksGold if this is an intended Clojure change", ref)
+		ref := lastNonEmptyLine(stdoutOf(t, clj, "-M", script))
+		if ref == "" {
+			t.Fatalf("clojure produced no output for %s", script)
 		}
+		if err := os.WriteFile(gold, []byte(ref+"\n"), 0o644); err != nil {
+			t.Fatalf("write gold %s: %v", gold, err)
+		}
+		t.Logf("re-derived %s from clojure: %q", gold, ref)
+	}
+
+	want, err := os.ReadFile(gold)
+	if err != nil {
+		t.Fatalf("read gold %s: %v\n(run `%s=1 go test` with clojure on PATH to (re)generate it)", gold, err, rederiveGoldEnv)
+	}
+	wantLine := strings.TrimSpace(string(want))
+
+	lg := buildLG(t)
+	got := lastNonEmptyLine(stdoutOf(t, lg, script))
+	if got != wantLine {
+		t.Fatalf("let-go output = %q, want %q (from %s)", got, wantLine, gold)
 	}
 }
 
