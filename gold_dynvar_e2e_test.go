@@ -85,6 +85,35 @@ func TestGoldNsThreadsMatchesClojure(t *testing.T) {
 	}
 }
 
+// dynvarCallbacksGold is the verified Clojure 1.12 / babashka output of
+// test/gold/dynvar_callbacks.cljc: dynamic bindings conveying through EAGER
+// callback-invoking builtins (mapv, filterv, reduce, run!, sort-by, swap!,
+// transducer application, with-out-str) when the binding lives in a child
+// ExecContext (inside a future). A context-free Fn.Invoke at any of those
+// sites resolves the var against the root context and breaks every scenario.
+const dynvarCallbacksGold = "[[100 100] [:keep] 200 [100] true (1 2 3) 100 [100] 100]"
+
+const dynvarCallbacksScript = "test/gold/dynvar_callbacks.cljc"
+
+// TestGoldDynvarCallbacksMatchesClojure validates eager-HOF binding
+// conveyance against Clojure, the same differential way as
+// TestGoldDynvarThreadsMatchesClojure.
+func TestGoldDynvarCallbacksMatchesClojure(t *testing.T) {
+	lg := buildLG(t)
+
+	got := lastNonEmptyLine(stdoutOf(t, lg, dynvarCallbacksScript))
+	if got != dynvarCallbacksGold {
+		t.Fatalf("let-go output = %q, want %q (eager-callback binding conveyance diverged from Clojure)", got, dynvarCallbacksGold)
+	}
+
+	if clj, err := exec.LookPath("clojure"); err == nil {
+		ref := lastNonEmptyLine(stdoutOf(t, clj, "-M", dynvarCallbacksScript))
+		if ref != dynvarCallbacksGold {
+			t.Fatalf("clojure reference drifted to %q; update dynvarCallbacksGold if this is an intended Clojure change", ref)
+		}
+	}
+}
+
 // stdoutOf runs cmd and returns its stdout, failing the test on a non-zero exit.
 // stderr is captured only to surface in failure messages.
 func stdoutOf(t *testing.T, name string, args ...string) string {

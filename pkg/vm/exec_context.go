@@ -196,3 +196,19 @@ func (ec *ExecContext) Invoke(fn Fn, args []Value) (Value, error) {
 		return fn.Invoke(args)
 	}
 }
+
+// Bind pins fn to this context: the returned Fn routes every later call
+// through ec.Invoke, so a callback handed to context-free machinery (Atom
+// retry loops, sort comparators, stored transducer steps) still resolves
+// dynamic vars against the caller's context. At the root this is the identity
+// — plain Invoke already resolves there — so root-context callers pay nothing.
+func (ec *ExecContext) Bind(fn Fn) Fn {
+	ec = ec.orRoot()
+	if ec == RootExecContext {
+		return fn
+	}
+	bound := &NativeFn{name: "ec-bound-fn", arity: -1, isVariadric: true}
+	bound.proxy = func(args []Value) (Value, error) { return ec.Invoke(fn, args) }
+	bound.ctxProxy = func(_ *ExecContext, args []Value) (Value, error) { return ec.Invoke(fn, args) }
+	return bound
+}

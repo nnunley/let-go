@@ -2040,16 +2040,15 @@ func installLangNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf("complement expected Fn")
 		}
-		wrapped, wrapErr := vm.NativeFnType.Wrap(func(args []vm.Value) (vm.Value, error) {
-			v, err := f.Invoke(args)
+		// The returned fn resolves f in ITS caller's context at call time, so
+		// (complement f) used inside an eager HOF still sees live bindings.
+		wrapped := vm.NewCtxNativeFn("complemented-fn", func(cec *vm.ExecContext, args []vm.Value) (vm.Value, error) {
+			v, err := cec.Invoke(f, args)
 			if err != nil {
 				return vm.NIL, err
 			}
 			return vm.Boolean(!vm.IsTruthy(v)), nil
 		})
-		if wrapErr != nil {
-			return vm.NIL, wrapErr
-		}
 		return wrapped, nil
 	})
 
@@ -2439,7 +2438,7 @@ func installLangNS() {
 		return ret, nil
 	})
 
-	update, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	update := vm.NewCtxNativeFn("update", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) < 3 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
@@ -2464,7 +2463,7 @@ func installLangNS() {
 		if len(vs) > 3 {
 			args = append(args, vs[3:]...)
 		}
-		v, err := fn.Invoke(args)
+		v, err := ec.Invoke(fn, args)
 		if err != nil {
 			return vm.NIL, err
 		}
@@ -2909,7 +2908,18 @@ func installLangNS() {
 		return mapLazyN(mfn, seqs), nil
 	})
 
-	mapv, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	mapv := vm.NewCtxNativeFn("mapv", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
+		// Bind the mapped fn to the caller's context: map is lazy, so the
+		// thunks invoke it through context-free machinery, but vec realizes
+		// them inside this (eager) extent — the bindings must still be live.
+		if len(vs) >= 1 {
+			if f, ok := vm.AsFn(vs[0]); ok {
+				bound := make([]vm.Value, len(vs))
+				copy(bound, vs)
+				bound[0] = ec.Bind(f)
+				vs = bound
+			}
+		}
 		v, err := mapf.(vm.Fn).Invoke(vs)
 		if err != nil {
 			return vm.NIL, err
@@ -2917,7 +2927,7 @@ func installLangNS() {
 		return vec.(vm.Fn).Invoke([]vm.Value{v})
 	})
 
-	reduce, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	reduce := vm.NewCtxNativeFn("reduce", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) < 2 || len(vs) > 3 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
@@ -2938,7 +2948,7 @@ func installLangNS() {
 			if len(vs) == 3 {
 				return vs[1], nil
 			}
-			return mfn.Invoke(nil)
+			return ec.Invoke(mfn, nil)
 		}
 		// Check for empty collection first (skip for lazy/cons — RawCount forces realization)
 		switch vs[sidx].(type) {
@@ -2950,7 +2960,7 @@ func installLangNS() {
 					if len(vs) == 3 {
 						return vs[1], nil
 					}
-					return mfn.Invoke(nil)
+					return ec.Invoke(mfn, nil)
 				}
 			}
 		}
@@ -2969,7 +2979,7 @@ func installLangNS() {
 			if len(vs) == 3 {
 				return vs[1], nil
 			}
-			return mfn.Invoke(nil)
+			return ec.Invoke(mfn, nil)
 		}
 		var acc vm.Value
 		if len(vs) == 3 {
@@ -2987,7 +2997,7 @@ func installLangNS() {
 				c := cs.ChunkedFirst()
 				n := c.ChunkCount()
 				for i := 0; i < n; i++ {
-					acc, err = mfn.Invoke([]vm.Value{acc, c.Nth(i)})
+					acc, err = ec.Invoke(mfn, []vm.Value{acc, c.Nth(i)})
 					if err != nil {
 						return vm.NIL, err
 					}
@@ -2998,7 +3008,7 @@ func installLangNS() {
 				seq = cs.ChunkedNext()
 				continue
 			}
-			acc, err = mfn.Invoke([]vm.Value{acc, seq.First()})
+			acc, err = ec.Invoke(mfn, []vm.Value{acc, seq.First()})
 			if err != nil {
 				return vm.NIL, err
 			}
@@ -3011,7 +3021,7 @@ func installLangNS() {
 		return acc, nil
 	})
 
-	some, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	some := vm.NewCtxNativeFn("some", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 2 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
@@ -3024,7 +3034,7 @@ func installLangNS() {
 			return vm.NIL, fmt.Errorf("some expected Seq")
 		}
 		for seq != nil {
-			v, err := f.Invoke([]vm.Value{seq.First()})
+			v, err := ec.Invoke(f, []vm.Value{seq.First()})
 			if err != nil {
 				return vm.NIL, err
 			}
@@ -3056,7 +3066,7 @@ func installLangNS() {
 		return t, nil
 	})
 
-	apply, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	apply := vm.NewCtxNativeFn("apply*", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 2 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
@@ -3065,24 +3075,24 @@ func installLangNS() {
 			return vm.NIL, fmt.Errorf("apply expected Fn")
 		}
 		if vs[1] == vm.NIL {
-			return f.Invoke(nil)
+			return ec.Invoke(f, nil)
 		}
 		if av, ok := vs[1].(vm.ArrayVector); ok {
-			return f.Invoke(av)
+			return ec.Invoke(f, av)
 		}
 		seq, err := seqOf(vs[1])
 		if err != nil {
 			return vm.NIL, fmt.Errorf("apply expected Seq")
 		}
 		if seq == nil {
-			return f.Invoke(nil)
+			return ec.Invoke(f, nil)
 		}
 		var args []vm.Value
 		for seq != nil {
 			args = append(args, seq.First())
 			seq = seq.Next()
 		}
-		return f.Invoke(args)
+		return ec.Invoke(f, args)
 	})
 
 	inNs := vm.NewCtxNativeFn("in-ns", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
@@ -3381,7 +3391,7 @@ func installLangNS() {
 	})
 
 	// (swap! a fn)
-	swap, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	swap := vm.NewCtxNativeFn("swap!", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) < 2 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
@@ -3393,7 +3403,7 @@ func installLangNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf("swap expected Fn")
 		}
-		return at.Swap(fn, vs[2:])
+		return at.Swap(ec.Bind(fn), vs[2:])
 	})
 
 	// (reset! a fn)
@@ -3428,7 +3438,7 @@ func installLangNS() {
 	})
 
 	// swap-vals!: like swap! but returns [old new]
-	swapVals, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	swapVals := vm.NewCtxNativeFn("swap-vals!", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) < 2 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
@@ -3441,7 +3451,7 @@ func installLangNS() {
 			return vm.NIL, fmt.Errorf("swap-vals! expected Fn")
 		}
 		old := at.Deref()
-		newVal, err := at.Swap(fn, vs[2:])
+		newVal, err := at.Swap(ec.Bind(fn), vs[2:])
 		if err != nil {
 			return vm.NIL, err
 		}
@@ -3688,7 +3698,7 @@ func installLangNS() {
 	// comparef is defined later (~line 4585); the earlier definition
 	// that lived here was unused — the later one shadowed it.
 
-	sort, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	sort := vm.NewCtxNativeFn("sort", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) < 1 || len(vs) > 2 {
 			return vm.NIL, fmt.Errorf("wrong number of arguments %d", len(vs))
 		}
@@ -3700,7 +3710,7 @@ func installLangNS() {
 			if !ok {
 				return vm.NIL, fmt.Errorf("sort expected a comparator function")
 			}
-			comp = fnComparator(compFn)
+			comp = fnComparator(ec.Bind(compFn))
 			coll, ok = vs[1].(vm.Collection)
 			if !ok {
 				return vm.NIL, fmt.Errorf("sort expected a Collection")
@@ -5425,7 +5435,7 @@ func installLangNS() {
 	})
 
 	// vswap! — apply fn to volatile value: (vswap! vol f args...)
-	vswap, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	vswap := vm.NewCtxNativeFn("vswap!", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) < 2 {
 			return vm.NIL, fmt.Errorf("vswap! expects at least 2 args")
 		}
@@ -5440,7 +5450,7 @@ func installLangNS() {
 		args := make([]vm.Value, 1+len(vs)-2)
 		args[0] = v.Deref()
 		copy(args[1:], vs[2:])
-		result, err := fn.Invoke(args)
+		result, err := ec.Invoke(fn, args)
 		if err != nil {
 			return vm.NIL, err
 		}
@@ -5834,7 +5844,7 @@ func installLangNS() {
 	})
 
 	// alter-meta! — (alter-meta! ref f & args)
-	alterMeta, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	alterMeta := vm.NewCtxNativeFn("alter-meta!", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) < 2 {
 			return vm.NIL, fmt.Errorf("alter-meta! expects at least 2 args")
 		}
@@ -5842,6 +5852,7 @@ func installLangNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf("alter-meta! expected Fn")
 		}
+		fn = ec.Bind(fn)
 		switch ref := vs[0].(type) {
 		case *vm.Atom:
 			return ref.AlterMeta(fn, vs[2:])
@@ -6143,7 +6154,7 @@ func installLangNS() {
 
 	ns.Def("map*", mapf)
 	ns.Def("mapv", mapv)
-	parMapV, _ := vm.NativeFnType.Wrap(parallelMapV)
+	parMapV := vm.NewCtxNativeFn("pmapv", parallelMapV)
 	ns.Def("pmapv", parMapV)
 	ns.Def("chunk-first", chunkFirst)
 	ns.Def("chunk-rest", chunkRest)
@@ -7214,7 +7225,7 @@ func installLangNS() {
 	// TODO: the read/apply/write is not atomic. let-go evaluates synchronously
 	// today, so contention does not arise. If concurrent evaluation is added,
 	// centralize the read/apply/write under Var-level synchronization.
-	alterVarRoot, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	alterVarRoot := vm.NewCtxNativeFn("alter-var-root", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) < 2 {
 			return vm.NIL, fmt.Errorf("alter-var-root expects at least 2 args")
 		}
@@ -7226,7 +7237,7 @@ func installLangNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf("alter-var-root expects a function")
 		}
-		result, err := v.AlterRootArgs(fn, vs[2:])
+		result, err := v.AlterRootArgs(ec.Bind(fn), vs[2:])
 		if err != nil {
 			return vm.NIL, err
 		}
@@ -7267,7 +7278,7 @@ func installLangNS() {
 	ns.Def("bound?", boundQ)
 
 	// macroexpand — expand a macro form once
-	macroexpandf, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	macroexpandf := vm.NewCtxNativeFn("macroexpand", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("macroexpand expects 1 arg")
 		}
@@ -7320,7 +7331,7 @@ func installLangNS() {
 		if !ok {
 			return form, nil
 		}
-		return macroFn.Invoke(args)
+		return ec.Invoke(macroFn, args)
 	})
 	ns.Def("macroexpand", macroexpandf)
 
@@ -7488,7 +7499,7 @@ func installLangNS() {
 	// another's buffer. This is no worse than the previous os.Stdout swap (same
 	// global-state race), but no better. Real isolation would require making
 	// with-out-str* a CtxNativeFn that pushes *out* on the caller's child ec.
-	withOutStrf, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
+	withOutStrf := vm.NewCtxNativeFn("with-out-str*", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
 		if len(vs) != 1 {
 			return vm.NIL, fmt.Errorf("with-out-str* expects 1 arg (a thunk)")
 		}
@@ -7502,9 +7513,12 @@ func installLangNS() {
 		}
 		buf := &bytes.Buffer{}
 		handle := vm.NewBoxed(NewWriterHandle("with-out-str*", buf))
-		outVar.PushBinding(handle)
-		defer outVar.PopBinding()
-		_, callErr := fn.Invoke(nil)
+		// Bind *out* in the CALLER's context (not the var root): inside a
+		// child context the thunk must see this binding, and a concurrent
+		// root-context printer must NOT.
+		ec.PushBinding(outVar, handle)
+		defer ec.PopBinding(outVar)
+		_, callErr := ec.Invoke(fn, nil)
 		if callErr != nil {
 			return vm.NIL, callErr
 		}
