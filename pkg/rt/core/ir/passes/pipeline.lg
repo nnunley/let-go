@@ -651,9 +651,20 @@
             sibling-registry (reduce (fn [m r]
                                        (merge m (lower-go/registry-entry-from-result r ns-name pkg-name)))
                                      {} pass1)
-            ;; Pass 2 re-lowers with the registry visible so intra-ns calls
-            ;; lower to direct Go calls. The cross-ns atom records trampoline-
-            ;; reaching load-var callees for memoized cached-*vm.Var resolution.
+            pass1 (lower-defn-forms defn-forms)
+            sibling-registry (reduce (fn [m r]
+                                       (merge m (lower-go/registry-entry-from-result r ns-name pkg-name)))
+                                     {} pass1)
+            ;; Native modules (e.g. clojure.core/seq -> corefns.Seq) registered
+            ;; via (rt/native-modules) seed the registry too, so cross-ns calls
+            ;; into native Go fns lower to direct pkg.Fn(...) calls instead of
+            ;; rt.CachedVarFn trampolines. Lowered siblings WIN over natives
+            ;; (a sibling that redefines a core fn shadows the native).
+            native-reg (lower-go/native-registry (rt/native-modules))
+            ;; Pass 2 re-lowers with the registry visible so intra-ns and
+            ;; cross-ns native calls lower to direct Go calls. The cross-ns atom
+            ;; records remaining trampoline-reaching load-var callees for
+            ;; memoized cached-*vm.Var resolution.
             ;;
             ;; Dangling-call hazard: a fn registered from pass 1 can take a
             ;; different (registry-visible) path in pass 2 and BAIL (no :decl),
@@ -673,10 +684,15 @@
                                            (merge m (lower-go/registry-entry-from-result r ns-name pkg-name))
                                            m))
                                        {} res))
+            ;; Accumulates the Go import paths of native modules actually
+            ;; direct-called in this ns (filled by lookup-direct-callable), so
+            ;; the emitted file imports e.g. corefns for `corefns.Seq(...)`.  
+            native-imports (atom #{})
             pass2 (let [cap (+ 2 (count sibling-registry))]
-                    (loop [reg sibling-registry guard 0]
+                    (loop [reg (merge native-reg sibling-registry) guard 0]
                       (let [cross (atom {})
                             res (binding [lower-go/*lowered-registry* reg
+                                          lower-go/*native-imports-used* native-imports
                                           lower-go/*cross-ns-vars-used* cross]
                                   (lower-defn-forms defn-forms))
                             reg' (select-keys reg (keys (emitted-registry res)))]
@@ -702,5 +718,12 @@
             ;; Native type/struct/method decls lead the file; Go resolves
             ;; package-scope references regardless of declaration order.
             all-results (into (into (into type-decls valid-results) extra-decls) cached-var-decls)
+            ;; Carry the accumulated native-module imports (corefns, …) into the
+            ;; file's import block via a decl-less import-only result.
+            native-import-results (if (seq @native-imports)
+                                    [{:decl nil
+                                      :imports (mapv (fn [p] {:path p}) (sort @native-imports))}]
+                                    [])
+            all-results (into all-results native-import-results)
             file-ast (lower-go/file pkg-name all-results)]
         (gogen/render file-ast)))))
