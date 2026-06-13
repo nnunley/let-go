@@ -272,6 +272,3 @@ ratchets: build lowered
 ratchets-update: build lowered
 	go run ./cmd/bench-ratchet update
 	./lg scripts/fanout-ratchet.lg update --go "$$(command -v go)" --no-regen
-
-# PHONY targets are for ones that have conflicting files/dirs present:
-.PHONY: test check-bundle-fresh check-lowered-fresh bench-ratchet bench-ratchet-update bench-ratchet-show perf-page perf-snapshot install-hooks check-generated fanout-ratchet fanout-ratchet-update fanout-ratchet-show ratchets ratchets-update
