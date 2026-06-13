@@ -13,6 +13,7 @@
    [clojure.string :as str]
    [ir.lower-go :as lower-go]
    [ir.passes.pipeline :as pipeline]
+   [ir.passes.typeinfer :as ti]
    [test :refer :all]))
 
 (def ^:private ns-sym 'test.direct-call-scratch)
@@ -69,6 +70,66 @@
       ;; The defn itself lowers (presence of `func helper` proves it).
       (is (str/includes? src "func helper")
           "helper should lower to a Go func"))))
+
+;; --- registry resolution: resolve-then-get, no key scan ----------------
+;; The flat *lowered-registry* key [ns name arity] already registers each
+;; form's symbol+arity, so resolution is exact-key gets — never a scan over
+;; (keys registry). Two layers:
+;;
+;;   resolve-registry-entry [registry ns name arity]
+;;     a single exact (get registry [ns name arity]). ns is concrete; nil is
+;;     NOT a wildcard. This is the O(1) primitive.
+;;
+;;   resolve-call-entry [registry cur-ns call-ns name arity]
+;;     Clojure refer semantics. A qualified call binds call-ns exactly. An
+;;     unqualified call (call-ns nil) resolves through the current ns: the
+;;     ns's own intern shadows the referred core default, so we try cur-ns
+;;     then clojure.core/core. resolve-then-get, so it's inherently order-
+;;     independent — fixing the #188 non-determinism where the old hash-key
+;;     scan dropped a func def under -tags gogen_ir.
+
+(def ^:private sibling-entry
+  {:go-name "myfn" :arity 1 :needs-error? false
+   :param-specs ["vm.Value"] :result-spec "vm.Value" :native? false :go-pkg nil})
+
+(def ^:private native-entry
+  {:go-name "Myfn" :arity 1 :needs-error? false
+   :param-specs ["vm.Value"] :result-spec "vm.Value" :native? true :go-pkg "corefns"})
+
+(deftest resolve-registry-entry-is-exact-get
+  (let [reg (array-map ['my.ns "myfn" 1]        sibling-entry
+                       ['clojure.core "myfn" 1] native-entry)]
+    (testing "exact [ns name arity] key resolves to that entry"
+      (is (= sibling-entry (lower-go/resolve-registry-entry reg 'my.ns "myfn" 1)))
+      (is (= native-entry  (lower-go/resolve-registry-entry reg 'clojure.core "myfn" 1))))
+    (testing "ns / name / arity miss yields nil — exact key, never a scan"
+      (is (nil? (lower-go/resolve-registry-entry reg 'other.ns "myfn" 1)))
+      (is (nil? (lower-go/resolve-registry-entry reg 'my.ns "nope" 1)))
+      (is (nil? (lower-go/resolve-registry-entry reg 'my.ns "myfn" 2))))
+    (testing "nil ns is not a wildcard — unqualified resolution is resolve-call-entry's job"
+      (is (nil? (lower-go/resolve-registry-entry reg nil "myfn" 1))))))
+
+(deftest resolve-call-entry-shadows-core-and-falls-back
+  (let [core-only     (assoc native-entry :go-name "OnlyCore")
+        reg-sib-first (array-map ['my.ns "myfn" 1]             sibling-entry
+                                 ['clojure.core "myfn" 1]      native-entry
+                                 ['clojure.core "only-core" 1] core-only)
+        reg-nat-first (array-map ['clojure.core "myfn" 1]      native-entry
+                                 ['clojure.core "only-core" 1] core-only
+                                 ['my.ns "myfn" 1]             sibling-entry)]
+    (testing "unqualified call: own-ns sibling shadows the core native, regardless of key order"
+      (is (= sibling-entry (lower-go/resolve-call-entry reg-sib-first 'my.ns nil "myfn" 1))
+          "sibling-first registry resolves unqualified call to the own-ns sibling")
+      (is (= sibling-entry (lower-go/resolve-call-entry reg-nat-first 'my.ns nil "myfn" 1))
+          "native-first registry ALSO resolves to the sibling (order independent)"))
+    (testing "unqualified call with no own-ns entry falls back to the referred core"
+      (is (= core-only (lower-go/resolve-call-entry reg-sib-first 'my.ns nil "only-core" 1))))
+    (testing "qualified call ignores current ns and binds the named ns exactly"
+      (is (= native-entry  (lower-go/resolve-call-entry reg-sib-first 'my.ns 'clojure.core "myfn" 1)))
+      (is (= sibling-entry (lower-go/resolve-call-entry reg-sib-first 'anything 'my.ns "myfn" 1))))
+    (testing "name / arity miss yields nil"
+      (is (nil? (lower-go/resolve-call-entry reg-sib-first 'my.ns nil "nope" 1)))
+      (is (nil? (lower-go/resolve-call-entry reg-sib-first 'my.ns nil "myfn" 2))))))
 
 ;; Realistic callee bodies — ones whose lowered signature is
 ;; (vm.Value, error), matching the shape that emit-call-stmts assumes
@@ -218,3 +279,45 @@
     ;; loop iteration rebinds, so this assertion is about the resting state.
     (is (= {} lower-go/*lowered-registry*)
         "default *lowered-registry* should be empty between compilations")))
+
+;; --- determinism: codegen output must not depend on the typeinfer budget ---
+;;
+;; *typeinfer-budget-ms* bounds the monotone worklist fixpoint by WALL-CLOCK
+;; time. When the clock is hit, typeinfer returns a PARTIAL result whose
+;; contents depend on how far it drained before the deadline — i.e. on machine
+;; load and scheduling, not on program content. Because the Go-lowering path
+;; encodes inferred types into the rendered source, a time-bounded partial
+;; fixpoint makes the generated tree non-deterministic across processes (the
+;; 4th hash/time-order axis behind the flaky core_go_lowered regen). It also
+;; DROPS forms entirely under starvation (a :bottom-heavy partial trips a
+;; downstream pass → the form throws → it's filtered out → undefined: build
+;; errors). The codegen path must therefore run typeinfer to FIXPOINT,
+;; independent of whatever budget the caller has bound.
+
+(defn- compile-ns-budget
+  "compile-ns, but run under an explicit *typeinfer-budget-ms* binding."
+  [budget forms]
+  (when-not (find-ns ns-sym) (create-ns ns-sym))
+  (binding [*ns* (find-ns ns-sym)]
+    (doseq [f forms] (eval f)))
+  (binding [ti/*typeinfer-budget-ms* budget]
+    (pipeline/lower-ns-to-go "scratch" ns-sym forms)))
+
+(deftest codegen-output-invariant-to-typeinfer-budget
+  (testing "lowered Go is identical under a starved vs unbounded typeinfer budget"
+    ;; A loop-carrying accumulator needs several worklist widenings to reach
+    ;; fixpoint, so a zero budget bails before draining (partial result),
+    ;; while nil runs to completion.
+    (let [forms ['(defn budget-countdown [n]
+                    (loop [i n acc 0]
+                      (if (> i 0) (recur (dec i) (+ acc i)) acc)))]
+          starved (str (compile-ns-budget 0 forms))    ;; immediate bail
+          full    (str (compile-ns-budget nil forms))] ;; fixpoint
+      ;; Goal (b): consistent outputs — byte-identical regardless of budget.
+      (is (= full starved)
+          (str "rendered Go must be invariant to *typeinfer-budget-ms*;\n"
+               "starved (len " (count starved) ") != full (len " (count full) ")"))
+      ;; Goal (a): entry points must not disappear under budget pressure.
+      (is (str/includes? starved "func budget_countdown(")
+          (str "the budget_countdown entry point must survive a starved budget; got:\n"
+               starved)))))

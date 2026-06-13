@@ -1,3 +1,9 @@
+---
+status: active
+last-verified: 2026-06-13
+human-verified:
+---
+
 # Regenerating generated artifacts after `.lg` edits
 
 Editing any `pkg/rt/core/**/*.lg` file requires regenerating **two** artifacts
