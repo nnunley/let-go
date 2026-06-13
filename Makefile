@@ -92,50 +92,13 @@ PERF-SNAPSHOT ?= $(PERF-TIMELINE-DIR)/$(shell date -u +%Y%m%dT%H%M%SZ)-$(COMMIT)
 # core_go_lowered/ is stale (untagged vs gogen_ir run two different
 # versions of the IR pipeline). Caught the hard way 2026-05-28.
 check-lowered-fresh:
-	@stale=$$(find pkg/rt/core -name '*.lg' -newer pkg/rt/core_go_lowered/ir/lower_go/lower_go.go 2>/dev/null); \
+	@stale=$$(find pkg/rt/core -name '*.lg' -newer pkg/rt/core_go_lowered/ir_lower_go/ir_lower_go.go 2>/dev/null); \
 	if [ -n "$$stale" ]; then \
 		echo "ERROR: pkg/rt/core_go_lowered/ is stale relative to:"; \
 		echo "$$stale" | sed 's/^/  /'; \
 		echo "Run 'go run -tags bootstrap ./cmd/lgbgen --target=go' to regenerate."; \
 		exit 1; \
 	fi
-
-# Authoritative, content-based staleness check. Unlike the mtime-based
-# check-bundle-fresh / check-lowered-fresh above, this compares a sha256
-# digest of every .lg + lgbgen source against the digest recorded in
-# pkg/rt/generated.sums at last `make generate`. Reliable across git/jj
-# checkouts (mtimes are not). Same logic as the genmanifest staleness
-# test and the pre-commit hook. Exits non-zero with remediation.
-check-generated: $(GO)
-	go run ./cmd/check-generated
-
-# Install the git pre-commit hook that runs check-generated. Idempotent.
-# jj does not run git hooks; jj users rely on the genmanifest staleness
-# test + CI + `make check-generated` instead.
-install-hooks:
-	@hookdir=$$(git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks); \
-	mkdir -p "$$hookdir"; \
-	ln -sf ../../scripts/pre-commit "$$hookdir/pre-commit"; \
-	chmod +x scripts/pre-commit; \
-	echo "installed pre-commit hook -> scripts/pre-commit"
-
-generate: $(GO) generate-ir-ops generate-ir-bridge generate-ir-data pkg/rt/core_compiled.lgb pkg/rt/core_go_lowered/ir/lower_go/lower_go.go
-
-# Regenerate pkg/ir/op_generated.go from examples/go-gen/ir_ops.lg.
-# Requires ./lg to exist (built by `make build`).
-generate-ir-ops: build
-	./scripts/generate-ir-ops.sh
-
-# Regenerate pkg/rt/ir_bridge_generated.go from examples/go-gen/ir_bridge.lg.
-# Requires ./lg to exist (built by `make build`).
-generate-ir-bridge: build
-	./scripts/generate-ir-bridge.sh
-
-# Regenerate pkg/rt/core/ir/data_generated.lg from examples/go-gen/ir_data.lg.
-# Lisp output (mechanical accessor surface for the IR data types).
-# Requires ./lg to exist (built by `make build`).
-generate-ir-data: build
-	./scripts/generate-ir-data.sh
 
 $(LG): $(GO) lg.go pkg/**/* pkg/rt/core_compiled.lgb
 	which go
