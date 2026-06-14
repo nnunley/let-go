@@ -287,6 +287,7 @@
 (defn- local-carrying-op? [op]
   (or (= op :block-arg)
       (= op :call)
+      (= op :try)   ; try-assign-stmts materialises the result into a local
       (= op :inc)
       (= op :dec)
       (contains? binary-op op)))
@@ -1316,6 +1317,114 @@
               (when callee
                 (emit-call-stmts f target invoke)))))))))
 
+(defn- try-assign-stmts [f closed-exprs nid]
+  "Lower a :try op (guarded region) to straight-line Go.
+
+   Body / handler / finally are closure values (refs[0], then optional
+   handler, then optional finally per the :try aux). Each is invoked via
+   rt.InvokeValueEC, returning (vm.Value, error). The orchestration mirrors
+   the bytecode VM's handler semantics without Go panic/recover (lowered Go
+   propagates exceptions as error return values, not panics):
+
+     bodyV, bodyE := rt.InvokeValueEC(ec, <body>, []vm.Value{})
+     <on error → invoke handler with vm.ErrorToValue(bodyE) bound as e>
+     <finally always runs; its error, or an uncaught body/handler error,
+      propagates via `return zero, err`>
+
+   Returns nil (→ caller falls back to bytecode) if any closure ref cannot
+   be materialised as a value expression."
+  (let [refs       (ir/refs nid f)
+        aux        (ir/aux nid f)
+        has-handler? (:has-handler aux)
+        has-finally? (:has-finally aux)
+        body-id    (nth refs 0)
+        handler-id (when has-handler? (nth refs 1))
+        finally-id (when has-finally? (nth refs (if has-handler? 2 1)))
+        body-x     (box-as-value f closed-exprs body-id)
+        handler-x  (when handler-id (box-as-value f closed-exprs handler-id))
+        finally-x  (when finally-id (box-as-value f closed-exprs finally-id))
+        ;; result target (pre-declared value-ident, or '_' when unused)
+        target     (if (live? f nid) (value-ident f nid) (gogen/ident "_"))
+        ;; per-inst-unique temp names so multiple trys in one fn don't clash
+        sfx        (str nid)
+        bodyV      (gogen/ident (str "tryBodyV_" sfx))
+        bodyE      (gogen/ident (str "tryBodyE_" sfx))
+        resV       (gogen/ident (str "tryResV_" sfx))
+        resE       (gogen/ident (str "tryResE_" sfx))
+        hV         (gogen/ident (str "tryHV_" sfx))
+        hE         (gogen/ident (str "tryHE_" sfx))
+        finE       (gogen/ident (str "tryFinE_" sfx))
+        nilx       (gogen/ident "nil")
+        blank      (gogen/ident "_")
+        empty-args (gogen/composite-lit (gogen/type "[]vm.Value") [])
+        zero-expr  (case (function-return-spec f)
+                     "bool"    (gogen/ident "false")
+                     "int"     (gogen/int-lit 0)
+                     "float64" (gogen/float-lit 0.0)
+                     "string"  (gogen/string-lit "")
+                     (gogen/ident "nil"))
+        invoke     (fn [callee-x args-x]
+                     (gogen/call (gogen/field-sel (gogen/ident "rt") "InvokeValueEC")
+                                 [(gogen/ident "ec") callee-x args-x]))
+        ret-err    (fn [err-id] (gogen/return-stmt [zero-expr err-id]))
+        ;; bodyV, bodyE := rt.InvokeValueEC(ec, <body>, []vm.Value{})
+        invoke-body (gogen/multi-assign ":=" [bodyV bodyE] [(invoke body-x empty-args)])
+        ;; finally invocation + error check (used when has-finally?)
+        invoke-fin  (gogen/multi-assign ":=" [blank finE] [(invoke finally-x empty-args)])
+        fin-check   (gogen/if-stmt nil (gogen/binary "!=" finE nilx) [(ret-err finE)] nil)
+        ;; handler invocation: hV, hE := rt.InvokeValueEC(ec, <handler>,
+        ;;   []vm.Value{vm.ErrorToValue(bodyE)})
+        caught      (gogen/call (gogen/field-sel (gogen/ident "vm") "ErrorToValue") [bodyE])
+        handler-args (gogen/composite-lit (gogen/type "[]vm.Value") [caught])
+        invoke-handler (when handler-x
+                         (gogen/multi-assign ":=" [hV hE] [(invoke handler-x handler-args)]))]
+    (when (and body-x
+               (or (not has-handler?) handler-x)
+               (or (not has-finally?) finally-x))
+      ;; Wrap in a bare `{ … }` block so the := temps are block-scoped: in the
+      ;; goto-emission path a `goto` must not jump over a variable declaration
+      ;; that is in scope at the target label (Go forbids it). Scoping the temps
+      ;; inside a block keeps them out of scope at any outer label.
+      (let [stmts
+            (cond
+              ;; --- catch + finally ---
+              (and has-handler? has-finally?)
+              [invoke-body
+               (gogen/multi-assign ":=" [resV resE] [bodyV bodyE])
+               (gogen/if-stmt nil (gogen/binary "!=" bodyE nilx)
+                              [invoke-handler
+                               (gogen/assign "=" resV hV)
+                               (gogen/assign "=" resE hE)]
+                              nil)
+               invoke-fin
+               fin-check
+               (gogen/if-stmt nil (gogen/binary "!=" resE nilx) [(ret-err resE)] nil)
+               (gogen/assign "=" target resV)]
+
+              ;; --- catch only ---
+              has-handler?
+              [invoke-body
+               (gogen/if-stmt nil (gogen/binary "!=" bodyE nilx)
+                              [invoke-handler
+                               (gogen/if-stmt nil (gogen/binary "!=" hE nilx) [(ret-err hE)] nil)
+                               (gogen/assign "=" target hV)]
+                              [(gogen/assign "=" target bodyV)])]
+
+              ;; --- finally only ---
+              has-finally?
+              [invoke-body
+               invoke-fin
+               fin-check
+               (gogen/if-stmt nil (gogen/binary "!=" bodyE nilx) [(ret-err bodyE)] nil)
+               (gogen/assign "=" target bodyV)]
+
+              ;; --- bare (try body) ---
+              :else
+              [invoke-body
+               (gogen/if-stmt nil (gogen/binary "!=" bodyE nilx) [(ret-err bodyE)] nil)
+               (gogen/assign "=" target bodyV)])]
+        [(gogen/block-stmt stmts)]))))
+
 (defn- lower-inst-stmts [f closed-exprs nid]
   (let [op  (ir/op nid f)
         aux (ir/aux nid f)]
@@ -1343,6 +1452,8 @@
         [])
       (= op :call)
       (call-assign-stmts f closed-exprs nid)
+      (= op :try)
+      (try-assign-stmts f closed-exprs nid)
       :else nil)))
 
 (defn- lower-block-stmts [f closed-exprs bid]
@@ -1380,7 +1491,8 @@
   (loop [blocks (ir/blocks f)]
     (cond
       (empty? blocks) false
-      (some (fn [nid] (= :call (ir/op nid f))) (ir/block-insts (first blocks) f)) true
+      (some (fn [nid] (let [op (ir/op nid f)] (or (= :call op) (= :try op))))
+            (ir/block-insts (first blocks) f)) true
       :else (recur (rest blocks)))))
 
 (defn- function-needs-rt? [f]
@@ -1392,6 +1504,7 @@
                                  aux  (ir/aux nid f)
                                  refs (ir/refs nid f)]
                              (or (= op :call)
+                                 (= op :try)  ; try-assign-stmts emits rt.InvokeValueEC
                                  (= op :load-var)
                                  (any-fn-template? aux)
                                  ;; Binary op with any vm.Value operand

@@ -52,6 +52,7 @@ const (
 	OpBranchIf    // .Refs[0] = cond; .Aux = struct{True,False *BranchTarget}
 	OpMakeClosure // .Refs[0] = *Func value (the func to wrap as a closure)
 	OpPushClosed  // .Refs[0] = closure, .Refs[1] = value to attach
+	OpTry         // .Refs[0] = body closure; then optional handler closure (binds the caught value), then optional finally closure; .Aux = {:has-handler bool :has-finally bool}
 )
 
 // opInfo describes an Op's structural metadata.
@@ -89,6 +90,7 @@ var opTable = [...]opInfo{
 	OpBranchIf:    {"BranchIf", 1, 0, false, true},
 	OpMakeClosure: {"MakeClosure", 1, 1, false, false},
 	OpPushClosed:  {"PushClosed", 2, 1, false, false},
+	OpTry:         {"Try", -1, 1, false, false},
 }
 
 // String returns the op's display name (or "Op?" for an unknown op).

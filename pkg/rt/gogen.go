@@ -662,6 +662,17 @@ func cExprStmt(v vm.Value) (vm.Value, error) {
 	return box(&ast.ExprStmt{X: e}), nil
 }
 
+// block-stmt: (gogen/block-stmt [stmts]) -> a bare `{ … }` block, introducing a
+// new lexical scope. Use to scope short-lived locals so a `goto` elsewhere in
+// the function does not jump over their declarations (Go forbids that).
+func cBlockStmt(v vm.Value) (vm.Value, error) {
+	stmts, err := stmtSlice(v)
+	if err != nil {
+		return vm.NIL, err
+	}
+	return box(&ast.BlockStmt{List: stmts}), nil
+}
+
 func cGotoStmt(nameV vm.Value) (vm.Value, error) {
 	name, err := asString(nameV)
 	if err != nil {
@@ -1682,6 +1693,7 @@ func installGogenNS() {
 		mk(wrap1Named("string-lit", cStringLit)),
 		mk(wrap1Named("char-lit", cCharLit)),
 		mk(wrap1Named("expr-stmt", cExprStmt)),
+		mk(wrap1Named("block-stmt", cBlockStmt)),
 		mk(wrap1Named("return-stmt", cReturn)),
 		mk(wrap1Named("goto-stmt", cGotoStmt)),
 		mk(wrap0Named("continue-stmt", cContinueStmt)),
