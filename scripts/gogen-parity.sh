@@ -89,13 +89,18 @@ fi
 # Helpers -----------------------------------------------------------------
 
 # Run a command, capture stdout+stderr to $1, append wall time to log. The
-# stdout of the function itself is the recorded wall time in seconds.
+# stdout of the function itself is the recorded wall time in seconds. The
+# inner command's REAL exit code is written to "$logfile.rc" — without this
+# the `wall=$(time_run ...)` substitution would only surface awk's exit (0),
+# silently swallowing a compile failure / panic / timeout in the suite. The
+# `if/else` keeps the failure from tripping `set -e` while still capturing rc.
 time_run() {
     local logfile="$1"; shift
-    local start end
+    local start end rc
     start=$(date +%s.%N)
-    "$@" >"$logfile" 2>&1
+    if "$@" >"$logfile" 2>&1; then rc=0; else rc=$?; fi
     end=$(date +%s.%N)
+    echo "$rc" >"$logfile.rc"
     awk -v s="$start" -v e="$end" 'BEGIN{printf "%.2f\n", e-s}'
 }
 
@@ -113,6 +118,31 @@ ir_buckets()  {
         sed -E 's/0x[0-9a-fA-F]{6,}/0xXXX/g'
 }
 
+# require_ran asserts a suite ACTUALLY RAN before its output is trusted.
+#   $1 human label   $2 log file   $3 grep -E pattern the summary MUST contain
+# A run that compiles, panics, times out, or matches 0 tests never emits its
+# summary line; without this guard its empty summary would later compare
+# "empty == empty" across engines and be reported as PARITY — a false pass.
+# This is the structural fix for the class of bug where success is inferred
+# from the absence of output (or from a pipe's exit code) rather than from a
+# positive "N tests ran" signal. Exits 2 (run/setup error), distinct from the
+# exit 1 used for genuine semantic divergence.
+require_ran() {
+    local label="$1" log="$2" pat="$3"
+    local rc; rc=$(cat "$log.rc" 2>/dev/null || echo "?")
+    if ! grep -qE "$pat" "$log"; then
+        {
+            echo "FATAL: $label produced no '$pat' summary line (inner exit=$rc)."
+            echo "       The suite failed to compile, panicked, timed out, or ran 0 tests."
+            echo "       This is a RUN failure, NOT a parity result — do not trust an OK."
+            echo "       --- last 20 lines of $log ---"
+            tail -20 "$log"
+        } >&2
+        trap - EXIT
+        exit 2
+    fi
+}
+
 # Suites ------------------------------------------------------------------
 
 run_jank() {
@@ -120,6 +150,7 @@ run_jank() {
     local log="$LOG_DIR/jank-${tag_label}.log"
     local wall
     wall=$(time_run "$log" go test $tag_flag ./test/ -run '^TestClojureTestSuite$' -count=1 -v -timeout 120s)
+    require_ran "jank/$tag_label" "$log" 'TOTALS: '
     printf "%-10s %-50s %ss\n" "$tag_label" "$(jank_totals "$log")" "$wall"
     echo "$wall:$(jank_totals "$log")" >"$LOG_DIR/jank-${tag_label}.summary"
 }
@@ -129,6 +160,7 @@ run_ir_stress() {
     local log="$LOG_DIR/${mode}-${tag_label}.log"
     local wall
     wall=$(time_run "$log" go run $tag_flag . scripts/ir-stress.lg "$mode" "$IR_DIR" "${IR_CORPUS[@]}")
+    require_ran "${mode}/$tag_label" "$log" '^Passed:'
     local pass fail buckets
     pass=$(grep -m1 "^Passed:" "$log" | awk '{print $2}')
     fail=$(grep -m1 "^Failed:" "$log" | awk '{print $2}')
