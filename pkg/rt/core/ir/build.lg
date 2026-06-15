@@ -116,6 +116,32 @@
                     (into #{} (concat keys-syms strs-syms as-sym other-syms)))
     :else #{}))
 
+(defn- parse-try [forms]
+  "Split the subforms of a (try …) into [body-forms catch-clause finally-clause].
+   body-forms     = vector of forms that run in the guarded region
+   catch-clause   = nil | {:binding <sym> :body (forms)}
+   finally-clause = nil | {:body (forms)}
+   Catch shape follows the bytecode compiler: a leading class symbol in
+   (catch Class e body…) is dropped (catch-all), so (catch e …) and
+   (catch Class e …) both bind e."
+  (loop [fs forms body [] catch-clause nil finally-clause nil]
+    (if (empty? fs)
+      [body catch-clause finally-clause]
+      (let [head (first fs)]
+        (cond
+          (and (seq? head) (= (first head) 'catch))
+          (let [parts     (vec (rest head))
+                class?    (and (>= (count parts) 3)
+                               (symbol? (nth parts 0))
+                               (symbol? (nth parts 1)))
+                binding   (if class? (nth parts 1) (nth parts 0))
+                cbody     (if class? (vec (drop 2 parts)) (vec (drop 1 parts)))]
+            (recur (rest fs) body {:binding binding :body cbody} finally-clause))
+          (and (seq? head) (= (first head) 'finally))
+          (recur (rest fs) body catch-clause {:body (vec (rest head))})
+          :else
+          (recur (rest fs) (conj body head) catch-clause finally-clause))))))
+
 (defn captures-of [form known-locals]
   "Return the SET of symbols `form` references that are bound in
    `known-locals`. Used by build-if/build-loop to compute which block-
@@ -186,6 +212,22 @@
               new-locals    (into known-locals let-bound-set)
               body-captures (into #{} (mapcat #(captures-of % new-locals) body))]
           (into used (difference body-captures let-bound-set)))
+        (= head 'try)
+        ;; try guards a body; (catch e …) binds e in the handler body only;
+        ;; (finally …) binds nothing. Mirror build-try's split so captures
+        ;; (used for cross-block threading) don't treat catch/e/finally as
+        ;; free locals.
+        (let [[body-forms catch-clause finally-clause] (parse-try (rest form))
+              body-caps (mapcat #(captures-of % known-locals) body-forms)
+              catch-caps (if catch-clause
+                           (mapcat #(captures-of % (difference known-locals
+                                                               #{(:binding catch-clause)}))
+                                   (:body catch-clause))
+                           [])
+              fin-caps (if finally-clause
+                         (mapcat #(captures-of % known-locals) (:body finally-clause))
+                         [])]
+          (into #{} (concat body-caps catch-caps fin-caps)))
         :else
         (into #{} (mapcat #(captures-of % known-locals) form))))
     (vector? form)
@@ -196,7 +238,7 @@
 
 (declare build-list build-symbol build-if build-let build-do build-quote
          build-var build-set! build-loop build-recur build-fn*
-         build-vector build-map build-call)
+         build-vector build-map build-call build-try)
 
 ;; Sentinel returned by recur / any form whose current-block is already
 ;; terminated. Callers must check for this before emitting more code.
@@ -295,6 +337,17 @@
                       [#{} bound]
                       pairs)]
           (into used (mapcat #(free-vars % new-bound) body)))
+        (= head 'try)
+        (let [[body-forms catch-clause finally-clause] (parse-try (rest form))
+              body-fv (mapcat #(free-vars % bound) body-forms)
+              catch-fv (if catch-clause
+                         (mapcat #(free-vars % (conj bound (:binding catch-clause)))
+                                 (:body catch-clause))
+                         [])
+              fin-fv (if finally-clause
+                       (mapcat #(free-vars % bound) (:body finally-clause))
+                       [])]
+          (into #{} (concat body-fv catch-fv fin-fv)))
         :else
         (into #{} (mapcat #(free-vars % bound) form))))
     (vector? form)
@@ -447,6 +500,7 @@
       (= head 'loop*) (build-loop form ctx)
       (= head 'recur) (build-recur form ctx)
       (= head 'fn*)   (build-fn* form ctx)
+      (= head 'try)   (build-try form ctx)
       builtin         (build-builtin-op builtin form ctx)
       ;; Keywords, numbers, strings are callable (implement IFn in Clojure).
       ;; Treat them as Const values, build as generic call with const head.
@@ -517,6 +571,37 @@
         (let [fn-id   (add-inst! ctx (ctx-block ctx)
                         :load-var [] (resolve 'array-map))]
           (build-call-with-head fn-id pairs ctx))))))
+
+(defn build-try [form ctx]
+  "(try body… (catch [Class] e handler…) (finally fin…)) — guarded region.
+
+   Body / handler / finally are built as inner fn* closures (reusing the
+   closure-lowering machinery): the body and finally take no args, the
+   handler takes the caught-value binding as its single parameter. A single
+   :try op references those closure values; lower_go emits the orchestration
+   (invoke body; on error bind the handler param and invoke the handler;
+   always invoke finally). Modelling the regions as closures keeps the
+   guarded body's interior error-exits inside its own (val,err) frame, so
+   the surrounding function needs only one handler edge."
+  (let [[body-forms catch-clause finally-clause] (parse-try (rest form))
+        ;; Build the wrapper fn* forms with `apply list` (not `cons`): build-form
+        ;; dispatches code lists via `list?`, and a cons-produced seq is not
+        ;; list?, so a consed (fn* …) would be rejected as an unrecognized form.
+        body-fn   (apply list 'fn* [] body-forms)
+        body-id   (build-form body-fn ctx)
+        handler-id (when catch-clause
+                     (build-form (apply list 'fn* [(:binding catch-clause)]
+                                        (:body catch-clause))
+                                 ctx))
+        finally-id (when finally-clause
+                     (build-form (apply list 'fn* [] (:body finally-clause))
+                                 ctx))
+        refs (vec (concat [body-id]
+                          (when handler-id [handler-id])
+                          (when finally-id [finally-id])))
+        aux  {:has-handler (some? handler-id)
+              :has-finally (some? finally-id)}]
+    (add-inst! ctx (ctx-block ctx) :try refs aux)))
 
 (defn build-do [form ctx]
   "do evaluates each form sequentially; result is the last one."

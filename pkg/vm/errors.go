@@ -158,6 +158,12 @@ func errorToValue(err error) Value {
 	return NewExInfo(msg, data, nil)
 }
 
+// ErrorToValue is the exported entry point used by gogen_ir-lowered Go code to
+// convert a Go error returned by an invoked try body/handler into the catchable
+// Value that a (catch e ...) handler binds. Mirrors the bytecode VM's handler
+// path (vm.go handleError), so AOT-lowered try/catch sees the same caught value.
+func ErrorToValue(err error) Value { return errorToValue(err) }
+
 // thrownPanic is used to propagate errors through native Go code (map, filter, sort).
 // It's caught by recoverThrownPanic in Func/Closure.Invoke.
 type thrownPanic struct {
