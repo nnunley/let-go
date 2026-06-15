@@ -1,0 +1,92 @@
+;; term/* ANSI output now consults the CURRENT binding of *out*, the
+;; same way println/print/pr/prn do (test.io-binding-test). Before this
+;; change every term/* op wrote ANSI straight to os.Stdout via fmt.Print,
+;; so (binding [*out* x] (term/clear)) silently ignored x. These tests pin
+;; the fixed behavior — and, by capturing escapes through with-out-str,
+;; double as proof that ANSI rides in-band on *out* (one stream, not two).
+(ns test.term-out-binding-test
+  (:require [test :refer :all]))
+
+;; ----------------------------------------------------------------
+;; ANSI control sequences route through *out*'s current binding.
+;; \u001b is ESC. move-cursor/write-at take (col row ...) and emit
+;; ESC[row;col... (row before col, per the ANSI CUP convention).
+;; ----------------------------------------------------------------
+
+(deftest clear-consults-out-binding
+  (testing "term/clear emits ESC[2J through *out*"
+    (is (= "\u001b[2J"
+           (with-out-str (term/clear))))))
+
+(deftest move-cursor-consults-out-binding
+  (testing "term/move-cursor col=3 row=5 emits ESC[5;3H through *out*"
+    (is (= "\u001b[5;3H"
+           (with-out-str (term/move-cursor 3 5))))))
+
+(deftest write-consults-out-binding
+  (testing "term/write emits its string through *out*"
+    (is (= "X"
+           (with-out-str (term/write "X"))))))
+
+(deftest set-fg-consults-out-binding
+  (testing "term/set-fg r g b emits the truecolor SGR through *out*"
+    (is (= "\u001b[38;2;1;2;3m"
+           (with-out-str (term/set-fg 1 2 3))))))
+
+(deftest write-at-consults-out-binding
+  (testing "term/write-at col=2 row=4 emits ESC[4;2H + string through *out*"
+    (is (= "\u001b[4;2Hhi"
+           (with-out-str (term/write-at 2 4 "hi"))))))
+
+;; ----------------------------------------------------------------
+;; The architectural claim: ANSI control and text share ONE stream.
+;; A render-shaped sequence captures as a single interleaved string.
+;; ----------------------------------------------------------------
+
+(deftest ansi-and-text-interleave-on-one-stream
+  (testing "cursor move + glyph + style reset capture as one in-band string"
+    (is (= "\u001b[1;1HX\u001b[0m"
+           (with-out-str
+             (term/move-cursor 1 1)
+             (term/write "X")
+             (term/reset-style))))))
+
+;; ----------------------------------------------------------------
+;; The load-bearing new behavior: term/* honors a *out* rebind. Before
+;; this change the outer with-out-str would have captured the ESC[2J
+;; even though the inner binding pointed *out* elsewhere.
+;; ----------------------------------------------------------------
+
+(deftest term-respects-out-rebind
+  (testing "(binding [*out* file] (term/clear)) routes to the rebound handle, not the outer *out*"
+    ;; Rebind to a temp file rather than *err*: *err* is a real terminal, so
+    ;; the ESC[2J would clear/pollute the terminal or CI log during the run.
+    ;; The file lets us assert both halves — the outer *out* captured nothing,
+    ;; and the rebound handle received the escape.
+    (let [path "/tmp/letgo-term-out-rebind-test.txt"
+          f (open path :write)
+          outer (with-out-str
+                  (binding [*out* f]
+                    (term/clear)))]
+      (close! f)
+      (is (= "" outer))
+      (is (= "\u001b[2J" (slurp path))))))
+
+;; ----------------------------------------------------------------
+;; term/flush syncs the ACTIVE *out* binding, not the process stdout —
+;; so a redirected render flushes the same sink that received the bytes.
+;; A file handle is unbuffered, so this pins that flush resolves *out*
+;; and targets it without error; it can't catch a byte-level missed
+;; flush. The buffered-writer case (where the flush is load-bearing) is
+;; an embedder concern, and the wasm xterm flush runs every render frame.
+;; ----------------------------------------------------------------
+
+(deftest flush-targets-out-binding
+  (testing "(binding [*out* file] (term/write ...) (term/flush)) lands in the rebound handle"
+    (let [path "/tmp/letgo-term-flush-test.txt"
+          f (open path :write)]
+      (binding [*out* f]
+        (term/write "frame")
+        (term/flush))
+      (close! f)
+      (is (= "frame" (slurp path))))))
