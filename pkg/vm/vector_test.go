@@ -296,11 +296,9 @@ func TestPersistentVectorSeq(t *testing.T) {
 		// Test Conj
 		result := seq.(Collection).Conj(Int(42)).(Collection)
 
-		// Verify result (should be prepended to the end of the collection)
+		// conj onto a seq prepends: (42 1 2 3).
 		resultSeq := result.(Sequable).Seq()
-		// Looking at the test results, it seems that Conj is resulting in [3, 2, 1, 42]
-		// rather than [42, 1, 2, 3] as we initially expected
-		expectedValues := []Value{Int(3), Int(2), Int(1), Int(42)}
+		expectedValues := []Value{Int(42), Int(1), Int(2), Int(3)}
 
 		for i, expected := range expectedValues {
 			if got := resultSeq.First(); got != expected {

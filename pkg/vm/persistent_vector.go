@@ -206,6 +206,9 @@ func (s *PersistentVectorSeq) Cons(val Value) Seq {
 	return NewCons(val, s)
 }
 
+// Nth implements Indexed: positional access by integer index.
+func (s *PersistentVectorSeq) Nth(i int) Value { return s.ValueAt(Int(i)) }
+
 // ValueAt implements Lookup for PersistentVectorSeq so that `get` works on seq views.
 func (s *PersistentVectorSeq) ValueAt(key Value) Value {
 	return s.ValueAtOr(key, NIL)
@@ -392,6 +395,9 @@ func newPath(level uint, tail []Value) *vnode {
 	ret.array = append(ret.array, newPath(level-shift, tail))
 	return ret
 }
+
+// Nth implements Indexed: positional access by integer index.
+func (v PersistentVector) Nth(i int) Value { return v.ValueAt(Int(i)) }
 
 // ValueAt implements Associative
 func (v PersistentVector) ValueAt(key Value) Value {
@@ -634,15 +640,12 @@ func (s *PersistentVectorSeq) Empty() Collection {
 
 // Conj implements Collection
 func (s *PersistentVectorSeq) Conj(val Value) Collection {
-	// Use EmptyList and build the collection
-	result := EmptyList.Cons(val).(Collection)
-
-	// Add all remaining elements from the sequence
+	values := make([]Value, s.vec.count-s.i+1)
+	values[0] = val
 	for i := s.i; i < s.vec.count; i++ {
-		result = result.Conj(s.vec.ValueAt(Int(i)))
+		values[i-s.i+1] = s.vec.ValueAt(Int(i))
 	}
-
-	return result
+	return NewList(values).(*List)
 }
 
 type theSequenceType struct{}

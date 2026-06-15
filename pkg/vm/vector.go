@@ -225,13 +225,18 @@ func (s *ArrayVectorSeq) Empty() Collection {
 }
 
 func (s *ArrayVectorSeq) Conj(val Value) Collection {
-	// Conj on a seq creates a new seq with val at front
-	return s.Cons(val).(*List)
+	values := make([]Value, len(s.vec)-s.i+1)
+	values[0] = val
+	copy(values[1:], s.vec[s.i:])
+	return NewList(values).(*List)
 }
 
 func (s *ArrayVectorSeq) Seq() Seq {
 	return s
 }
+
+// Nth implements Indexed: positional access by integer index.
+func (s *ArrayVectorSeq) Nth(i int) Value { return s.ValueAt(Int(i)) }
 
 // ValueAt implements Lookup for ArrayVectorSeq so that `get` works on seq views.
 func (s *ArrayVectorSeq) ValueAt(key Value) Value {
@@ -273,6 +278,8 @@ func NewArrayVector(v []Value) Value {
 	copy(vk, v)
 	return ArrayVector(vk)
 }
+
+func (l ArrayVector) Nth(i int) Value { return l.ValueAt(Int(i)) }
 
 func (l ArrayVector) ValueAt(key Value) Value {
 	return l.ValueAtOr(key, NIL)

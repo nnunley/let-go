@@ -260,6 +260,11 @@ func (t *TransientVector) Persistent() (Value, error) {
 	return NewPersistentVector(t.array), nil
 }
 
+// Nth implements Indexed: positional access by integer index. TransientVector
+// is positional but not seqable, so `nth` must reach it through this rather
+// than seq traversal.
+func (t *TransientVector) Nth(i int) Value { return t.ValueAt(Int(i)) }
+
 func (t *TransientVector) ValueAt(key Value) Value {
 	idx, ok := key.(Int)
 	if !ok || int(idx) < 0 || int(idx) >= len(t.array) {

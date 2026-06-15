@@ -1,6 +1,7 @@
 ;; Tests for builtins that don't have dedicated tests
 (ns test.builtins-test
-  (:require [test :refer :all]))
+  (:require
+   [test :refer :all]))
 
 (deftest subs-test
   (testing "subs substring"
@@ -128,6 +129,13 @@
 
   (testing "nth on lazy seq"
     (is (= 5 (nth (iterate inc 0) 5))))
+
+  (testing "nth on unresolved-empty lazy seq"
+    (is (= :default (nth (mapcat (fn [x] [x]) []) 0 :default)))
+    (is (= :caught (try (nth (mapcat (fn [x] [x]) []) 0) (catch e :caught)))))
+
+  (testing "nth on seqable non-indexed collection"
+    (is (= [:b 2] (nth (array-map :a 1 :b 2 :c 3) 1))))
 
   (testing "nth on string"
     (is (= \e (nth "hello" 1)))))

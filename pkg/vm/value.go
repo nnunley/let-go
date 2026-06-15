@@ -76,6 +76,21 @@ type Lookup interface {
 	ValueAtOr(Value, Value) Value
 }
 
+// Indexed marks positional collections — those whose elements are addressed by
+// a 0-based integer index, as opposed to maps/sets (key-addressable) and lazy
+// seqs (sequential-only). `nth` dispatches on this to use an O(1)-ish indexed
+// access without seq traversal. Implementations must satisfy: Nth(i) is valid
+// for 0 <= i < RawCount(); callers bounds-check via RawCount() before calling.
+//
+// Crucially this excludes maps/sets (which are Lookup+Counted but NOT positional)
+// and transient/chunk types that aren't seqable — so adding a new positional
+// type is a matter of implementing this interface, not editing a type switch.
+type Indexed interface {
+	Value
+	Nth(i int) Value
+	RawCount() int
+}
+
 type Keyed interface {
 	Value
 	Contains(Value) Boolean

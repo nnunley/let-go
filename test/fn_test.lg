@@ -1,6 +1,7 @@
 ;; Clojure function and higher-order function tests
 (ns test.fn-test
-  (:require [test :refer :all]))
+  (:require
+   [test :refer :all]))
 
 (deftest fn-basics
   (testing "anonymous functions"
@@ -8,16 +9,14 @@
     (is (= 3 (#(+ %1 %2) 1 2)))
     (is (= 6 (#(+ %1 %2 %3) 1 2 3)))
     (is (= :caught (try ((fn [x] x) 1 2) (catch e :caught)))))
-  
   (testing "multi-arity"
-    (let [f (fn 
+    (let [f (fn
               ([x] x)
               ([x y] (+ x y))
               ([x y z] (+ x y z)))]
       (is (= 1 (f 1)))
       (is (= 3 (f 1 2)))
       (is (= 6 (f 1 2 3)))))
-  
   (testing "variadic"
     (let [f (fn [x & rest] (cons x rest))]
       (is (= '(1) (f 1)))
@@ -28,7 +27,10 @@
     (is (= 6 (apply + [1 2 3])))
     (is (= 10 (apply + 1 2 [3 4])))
     (is (= [] (apply vector [])))
-    (is (= [1 2 3] (apply vector [1 2 3])))))
+    (is (= [1 2 3] (apply vector [1 2 3]))))
+  (testing "apply ignores unresolved-empty lazy arg seq"
+    (is (= [] (apply vector (mapcat (fn [x] [x]) []))))
+    (is (= 10 (apply + 10 (mapcat (fn [x] [x]) []))))))
 
 (deftest partial-test
   (testing "partial application"
@@ -58,7 +60,6 @@
   (testing "identity"
     (is (= 5 (identity 5)))
     (is (= [1 2] (identity [1 2]))))
-  
   (testing "complement"
     (is ((complement even?) 3))
     (is (not ((complement even?) 2)))))
@@ -66,12 +67,26 @@
 (deftest some-every
   (testing "some"
     (is (some even? [1 2 3]))  ; returns first truthy result (true from even?)
-    (is (not (some even? [1 3 5]))))
-  
+    (is (not (some even? [1 3 5])))
+    (is (= 40 (some #{40} (range 100))))
+    (is (nil? (some #{200} (range 100))))
+    (let [seen (atom 0)]
+      (is (= 40
+             (some (fn [x]
+                     (swap! seen inc)
+                     (when (= x 40) x))
+                   (range 100))))
+      (is (= 41 @seen)))
+    ;; Regression: some must not invoke the predicate on an unresolved-empty
+    ;; LazySeq. seqOf returns LazySeq directly, so some must resolve empties
+    ;; before its iteration loop.
+    (let [seen (atom 0)]
+      (is (nil? (some (fn [x] (swap! seen inc) x)
+                      (mapcat (fn [x] [x]) []))))
+      (is (= 0 @seen))))
   (testing "every?"
     (is (every? even? [2 4 6]))
     (is (not (every? even? [2 3 4]))))
-  
   (testing "not-every? and not-any?"
     (is (not-every? even? [1 2 3]))
     (is (not-any? even? [1 3 5]))))

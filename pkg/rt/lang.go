@@ -1188,6 +1188,43 @@ func forceSeq(s vm.Seq) vm.Seq {
 	return s
 }
 
+func appendSeqValues(dst []vm.Value, s vm.Seq) []vm.Value {
+	for s != nil {
+		if cs, ok := vm.AsChunkedSeq(s); ok {
+			c := cs.ChunkedFirst()
+			n := c.ChunkCount()
+			for i := 0; i < n; i++ {
+				dst = append(dst, c.Nth(i))
+			}
+			s = cs.ChunkedNext()
+			continue
+		}
+		dst = append(dst, s.First())
+		s = s.Next()
+	}
+	return dst
+}
+
+func nthInSeq(s vm.Seq, n int) (vm.Value, bool) {
+	for i := 0; s != nil; i++ {
+		if cs, ok := vm.AsChunkedSeq(s); ok {
+			c := cs.ChunkedFirst()
+			nc := c.ChunkCount()
+			if n < i+nc {
+				return c.Nth(n - i), true
+			}
+			i += nc - 1
+			s = cs.ChunkedNext()
+			continue
+		}
+		if i == n {
+			return s.First(), true
+		}
+		s = s.Next()
+	}
+	return vm.NIL, false
+}
+
 func mapLazy1(f vm.Fn, s vm.Seq) vm.Seq {
 	if s == nil {
 		return nil
@@ -2881,15 +2918,19 @@ func installLangNS() {
 			}
 			return vm.NIL, nil
 		}
-		// Fast path: Lookup types (ArrayVector, PersistentVector, String)
-		if l, ok := vs[0].(vm.Lookup); ok {
-			if hasDefault {
-				return l.ValueAtOr(vm.Int(n), notFound), nil
-			}
-			if c, ok := vs[0].(vm.Counted); ok && (n < 0 || n >= c.RawCount()) {
+		// Fast path: positional collections (vm.Indexed) — those addressed by a
+		// 0-based integer index. Maps and sets are key-addressable rather than
+		// positional and fall through to the seq walk below, as do lazy seqs.
+		// This path is the only correct route for positional-but-not-seqable
+		// types (transient vectors, chunks): the seq walk would return nil.
+		if ix, ok := vs[0].(vm.Indexed); ok {
+			if n < 0 || n >= ix.RawCount() {
+				if hasDefault {
+					return notFound, nil
+				}
 				return vm.NIL, fmt.Errorf("nth index out of bounds")
 			}
-			return l.ValueAt(vm.Int(n)), nil
+			return ix.Nth(n), nil
 		}
 		// Seq path: linear walk
 		if n < 0 {
@@ -2902,11 +2943,8 @@ func installLangNS() {
 		if err != nil {
 			return notFound, nil
 		}
-		for i := 0; s != nil; i++ {
-			if i == n {
-				return s.First(), nil
-			}
-			s = s.Next()
+		if v, ok := nthInSeq(forceSeq(s), n); ok {
+			return v, nil
 		}
 		if !hasDefault {
 			return vm.NIL, fmt.Errorf("nth index out of bounds")
@@ -3095,8 +3133,33 @@ func installLangNS() {
 		if err != nil {
 			return vm.NIL, fmt.Errorf("some expected Seq")
 		}
+		// seqOf returns LazySeq directly; resolve here so an unresolved-empty
+		// LazySeq becomes nil instead of invoking the predicate once with nil.
+		if ls, ok := seq.(*vm.LazySeq); ok {
+			seq = ls.Resolve()
+		}
+		fargs := []vm.Value{nil}
 		for seq != nil {
-			v, err := ec.Invoke(f, []vm.Value{seq.First()})
+			// Chunked fast path: walk whole chunks via Nth to avoid per-element
+			// seq.Next()/First() churn on chunked sources such as vectors/ranges.
+			if cs, ok := vm.AsChunkedSeq(seq); ok {
+				c := cs.ChunkedFirst()
+				n := c.ChunkCount()
+				for i := 0; i < n; i++ {
+					fargs[0] = c.Nth(i)
+					v, err := ec.Invoke(f, fargs)
+					if err != nil {
+						return vm.NIL, err
+					}
+					if vm.IsTruthy(v) {
+						return v, nil
+					}
+				}
+				seq = cs.ChunkedNext()
+				continue
+			}
+			fargs[0] = seq.First()
+			v, err := ec.Invoke(f, fargs)
 			if err != nil {
 				return vm.NIL, err
 			}
@@ -3146,14 +3209,11 @@ func installLangNS() {
 		if err != nil {
 			return vm.NIL, fmt.Errorf("apply expected Seq")
 		}
+		seq = forceSeq(seq)
 		if seq == nil {
 			return ec.Invoke(f, nil)
 		}
-		var args []vm.Value
-		for seq != nil {
-			args = append(args, seq.First())
-			seq = seq.Next()
-		}
+		args := appendSeqValues(nil, seq)
 		return ec.Invoke(f, args)
 	})
 
@@ -3345,10 +3405,7 @@ func installLangNS() {
 			if err != nil {
 				return vm.NIL, fmt.Errorf("concat expected Seq")
 			}
-			for vseq != nil {
-				ret = append(ret, vseq.First())
-				vseq = vseq.Next()
-			}
+			ret = appendSeqValues(ret, forceSeq(vseq))
 		}
 		r, err := vm.ListType.Box(ret)
 		if err != nil {

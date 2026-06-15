@@ -1,5 +1,6 @@
 (ns test.transducer-test
-  (:require [test :refer :all]))
+  (:require
+   [test :refer :all]))
 
 ;; --- reduced ---
 
@@ -14,8 +15,16 @@
 (deftest reduce-with-reduced
   (testing "reduce stops on reduced"
     (is (= 6 (reduce (fn [acc x]
-                        (if (= x 4) (reduced acc) (+ acc x)))
-                      0 [1 2 3 4 5])))))
+                       (if (= x 4) (reduced acc) (+ acc x)))
+               0 [1 2 3 4 5])))
+    (let [seen (atom 0)]
+      (is (= 780
+             (reduce (fn [acc x]
+                       (swap! seen inc)
+                       (if (= x 40) (reduced acc) (+ acc x)))
+                     0
+                     (range 100))))
+      (is (= 41 @seen)))))
 
 ;; --- map transducer ---
 
