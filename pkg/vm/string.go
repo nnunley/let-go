@@ -147,6 +147,9 @@ func (l String) Seq() Seq {
 	return ret
 }
 
+// Nth implements Indexed: positional access by integer index.
+func (l String) Nth(i int) Value { return l.ValueAt(Int(i)) }
+
 func (l String) ValueAt(key Value) Value {
 	return l.ValueAtOr(key, NIL)
 }

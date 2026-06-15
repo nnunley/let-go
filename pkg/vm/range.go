@@ -123,6 +123,9 @@ func (l *Range) String() string {
 	return out + ")"
 }
 
+// Nth implements Indexed: positional access by integer index.
+func (l *Range) Nth(i int) Value { return l.ValueAt(Int(i)) }
+
 func (l *Range) ValueAt(key Value) Value {
 	return l.ValueAtOr(key, NIL)
 }

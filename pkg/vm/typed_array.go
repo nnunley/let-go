@@ -237,6 +237,9 @@ func (a *TypedArray) Seq() Seq {
 
 // --- Lookup interface (for nth/get fast path) ---
 
+// Nth implements Indexed: positional access by integer index.
+func (a *TypedArray) Nth(i int) Value { return a.ValueAt(Int(i)) }
+
 func (a *TypedArray) ValueAt(key Value) Value {
 	return a.ValueAtOr(key, NIL)
 }
@@ -315,6 +318,9 @@ func (s *TypedArraySeq) Empty() Collection { return EmptyList }
 func (s *TypedArraySeq) Conj(val Value) Collection {
 	return s.Cons(val).(*List)
 }
+
+// Nth implements Indexed: positional access by integer index.
+func (s *TypedArraySeq) Nth(i int) Value { return s.ValueAt(Int(i)) }
 
 func (s *TypedArraySeq) ValueAt(key Value) Value {
 	return s.ValueAtOr(key, NIL)
