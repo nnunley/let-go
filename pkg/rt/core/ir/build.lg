@@ -352,6 +352,10 @@
         (into #{} (mapcat #(free-vars % bound) form))))
     (vector? form)
     (into #{} (mapcat #(free-vars % bound) form))
+    (map? form)
+    (into #{} (mapcat #(free-vars % bound) (concat (keys form) (vals form))))
+    (seq? form)
+    (into #{} (mapcat #(free-vars % bound) form))
     :else #{}))
 
 ;; --- builtin operator dispatch -----------------------------------------
