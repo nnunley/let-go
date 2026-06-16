@@ -10,6 +10,7 @@
 
 (ns ir.lower-go
   (:require
+   [clojure.string]
    [graph]
    [ir.data]
    [ir.structurize :as st]))
@@ -32,6 +33,7 @@
 (declare return-ref-ids)
 (declare function-return-spec)
 (declare const-param-of)
+(declare go-export-name)
 
 (defn- unsupported [mode msg]
   (if (= mode :bridge)
@@ -49,6 +51,9 @@
     (= t :char)                                  "vm.Char"
     (or (= t :unknown) (= t :any) (= t :nil))    "vm.Value"
     (and (vector? t) (= (first t) :union))       "vm.Value"
+    ;; [:dtype T] — a native deftype instance, lowered as a pointer *T to the
+    ;; generated struct (drives receiver typing + devirtualized field access).
+    (and (vector? t) (= (first t) :dtype))       (str "*" (go-export-name (second t)))
     :else nil))
 
 (defn- infer-go-type [t]
@@ -290,6 +295,7 @@
       (= op :try)   ; try-assign-stmts materialises the result into a local
       (= op :inc)
       (= op :dec)
+      (= op :dot)   ; (. obj field) materialised into a local: vN := obj.field
       (contains? binary-op op)))
 
 (defn- used? [f nid]
@@ -599,6 +605,16 @@
           (let [lhs (value-expr f closed-exprs lhs-id)]
             (when lhs
               (gogen/binary (if (= op :inc) "+" "-") lhs (gogen/int-lit 1))))))
+
+      ;; (. obj field) -> Go struct field selector obj.field. The field name
+      ;; is munged (go-name) to the same valid Go identifier the struct decl
+      ;; uses, so a Lisp field like `the-side` selects obj.the_side.
+      (= op :dot)
+      (let [obj-id   (nth refs 0)
+            field    (ir/aux nid f)
+            obj-expr (value-expr f closed-exprs obj-id)]
+        (when obj-expr
+          (gogen/field-sel obj-expr (go-name (name field)))))
 
       :else nil)))
 
@@ -1157,10 +1173,22 @@
     (= result-type "float64") (gogen/call (gogen/field-sel (gogen/ident "vm") "Float")   [result-expr])
     :else nil))
 
+;; Set to an atom per-fn by lower-body; the call lowerings that emit a `callErr`
+;; reference flip it true, so lower-body declares `var callErr error` ONLY when
+;; the body actually uses it. (function-needs-error? still drives the fn's error
+;; RESULT/return shape — a fn can return (vm.Value, error) yet reference no
+;; callErr, e.g. when its only call lowers to an error-free constructor,
+;; devirtualized method, or single-return lowered sibling.)
+(def ^:dynamic *call-err-used* nil)
+
+(defn- mark-call-err-used! []
+  (when *call-err-used* (reset! *call-err-used* true)))
+
 (defn- emit-call-stmts [f assign-target invoke-expr]
   "Build the [assign err-check] statement pair shared by both call paths.
    assign-target is either a gogen ident (used? case) or '_'; invoke-expr
    is the right-hand side that produces (result, error) at runtime."
+  (mark-call-err-used!)
   (let [err-id     (gogen/ident "callErr")
         assign     (gogen/multi-assign "=" [assign-target err-id] [invoke-expr])
         zero-expr  (case (function-return-spec f)
@@ -1213,7 +1241,8 @@
           ;; Typed result + error: result, err := <call>; if err return; target = vm.<Box>(result)
           (and (:needs-error? entry)
                (not= result-spec "vm.Value"))
-          (let [res-id (gogen/ident "result")
+          (let [_      (mark-call-err-used!)
+                res-id (gogen/ident "result")
                 err-id (gogen/ident "callErr")
                 assign (gogen/multi-assign "=" [res-id err-id] [raw-call])
                 zero-expr (case (function-return-spec f)
@@ -1265,57 +1294,136 @@
           (swap! *native-imports-used* conj (:go-pkg entry)))
         entry))))
 
+;; Deftype constructor registry: map {constructor-name -> exported struct name},
+;; e.g. {"->Square" "Square"}. Bound during the :go pass so a call (->Square 3)
+;; lowers to the native constructor _Square(...) (returning *Square) instead of
+;; rt.InvokeValue. Unbound => off.
+(def ^:dynamic *deftype-ctors* nil)
+
+(defn- ctor-call-stmts [f closed-exprs nid]
+  "If this :call's callee is a registered deftype constructor, emit a direct
+   call to the native constructor _T(args...). Returns the stmt vector, or nil."
+  (when *deftype-ctors*
+    (let [refs (ir/refs nid f)]
+      (when (seq refs)
+        (let [callee (first refs)]
+          (when (= :load-var (ir/op callee f))
+            (let [vname (name (symbol (ir/aux callee f)))
+                  sname (get *deftype-ctors* vname)]
+              (when sname
+                (let [arg-exprs (mapv (fn [rid] (box-as-value f closed-exprs rid)) (rest refs))]
+                  (when (every? identity arg-exprs)
+                    ;; A deftype constructor is pure (struct allocation, no side
+                    ;; effects), so a dead result needs NO statement — dropping
+                    ;; it elides the `_ = _T(args)` wart left when a dead
+                    ;; duplicate ctor node survives (CSE never merges :call
+                    ;; nodes; DCE keeps them, assuming calls may be effectful).
+                    (if (live? f nid)
+                      [(gogen/assign "=" (value-ident f nid)
+                                     (gogen/call (gogen/ident (str "_" sname)) arg-exprs))]
+                      [])))))))))))
+
+;; Protocol-method registry: a set of method names (let-go names, e.g.
+;; #{"area"}) bound during the :go pass. A call (area recv) whose receiver is a
+;; known-concrete [:dtype T] devirtualizes to a direct Go method call
+;; recv.Area(), bypassing rt.InvokeValue / interface dispatch. Unbound => off.
+(def ^:dynamic *protocol-methods* nil)
+
+;; Per-protocol-method unified signature, computed once per namespace in
+;; lower-ns-to-go (join across all impls). Keyed by the EXPORTED Go method name
+;; (go-export-name), matching the method-name arg passed to lower-method. Value:
+;; {:needs-error? bool}. MVP keeps params/results at vm.Value (deftype fields are
+;; vm.Value); only :needs-error? is joined (OR across impls). Unbound ⇒ emission
+;; falls back to #232's forced (vm.Value, error) shape, so output is identical.
+(def ^:dynamic *protocol-method-sigs* nil)
+
+(defn- devirtual-call-stmts [f closed-exprs nid]
+  "If this :call is a protocol-method call on a known-concrete [:dtype T]
+   receiver, emit a direct Go method call recv.Method(ec, args...). Returns the
+   stmt vector, or nil to fall through to the normal (rt.InvokeValue) path.
+
+   Devirtualization is a dispatch shortcut, not a different ABI: the method is
+   lowered (lower-method) with the uniform IFn signature
+   `func (recv *T) Method(ec *vm.ExecContext, …) (vm.Value, error)`, so the
+   direct call threads ec and produces (vm.Value, error) — emitted via the same
+   emit-call-stmts pair (assign + error check) as the rt.InvokeValueEC path."
+  (when *protocol-methods*
+    (let [refs (ir/refs nid f)]
+      (when (>= (count refs) 2)
+        (let [callee  (first refs)
+              recv-id (nth refs 1)]
+          (when (= :load-var (ir/op callee f))
+            (let [mname  (name (symbol (ir/aux callee f)))
+                  recv-t (ir/type-of recv-id f)]
+              (when (and (contains? *protocol-methods* mname)
+                         (vector? recv-t) (= (first recv-t) :dtype))
+                (let [recv-expr (value-expr f closed-exprs recv-id)
+                      arg-exprs (mapv (fn [rid] (box-as-value f closed-exprs rid)) (drop 2 refs))]
+                  (when (and recv-expr (every? identity arg-exprs))
+                    (let [gname  (go-export-name mname)
+                          sig    (get *protocol-method-sigs* gname)
+                          needs? (if sig (:needs-error? sig) true)
+                          target (if (live? f nid) (value-ident f nid) (gogen/ident "_"))
+                          mcall  (gogen/call (gogen/field-sel recv-expr gname)
+                                             (into [(gogen/ident "ec")] arg-exprs))]
+                      (if needs?
+                        (emit-call-stmts f target mcall)
+                        [(gogen/assign "=" target mcall)]))))))))))))
+
 (defn- call-assign-stmts [f closed-exprs nid]
-  (let [refs       (ir/refs nid f)
-        arg-count  (count (rest refs))
-        target     (if (live? f nid)
-                     (value-ident f nid)
-                     (gogen/ident "_"))
-        entry      (lookup-direct-callable f (first refs) arg-count)
-        direct     (when entry (emit-typed-direct-call f closed-exprs target refs entry))]
-    (if direct
-      direct
-      (let [nn         (load-var-ns+name f (first refs))
-            ;; Lift EVERY trampoline-reaching :load-var callee (same-ns
-            ;; non-direct-callable + cross-ns) to cached-var IFn dispatch. This
-            ;; is var-mediated, so it resolves at runtime via the var's root
-            ;; whether or not the callee was emitted as a Go func — strictly
-            ;; more robust than a bare direct call (which dangles if the callee
-            ;; fell back) and it eliminates the per-call rt.LookupVar uniformly.
-            ;; record-cross-ns-var! no-ops when *cross-ns-vars-used* is unbound
-            ;; (pass 1 / per-fn lower), so base stays nil there. Branch on BASE,
-            ;; not nn: a load-var callee with base=nil must NOT build a dispatch.
-            base       (when nn (record-cross-ns-var! (first nn) (second nn)))
-            arg-exprs  (mapv (fn [rid] (box-as-value f closed-exprs rid)) (rest refs))
-            args-slice (gogen/composite-lit (gogen/type "[]vm.Value") arg-exprs)]
-        (when (every? identity arg-exprs)
-          (if base
-            ;; Cross-ns cached-var IFn dispatch. rt.CachedVarFn resolves the
-            ;; callee var ONCE (memoized through the package-level __v_* pointer)
-            ;; and re-reads its fn root each call, so per call:
-            ;;   rt.CachedVarFn(&__v, "ns", "name").Invoke(args)
-            ;; Caching the *Var (not the fn) keeps the var as the override seam
-            ;; (^:dynamic / ^:redef / alter-var-root); .Invoke returns
-            ;; (vm.Value, error), so emit-call-stmts' 2-value form applies.
-            (let [cached-fn (gogen/call
-                              (gogen/field-sel (gogen/ident "rt") "CachedVarFn")
-                              [(gogen/unary "&" (gogen/ident base))
-                               (gogen/string-lit (first nn))
-                               (gogen/string-lit (second nn))])
-                  ;; Dispatch through ec so the callee (and any dynamic vars it
-                  ;; reads, or goroutines it spawns) sees the running context:
-                  ;;   ec.Invoke(rt.CachedVarFn(&__v, "ns", "name"), args)
-                  invoke    (gogen/call
-                              (gogen/field-sel (gogen/ident "ec") "Invoke")
-                              [cached-fn args-slice])]
-              (emit-call-stmts f target invoke))
-            ;; Default trampoline: callee value boxed, then rt.InvokeValueEC,
-            ;; which threads ec into the dynamic invocation path.
-            (let [callee (box-as-value f closed-exprs (first refs))
-                  invoke (gogen/call (gogen/field-sel (gogen/ident "rt") "InvokeValueEC")
-                                     [(gogen/ident "ec") callee args-slice])]
-              (when callee
-                (emit-call-stmts f target invoke)))))))))
+  (or
+    (ctor-call-stmts f closed-exprs nid)
+    (devirtual-call-stmts f closed-exprs nid)
+    (let [refs       (ir/refs nid f)
+          arg-count  (count (rest refs))
+          target     (if (live? f nid)
+                       (value-ident f nid)
+                       (gogen/ident "_"))
+          entry      (lookup-direct-callable f (first refs) arg-count)
+          direct     (when entry (emit-typed-direct-call f closed-exprs target refs entry))]
+      (if direct
+        direct
+        (let [nn         (load-var-ns+name f (first refs))
+              ;; Lift EVERY trampoline-reaching :load-var callee (same-ns
+              ;; non-direct-callable + cross-ns) to cached-var IFn dispatch. This
+              ;; is var-mediated, so it resolves at runtime via the var's root
+              ;; whether or not the callee was emitted as a Go func — strictly
+              ;; more robust than a bare direct call (which dangles if the callee
+              ;; fell back) and it eliminates the per-call rt.LookupVar uniformly.
+              ;; record-cross-ns-var! no-ops when *cross-ns-vars-used* is unbound
+              ;; (pass 1 / per-fn lower), so base stays nil there. Branch on BASE,
+              ;; not nn: a load-var callee with base=nil must NOT build a dispatch.
+              base       (when nn (record-cross-ns-var! (first nn) (second nn)))
+              arg-exprs  (mapv (fn [rid] (box-as-value f closed-exprs rid)) (rest refs))
+              args-slice (gogen/composite-lit (gogen/type "[]vm.Value") arg-exprs)]
+          (when (every? identity arg-exprs)
+            (if base
+              ;; Cross-ns cached-var IFn dispatch. rt.CachedVarFn resolves the
+              ;; callee var ONCE (memoized through the package-level __v_* pointer)
+              ;; and re-reads its fn root each call, so per call:
+              ;;   rt.CachedVarFn(&__v, "ns", "name").Invoke(args)
+              ;; Caching the *Var (not the fn) keeps the var as the override seam
+              ;; (^:dynamic / ^:redef / alter-var-root); .Invoke returns
+              ;; (vm.Value, error), so emit-call-stmts' 2-value form applies.
+              (let [cached-fn (gogen/call
+                                (gogen/field-sel (gogen/ident "rt") "CachedVarFn")
+                                [(gogen/unary "&" (gogen/ident base))
+                                 (gogen/string-lit (first nn))
+                                 (gogen/string-lit (second nn))])
+                    ;; Dispatch through ec so the callee (and any dynamic vars it
+                    ;; reads, or goroutines it spawns) sees the running context:
+                    ;;   ec.Invoke(rt.CachedVarFn(&__v, "ns", "name"), args)
+                    invoke    (gogen/call
+                                (gogen/field-sel (gogen/ident "ec") "Invoke")
+                                [cached-fn args-slice])]
+                (emit-call-stmts f target invoke))
+              ;; Default trampoline: callee value boxed, then rt.InvokeValueEC,
+              ;; which threads ec into the dynamic invocation path.
+              (let [callee (box-as-value f closed-exprs (first refs))
+                    invoke (gogen/call (gogen/field-sel (gogen/ident "rt") "InvokeValueEC")
+                                       [(gogen/ident "ec") callee args-slice])]
+                (when callee
+                  (emit-call-stmts f target invoke))))))))))
 
 (defn- try-assign-stmts [f closed-exprs nid]
   "Lower a :try op (guarded region) to straight-line Go.
@@ -1450,6 +1558,12 @@
           (when rhs
             [(gogen/assign "=" (value-ident f nid) rhs)]))
         [])
+      (= op :dot)
+      (if (live? f nid)
+        (let [rhs (inst-rhs f closed-exprs nid)]
+          (when rhs
+            [(gogen/assign "=" (value-ident f nid) rhs)]))
+        [])
       (= op :call)
       (call-assign-stmts f closed-exprs nid)
       (= op :try)
@@ -1487,13 +1601,49 @@
     (when (and inst-stmts term-stmts)
       (vec (concat label-stmts inst-stmts term-stmts)))))
 
-(defn- function-needs-error? [f]
-  (loop [blocks (ir/blocks f)]
-    (cond
-      (empty? blocks) false
-      (some (fn [nid] (let [op (ir/op nid f)] (or (= :call op) (= :try op))))
-            (ir/block-insts (first blocks) f)) true
-      :else (recur (rest blocks)))))
+(defn- call-error-free? [nid f]
+  "True when a :call node lowers to an error-free Go call: a deftype
+   constructor (callee in *deftype-ctors*), or a total devirtualized protocol
+   method (callee in *protocol-methods* with a non-error sig in *protocol-method-sigs*).
+   Constructors emit _T(args) returning a concrete pointer with no error.
+   Total protocol-method devirtual calls emit `x = recv.M(ec)` (single value).
+   Mirrors the actual emission in ctor-call-stmts / devirtual-call-stmts so
+   needs-error? agrees with what call lowering actually emits. Registries
+   unbound => always false (pre-existing behavior: every :call is error-producing)."
+  (let [refs (ir/refs nid f)]
+    (and (seq refs)
+         (= :load-var (ir/op (first refs) f))
+         (let [vname (name (symbol (ir/aux (first refs) f)))]
+           (or
+             ;; deftype constructor: _T(args) returns concrete ptr, no error
+             (and *deftype-ctors* (contains? *deftype-ctors* vname))
+             ;; total protocol method: devirtual call emits `x = recv.M(ec)`
+             (and *protocol-methods* (contains? *protocol-methods* vname)
+                  (let [sig (get *protocol-method-sigs* (go-export-name vname))]
+                    (and sig (not (:needs-error? sig))))))))))
+
+;; Force the (vm.Value, error) result shape regardless of body contents. Bound
+;; true while lowering a protocol-method body (lower-method) so EVERY method
+;; presents the uniform IFn ABI — `Method(ec, …) (vm.Value, error)` — even when
+;; its body is pure. A uniform ABI is required because the devirtualized direct
+;; call recv.Method(…), the generated protocol interface, and the IFn dispatch
+;; path must all agree on one signature across every impl. Inner fn-lits rebind
+;; this to nil (lower-fn-lit) so nested closures keep their body-derived shape.
+(def ^:dynamic *force-needs-error* nil)
+
+;; Public (was defn-): ir.passes.pipeline/protocol-method-sigs calls this to
+;; derive each impl body shape (force-needs-error? unbound) when joining sigs.
+(defn function-needs-error? [f]
+  (if *force-needs-error*
+    true
+    (loop [blocks (ir/blocks f)]
+      (cond
+        (empty? blocks) false
+        (some (fn [nid] (let [op (ir/op nid f)]
+                          (or (= :try op)
+                              (and (= :call op) (not (call-error-free? nid f))))))
+              (ir/block-insts (first blocks) f)) true
+        :else (recur (rest blocks))))))
 
 (defn- function-needs-rt? [f]
   (let [local? (loop [blocks (ir/blocks f)]
@@ -2012,44 +2162,53 @@
    (swap! f assoc :live (live-nids f))
    ;; Single-use computed edge-args to inline (needs :live + uses cache above).
    (swap! f assoc :inline-args (compute-inline-args f))
-   (let [needs-error? (function-needs-error? f)
-         needs-tail-call? (function-needs-tail-call? f)
-         decls0 (local-decls f)
-         decls1 (if needs-error?
-                  (conj decls0 (gogen/var-decl "callErr" (gogen/type "error") nil))
-                  decls0)
-         [arg-decls arg-inits] (if needs-tail-call?
-                                 (arg-local-decls f)
-                                 [[] []])
-         decls  (into decls1 arg-decls)
-         entry-label [(gogen/label-stmt "func_entry" nil)]]
-     (when decls
-       (let [base (if needs-tail-call?
-                    (vec (concat decls arg-inits entry-label))
-                    decls)
-             ;; Structured path: build.lg emits reducible CFGs, so try to
-             ;; recover a control tree and emit if/for/break/continue. Fall
-             ;; back to the goto+label emitter when structurize reports any
-             ;; fallback or the tree-walk cannot lower a block.
-             st-result (st/structurize f)
-             structured-body (when (zero? (:fallbacks st-result))
-                               (lower-tree f closed-exprs (:tree st-result)))]
-         (if structured-body
-           (into base structured-body)
-           ;; Fallback: per-block goto emitter.
-           (loop [blocks (ir/blocks f)
-                  out    base]
-             (if (empty? blocks)
-               out
-               (let [bid (first blocks)]
-                 ;; Skip dead/unterminated blocks — build can leave them and
-                 ;; lower-terminator would call (ir/op nil f), failing.
-                 (if (nil? (ir/block-term bid f))
-                   (recur (rest blocks) out)
-                   (let [stmts (lower-block-stmts f closed-exprs bid)]
-                     (if (nil? stmts)
-                       nil
-                       (recur (rest blocks) (into out stmts))))))))))))))
+   (binding [*call-err-used* (atom false)]
+     (let [needs-error?     (function-needs-error? f)
+           needs-tail-call? (function-needs-tail-call? f)
+           ;; Build the body FIRST (inside the *call-err-used* binding) so we
+           ;; know whether it actually references callErr before deciding to
+           ;; declare it. Structured path: build.lg emits reducible CFGs, so try
+           ;; to recover a control tree and emit if/for/break/continue; fall back
+           ;; to the goto+label emitter when structurize reports any fallback or
+           ;; the tree-walk cannot lower a block. A nil body => a block failed to
+           ;; lower => the whole fn bails (caller falls back to bytecode).
+           st-result        (st/structurize f)
+           structured-body  (when (zero? (:fallbacks st-result))
+                              (lower-tree f closed-exprs (:tree st-result)))
+           body-stmts       (if structured-body
+                              structured-body
+                              (loop [blocks (ir/blocks f) out []]
+                                (if (empty? blocks)
+                                  out
+                                  (let [bid (first blocks)]
+                                    ;; Skip dead/unterminated blocks — build can
+                                    ;; leave them; lower-terminator would call
+                                    ;; (ir/op nil f) and fail.
+                                    (if (nil? (ir/block-term bid f))
+                                      (recur (rest blocks) out)
+                                      (let [stmts (lower-block-stmts f closed-exprs bid)]
+                                        (if (nil? stmts)
+                                          nil
+                                          (recur (rest blocks) (into out stmts)))))))))]
+       (when body-stmts
+         (let [decls0 (local-decls f)
+               ;; Declare `var callErr error` ONLY when a call lowering in the
+               ;; body actually emitted a callErr reference — otherwise it is an
+               ;; unused-variable compile error (e.g. a fn that returns
+               ;; (vm.Value, error) but whose only call is an error-free
+               ;; constructor / devirtualized method / single-return sibling).
+               decls1 (if (and needs-error? @*call-err-used*)
+                        (conj decls0 (gogen/var-decl "callErr" (gogen/type "error") nil))
+                        decls0)
+               [arg-decls arg-inits] (if needs-tail-call?
+                                       (arg-local-decls f)
+                                       [[] []])
+               decls  (into decls1 arg-decls)
+               entry-label [(gogen/label-stmt "func_entry" nil)]
+               base (if needs-tail-call?
+                      (vec (concat decls arg-inits entry-label))
+                      decls)]
+           (into base body-stmts)))))))
 (defn- params-for [f]
   (let [arity       (ir/fn-arity f)
         variadic?   (ir/fn-variadic? f)
@@ -2147,11 +2306,15 @@
   ;; harder to attribute the failure. Per-closure fallback (NOTE: this
   ;; is a stopgap; the real fix is lambda lifting — see
   ;; project-lambda-lifting-todo memory).
-  (let [params  (params-for f)
-        results (result-node f)
-        body    (lower-body f closed-exprs)]
-    (when (and params results body)
-      (gogen/func-lit params results body))))
+  ;; Inner closures keep their natural, body-derived error shape even when the
+  ;; enclosing form is a protocol method lowered under *force-needs-error*: a
+  ;; lambda is a plain Go func-lit value, not a method on the uniform IFn ABI.
+  (binding [*force-needs-error* nil]
+    (let [params  (params-for f)
+          results (result-node f)
+          body    (lower-body f closed-exprs)]
+      (when (and params results body)
+        (gogen/func-lit params results body)))))
 
 (defn- lower-fn* [f mode]
   (let [params  (params-for f)
@@ -2195,6 +2358,149 @@
                  (go-name (ir/fn-name f))
                  (into [(gogen/param "ec" (gogen/type "*vm.ExecContext"))] params)
                  results body)})))
+
+(defn go-export-name
+  "Convert a symbol/string to an exported Go name (PascalCase).
+   Handles multi-word kebab-case names like do-thing -> DoThing."
+  [s]
+  (let [name-str (str s)]
+    (clojure.string/join "" (map clojure.string/capitalize (clojure.string/split name-str #"-")))))
+
+(defn lower-method [f recv-type method-name]
+  "Lower an already-built+optimized IR fn as a Go receiver method using the
+   uniform IFn ABI:
+
+     func (arg0 <recv-type>) <method-name>(ec *vm.ExecContext, <params…>) (vm.Value, error) { body }
+
+   The receiver is arg-0 (its type is seeded via the fn's :arg-types, e.g.
+   [:dtype Square], so params-for types it as *Square and field accesses
+   arg0.side type-check). The body references the receiver as arg0, matching
+   value-ident output, so the receiver field-decl is named arg0.
+
+   Two things make the signature uniform across every protocol-method impl —
+   required because the devirtualized direct call recv.Method(ec, …), the
+   generated protocol interface, and the IFn dispatch path must all agree:
+
+     * ec is threaded as the first non-receiver param. A pure body that never
+       references it leaves it unused, which is legal for a Go parameter; a
+       body that calls another fn reaches the runtime through it
+       (rt.InvokeValueEC, ec.Invoke, …).
+     * the result is forced to (vm.Value, error) via *force-needs-error*, so
+       even a pure (* side side) method returns `v, nil` and the interface /
+       call site never have to special-case error-free methods.
+
+   Only methods whose non-receiver params and result are uniformly vm.Value can
+   satisfy the vm.Value interface and accept the boxed args the devirtual call
+   site passes; a typed (int/bool/…) param or result falls back to bytecode."
+  (let [sig         (get *protocol-method-sigs* method-name)
+        force-err?  (if sig (:needs-error? sig) true)]
+    (binding [*force-needs-error* force-err?]
+      (let [all-params (params-for f)
+            ret-spec   (function-return-spec f)
+            ;; param-specs[0] is the receiver (*T); the rest must be vm.Value to
+            ;; match the interface signature and the boxed devirtual-call args.
+            non-recv-specs (vec (rest (function-param-specs f)))
+            uniform?   (and (= "vm.Value" ret-spec)
+                            (every? (fn [s] (= "vm.Value" s)) non-recv-specs))
+            results    (result-node f)
+            body       (lower-body f)]
+        (cond
+          (nil? all-params)   {:status :fallback :decl nil :reason "method: unsupported parameter types"}
+          (nil? results)      {:status :fallback :decl nil :reason "method: unsupported result type"}
+          (nil? body)         {:status :fallback :decl nil :reason "method: unsupported body shape"}
+          (empty? all-params) {:status :fallback :decl nil :reason "method: missing receiver param"}
+          (not uniform?)      {:status :fallback :decl nil :reason "method: non-vm.Value param/result ABI"}
+          :else
+          {:status :lowered
+           :decl (gogen/method-decl
+                   [(gogen/field-decl "arg0" (gogen/type recv-type) "")]
+                   method-name
+                   (into [(gogen/param "ec" (gogen/type "*vm.ExecContext"))] (vec (rest all-params)))
+                   results
+                   body)})))))
+
+(defn lower-defprotocol [decl]
+  "Lower a defprotocol capture map to a Go interface type declaration.
+
+   Each interface method carries the uniform IFn ABI that lower-method emits:
+   `Method(ec *vm.ExecContext, p0 vm.Value, …) (vm.Value, error)`. The ec param
+   and (vm.Value, error) result keep the interface satisfiable by the concrete
+   receiver methods (so a *T value can flow through the protocol type) and
+   consistent with the rt.InvokeValueEC dispatch path.
+
+   Input: {:decl-kind :defprotocol :name 'Shape :methods ['(area [this])]}
+   Output: {:status :lowered :decl <*ast.GenDecl>}"
+  (let [iname (go-export-name (:name decl))
+        ms (mapv (fn [method-form]
+                   (let [mname       (first method-form)
+                         margs       (second method-form)
+                         param-count (dec (count margs))
+                         gname       (go-export-name mname)
+                         sig         (get *protocol-method-sigs* gname)
+                         needs-err?  (if sig (:needs-error? sig) true)
+                         ;; ec is always threaded (matches lower-method, which
+                         ;; always takes ec even when the body ignores it).
+                         param-fields (loop [i 0 out [(gogen/param "ec" (gogen/type "*vm.ExecContext"))]]
+                                        (if (>= i param-count)
+                                          out
+                                          (recur (inc i) (conj out (gogen/param (str "p" i) (gogen/type "vm.Value"))))))
+                         result-fields (if needs-err?
+                                         [(gogen/result (gogen/type "vm.Value"))
+                                          (gogen/result (gogen/type "error"))]
+                                         [(gogen/result (gogen/type "vm.Value"))])]
+                     (gogen/iface-method gname
+                                         param-fields
+                                         result-fields)))
+                 (:methods decl))]
+    {:status :lowered
+     :decl (gogen/type-decl iname (gogen/interface-type ms))}))
+
+(defn lower-deftype-struct [decl]
+  "Lower a :deftype capture to Go struct + constructor.
+   Input: {:decl-kind :deftype :name 'Square :fields '[side] :impls [...]}
+   Output: {:status :lowered :decls [<type-decl> <func-decl>]}"
+  (let [struct-name (go-export-name (:name decl))
+        field-names (:fields decl)
+        ;; Build the embedded vm.RecordBase field
+        record-base-embed (gogen/embed-field (gogen/type "vm.RecordBase"))
+        ;; Build named fields for each declared field. Field names are munged
+        ;; (go-name) to valid Go identifiers — a Lisp field like `the-side`
+        ;; becomes the_side — consistently with the ctor params, composite-lit
+        ;; keys, and the (. obj field) selector emitted by the :dot lowering.
+        named-fields (mapv (fn [fld]
+                             (gogen/field-decl (go-name (str fld)) (gogen/type "vm.Value") ""))
+                           field-names)
+        ;; All fields: RecordBase first, then named fields
+        all-fields (into [record-base-embed] named-fields)
+        ;; Build struct type
+        struct-type (gogen/struct-type all-fields)
+        ;; Build type declaration
+        type-decl (gogen/type-decl struct-name struct-type)
+
+        ;; Build constructor function: func _Square(side vm.Value) *Square
+        ;; (returns the concrete pointer so constructor-call sites can bind it
+        ;; to a *T local and devirtualize method dispatch).
+        ctor-name (str "_" struct-name)
+        ctor-params (mapv (fn [fld]
+                            (gogen/param (go-name (str fld)) (gogen/type "vm.Value")))
+                          field-names)
+        ctor-result [(gogen/result (gogen/type (str "*" struct-name)))]
+        ;; Build the composite literal: &Square{RecordBase: vm.RecordBase{TypeName: "Square"}, side: side, ...}
+        record-base-lit (gogen/composite-lit (gogen/type "vm.RecordBase")
+                                             [(gogen/kv-expr (gogen/ident "TypeName")
+                                                (gogen/string-lit struct-name))])
+        field-kvs (cons (gogen/kv-expr (gogen/ident "RecordBase") record-base-lit)
+                        (mapv (fn [fld]
+                                (let [gf (go-name (str fld))]
+                                  (gogen/kv-expr (gogen/ident gf)
+                                                 (gogen/ident gf))))
+                              field-names))
+        struct-lit (gogen/unary "&" (gogen/composite-lit (gogen/type struct-name) field-kvs))
+        return-stmt (gogen/return-stmt [struct-lit])
+        ctor-body [return-stmt]
+        func-decl (gogen/func-decl ctor-name ctor-params ctor-result ctor-body)]
+    {:status :lowered
+     :decls [type-decl func-decl]}))
 
 (defn- import-spec-node [entry]
   (let [path  (:path entry)

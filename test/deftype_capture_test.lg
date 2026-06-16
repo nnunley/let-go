@@ -1,0 +1,89 @@
+(ns test.deftype-capture-test
+  (:require
+   [clojure.string]
+   [gogen :as g]
+   [ir.lower-go :as lower-go]
+   [ir.passes.pipeline]
+   [test :refer :all]))
+
+(deftest captures-defprotocol-declaration
+  (testing "compile-form captures defprotocol as declaration"
+    (binding [ir.passes.pipeline/*target* :go]
+      (let [r (ir.passes.pipeline/compile-form '(defprotocol Shape (area [this])))]
+        (is (= :defprotocol (:decl-kind r)))
+        (is (= 'Shape (:name r)))))))
+
+(deftest captures-deftype-declaration
+  (testing "compile-form captures deftype as declaration"
+    (binding [ir.passes.pipeline/*target* :go]
+      (let [r (ir.passes.pipeline/compile-form '(deftype Square [side] Shape (area [this] (* side side))))]
+        (is (= :deftype (:decl-kind r)))
+        (is (= 'Square (:name r)))
+        (is (= '[side] (:fields r)))))))
+
+(deftest lowers-defprotocol-to-interface
+  (testing "lower-defprotocol renders a Go interface type-decl"
+    (let [result (lower-go/lower-defprotocol
+                   {:decl-kind :defprotocol :name 'Shape :methods ['(area [this])]})
+          src (g/render (:decl result))]
+      (is (= :lowered (:status result)))
+      (is (clojure.string/includes? src "type Shape interface"))
+      ;; Methods use the uniform IFn ABI: ec is threaded and the result is
+      ;; (vm.Value, error), so the interface is satisfiable by the concrete
+      ;; receiver methods and consistent with rt.InvokeValueEC dispatch.
+      (is (clojure.string/includes? src "Area(ec *vm.ExecContext) (vm.Value, error)")))))
+
+;; Real protocol + deftype so ->Sq8 / area8 resolve at build time.
+(defprotocol Shape8 (area8 [this]))
+(deftype Sq8 [side] Shape8 (area8 [this] (* side side)))
+
+(deftest devirtualizes-protocol-dispatch-on-dtype-receiver
+  (testing "(method (->Ctor ..)) lowers to native constructor + devirtualized method call"
+    (binding [ir.passes.pipeline/*target* :go
+              ir.passes.typeinfer/*deftype-ctor-types* {"->Sq8" 'Sq8}
+              ir.lower-go/*deftype-ctors* {"->Sq8" "Sq8"}
+              ir.lower-go/*protocol-methods* #{"area8"}]
+      (let [result (ir.passes.pipeline/compile-form
+                     '(defn -area8-call [] (area8 (->Sq8 3))))
+            src (g/render (:decl result))]
+        (is (= :lowered (:status result)))
+        ;; (->Sq8 3) -> native constructor call returning *Sq8
+        (is (clojure.string/includes? src "_Sq8("))
+        ;; (area8 recv) -> devirtualized direct method call on the receiver.
+        ;; ec is threaded as the first arg (uniform IFn method ABI).
+        (is (clojure.string/includes? src ".Area8(ec)"))
+        ;; NOT the boxed dynamic-dispatch path
+        (is (not (clojure.string/includes? src "InvokeValue")))))))
+
+(deftest lowers-member-access-to-field-selector
+  (testing "(. obj field) lowers to a native Go struct field selector"
+    (binding [ir.passes.pipeline/*target* :go]
+      (let [result (ir.passes.pipeline/compile-form '(defn -dot-probe [x] (. x side)))
+            src (g/render (:decl result))]
+        (is (= :lowered (:status result)))
+        ;; param x is renamed (arg0) by lowering; assert the field selector itself.
+        (is (clojure.string/includes? src ".side"))))))
+
+(deftest lowers-deftype-method-to-receiver-method
+  (testing "deftype method lowers to a native Go receiver method with field access"
+    (let [result (ir.passes.pipeline/lower-deftype-methods
+                   {:decl-kind :deftype :name 'Square :fields '[side]
+                    :impls '[Shape (area [this] (* side side))]})
+          src (clojure.string/join "\n" (map g/render (:decls result)))]
+      (is (= :lowered (:status result)))
+      (is (clojure.string/includes? src "*Square)"))    ; receiver typed *Square
+      (is (clojure.string/includes? src "Area("))         ; exported method name
+      (is (clojure.string/includes? src ".side")))))      ; field access on receiver
+
+(deftest lowers-deftype-to-struct-and-constructor
+  (testing "lower-deftype-struct renders a Go struct embedding vm.RecordBase + a constructor"
+    (let [result (lower-go/lower-deftype-struct
+                   {:decl-kind :deftype :name 'Square :fields '[side]
+                    :impls '[Shape (area [this] (* side side))]})
+          src (clojure.string/join "\n" (map g/render (:decls result)))]
+      (is (= :lowered (:status result)))
+      (is (clojure.string/includes? src "type Square struct"))
+      (is (clojure.string/includes? src "vm.RecordBase"))
+      (is (clojure.string/includes? src "side vm.Value"))
+      (is (clojure.string/includes? src "func _Square(side vm.Value) *Square"))
+      (is (clojure.string/includes? src "RecordBase: vm.RecordBase{TypeName: \"Square\"}")))))
