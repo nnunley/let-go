@@ -489,6 +489,31 @@
                   (build-form head ctx))]
     (build-call-with-head fn-id (rest form) ctx)))
 
+(defn- method-call-head?
+  "True for Go method-interop heads like .WriteString — an UNQUALIFIED symbol
+   whose name starts with '.' and has a member name after it. Mirrors the
+   bytecode rewrite guard in pkg/compiler/compiler.go (fnsym[0]=='.' && len>1),
+   which matches on the RAW symbol text: a namespace-qualified head such as
+   (foo/.bar x) is an ordinary var call, NOT method interop, so the head must
+   be unqualified."
+  [head]
+  (and (symbol? head)
+       (nil? (namespace head))
+       (let [hn (name head)]
+         (and (> (count hn) 1) (= "." (subs hn 0 1))))))
+
+(defn- rewrite-method-call
+  "(.Method recv arg...) -> (. recv (quote Method) arg...), the canonical
+   dot form that clojure.core/. dispatches via Receiver/InvokeMethod. This
+   mirrors compiler.go's member rewrite so the self-AOT gogen path lowers
+   Go method-call interop the same way the bytecode VM compiles it: as a
+   generic call to the `.` builtin (which lowers via the normal trampoline)."
+  [form]
+  (let [member (symbol (subs (name (first form)) 1))
+        recv   (first (rest form))
+        args   (rest (rest form))]
+    (cons '. (cons recv (cons (list 'quote member) args)))))
+
 (defn build-list [form ctx]
   (let [head    (first form)
         builtin (get builtin-ops head)]
@@ -505,6 +530,10 @@
       (= head 'recur) (build-recur form ctx)
       (= head 'fn*)   (build-fn* form ctx)
       (= head 'try)   (build-try form ctx)
+      ;; Go method-call interop: (.Method recv arg...). Rewrite to the
+      ;; canonical dot form and build as a generic call to `.`.
+      (and (method-call-head? head) (seq (rest form)))
+      (build-call (rewrite-method-call form) ctx)
       builtin         (build-builtin-op builtin form ctx)
       ;; Keywords, numbers, strings are callable (implement IFn in Clojure).
       ;; Treat them as Const values, build as generic call with const head.
