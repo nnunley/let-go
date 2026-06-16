@@ -225,20 +225,39 @@
        (str "v" nid))))
 
 ;; Munge Lisp-idiomatic identifier chars to a valid Go identifier.
-;; Convention is Clojure-flavoured: each unsafe char maps to a distinct
-;; underscore-bracketed token so munged names don't collide with
-;; legitimately-named Go identifiers like `foo_bang` already in source.
+;; This is the canonical Clojure CHAR_MAP (clojure.lang.Compiler/CHAR_MAP),
+;; matched verbatim against glojure's runtime munge (pkg/runtime/rtcompat.go):
+;; each unsafe char maps to a distinct underscore-bracketed token so munged
+;; names don't collide with legitimately-named Go identifiers already in
+;; source. Any char NOT in this map is handled by the go-name fallback below
+;; (alphanumerics/underscore pass through; everything else becomes _U<hex>_),
+;; so an unmapped char can never leak through and produce an invalid Go
+;; identifier (the historic :gogen/bad-identifier failure class).
 (def go-name-munge-map
   {\-  "_"
-   \!  "_BANG_"
-   \?  "_QMARK_"
-   \*  "_STAR_"
-   \/  "_SLASH_"
+   \:  "_COLON_"
    \+  "_PLUS_"
-   \=  "_EQ_"
-   \<  "_LT_"
    \>  "_GT_"
-   \'  "_PRIME_"})
+   \<  "_LT_"
+   \=  "_EQ_"
+   \~  "_TILDE_"
+   \!  "_BANG_"
+   \@  "_CIRCA_"
+   \#  "_SHARP_"
+   \'  "_SINGLEQUOTE_"
+   \"  "_DOUBLEQUOTE_"
+   \%  "_PERCENT_"
+   \^  "_CARET_"
+   \&  "_AMPERSAND_"
+   \*  "_STAR_"
+   \|  "_BAR_"
+   \{  "_LBRACE_"
+   \}  "_RBRACE_"
+   \[  "_LBRACK_"
+   \]  "_RBRACK_"
+   \/  "_SLASH_"
+   \\  "_BSLASH_"
+   \?  "_QMARK_"})
 
 (def ^:private go-reserved-words
   #{"break" "default" "func" "interface" "select" "case" "defer" "go"
@@ -246,11 +265,22 @@
     "fallthrough" "if" "range" "type" "continue" "for" "import"
     "return" "var"})
 
+;; Munge one char to a Go-identifier-safe token using `m`, with a catch-all so
+;; nothing unmapped ever leaks through: explicit map entry wins; otherwise
+;; ASCII alphanumerics and '_' pass through; any other char becomes _U<hex>_
+;; (its Unicode code point). Mirrors glojure's codegen mungeID fallback.
+(defn- munge-char [m ch]
+  (or (get m ch)
+      (let [c (int ch)]
+        (if (or (and (>= c 97) (<= c 122))   ; a-z
+                (and (>= c 65) (<= c 90))    ; A-Z
+                (and (>= c 48) (<= c 57))    ; 0-9
+                (= c 95))                    ; _
+          (str ch)
+          (format "_U%04X_" c)))))
+
 (defn- go-name [s]
-  (let [munged (apply str
-                      (map (fn [ch]
-                             (or (get go-name-munge-map ch) ch))
-                           s))]
+  (let [munged (apply str (map (fn [ch] (munge-char go-name-munge-map ch)) s))]
     (if (contains? go-reserved-words munged)
       (str munged "_")
       munged)))
@@ -993,12 +1023,13 @@
 (def ^:dynamic *cross-ns-vars-used* nil)
 
 (def ^:private cached-var-seg-munge-map
-  ;; Reuse go-name's char map (handles - ! ? * / + = < > '), plus '.' so dotted
-  ;; namespaces like clojure.core become Go-identifier-safe.
+  ;; Reuse go-name's full Clojure CHAR_MAP, plus '.' so dotted namespaces like
+  ;; clojure.core become Go-identifier-safe. Unmapped chars hit the same
+  ;; _U<hex>_ fallback via munge-char.
   (assoc go-name-munge-map \. "_"))
 
 (defn- cached-var-seg [s]
-  (apply str (map (fn [ch] (or (get cached-var-seg-munge-map ch) ch)) s)))
+  (apply str (map (fn [ch] (munge-char cached-var-seg-munge-map ch)) s)))
 
 (defn- cached-var-base [ns-str name-str]
   (str "__v_" (cached-var-seg ns-str) "_" (cached-var-seg name-str)))
