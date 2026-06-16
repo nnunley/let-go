@@ -2,4 +2,4 @@
 # Content digest of all .lg + lgbgen sources that feed the .lgb
 # bundle and the lowered Go tree. The genmanifest staleness test
 # fails if this no longer matches the sources on disk.
-a4a6854195956af61e6565bba2f8f29f2084c01ed7b19c05826b8bcca6c2eb4d
+087c0e578921e6d98e2e44af802cc75ee9cccd45d2c8412e830ba540a8e48e42
