@@ -178,6 +178,12 @@ func appendNonVoid(r *LispReader, vs []vm.Value, v vm.Value) []vm.Value {
 	return append(vs, v)
 }
 
+// Read reads a single form. No-value reader macros (line comments, #_ discard,
+// reader conditionals with no matching branch) return the VOID sentinel — this
+// is load-bearing: collection readers (readList/readVector/readMap/readSet)
+// call Read in element/value position and rely on seeing VOID to drop an
+// orphaned map key or splice nothing (e.g. {:a #_ 1 :b 2} => {:b 2}). Callers
+// that want a real form with leading no-value forms skipped use ReadSkipNoValue.
 func (r *LispReader) Read() (vm.Value, error) {
 	ch, err := r.eatWhitespace()
 	if err != nil {
@@ -212,6 +218,24 @@ func (r *LispReader) Read() (vm.Value, error) {
 		return vm.NIL, NewReaderError(r, "unexpected error").Wrap(err)
 	}
 	return interpretToken(r, token)
+}
+
+// ReadSkipNoValue reads a single form, skipping leading no-value forms (line
+// comments, #_ discard, non-matching reader conditionals) so the result is a
+// real form. It surfaces EOF when the input holds no form at all. This is the
+// single-form entry point used by read-string; unlike Read it never returns
+// VOID. Each no-value macro consumes input, so the loop always makes progress.
+func (r *LispReader) ReadSkipNoValue() (vm.Value, error) {
+	for {
+		form, err := r.Read()
+		if err != nil {
+			return vm.NIL, err
+		}
+		if form.Type() == vm.VoidType {
+			continue
+		}
+		return form, nil
+	}
 }
 
 func interpretToken(r *LispReader, t vm.Value) (vm.Value, error) {

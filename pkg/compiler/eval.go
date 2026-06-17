@@ -48,10 +48,12 @@ func Eval(src string) (vm.Value, error) {
 	return out, nil
 }
 
-// ReadString parses a string into a let-go Value.
+// ReadString parses a string into a let-go Value. As a single-form entry point
+// it skips leading no-value forms (comments, #_ discard) so a string that opens
+// with a ';;' comment yields the following form rather than the VOID sentinel.
 func ReadString(s string) (vm.Value, error) {
 	reader := NewLispReader(strings.NewReader(s), "<read-string>")
-	return reader.Read()
+	return reader.ReadSkipNoValue()
 }
 
 func evalInit() {
