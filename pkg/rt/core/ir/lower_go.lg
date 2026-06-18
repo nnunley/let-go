@@ -397,6 +397,55 @@
       (= op :dot)   ; (. obj field) materialised into a local: vN := obj.field
       (contains? binary-op op)))
 
+;; A :load-var is normally re-emitted inline as ec.Deref(rt.LookupVar(...)) at
+;; each use. That is unsafe for a var the same function set!s: a root mutated
+;; between the load and a later use would make a re-emitted deref read the NEW
+;; value, diverging from the bytecode VM (which snapshots the value when the
+;; load executes). For those vars only we materialise the load into a one-time
+;; snapshot local. Restricting to set!-TARGET vars (not every load in a set!-fn)
+;; matters: materialising a load whose value is never rendered-referenced — a
+;; loop head bound to an unrelated var, say — leaves a `declared and not used`
+;; local. A var the fn set!s is, by construction, read where it matters.
+
+;; Canonical "ns/name" key for a var, from either a load-var aux symbol or the
+;; Var value held by a set!'s :const operand (which prints as "#'ns/name").
+(defn- var-key-of-symbol [aux]
+  (let [sym (symbol aux)]
+    (str (or (namespace sym) "core") "/" (name sym))))
+
+(defn- var-key-of-var-value [v]
+  (let [sym (symbol (subs (str v) 2))]
+    (str (or (namespace sym) "core") "/" (name sym))))
+
+(defn- var-key-of-ref [f ref]
+  ;; The var a set!'s operand denotes: a :load-var (aux symbol) or a Var-valued
+  ;; :const (aux is the *vm.Var). Mirrors set-var's value-expr operand handling.
+  (let [op (ir/op ref f)]
+    (cond
+      (= :load-var op) (var-key-of-symbol (ir/aux ref f))
+      (= :const op)    (let [v (ir/aux ref f)] (when (var? v) (var-key-of-var-value v)))
+      :else nil)))
+
+(defn- set-var-target-keys [f]
+  (let [cached (:set-var-keys (deref f))]
+    (if (some? cached)
+      cached
+      (let [keys (reduce
+                   (fn [acc bid]
+                     (reduce (fn [a nid]
+                               (if (= :set-var (ir/op nid f))
+                                 (let [k (var-key-of-ref f (nth (ir/refs nid f) 0))]
+                                   (if k (conj a k) a))
+                                 a))
+                             acc (ir/block-insts bid f)))
+                   #{} (ir/blocks f))]
+        (swap! f assoc :set-var-keys keys)
+        keys))))
+
+(defn- load-var-snapshot? [f nid]
+  (and (= :load-var (ir/op nid f))
+       (contains? (set-var-target-keys f) (var-key-of-symbol (ir/aux nid f)))))
+
 (defn- used? [f nid]
   (let [uses (ir/uses f)]
     (and (< nid (count uses))
@@ -569,6 +618,22 @@
           ;; its params/locals never collide with the captured outer identifiers.
           (lower-template-closure-expr (:template info) capture-exprs nid))))))
 
+(defn- load-var-deref-expr [aux]
+  "The inline `ec.Deref(rt.LookupVar(ns, name))` expression for a :load-var.
+   Resolves the var against the running ExecContext so an active dynamic
+   binding (e.g. inside a future or with-scope) is honoured, and derefs to the
+   value-typed root. This is the RHS of the var's one-time snapshot local;
+   :load-var is materialised (see local-carrying-op?), not re-emitted at uses."
+  (let [sym (symbol aux)
+        sns (namespace sym)
+        sn  (name sym)]
+    (gogen/call
+      (gogen/field-sel (gogen/ident "ec") "Deref")
+      [(gogen/call
+         (gogen/field-sel (gogen/ident "rt") "LookupVar")
+         [(gogen/string-lit (if (nil? sns) "core" sns))
+          (gogen/string-lit sn)])])))
+
 (defn- value-expr [f closed-exprs nid]
   (let [op  (ir/op nid f)
         aux (ir/aux nid f)
@@ -596,24 +661,15 @@
             (gogen/ident (go-arg-name (if (function-needs-tail-call? f) "a" "arg") aux)))
 
           (= op :load-var)
-          ;; rt.LookupVar returns *vm.Var; .Deref() returns the value-typed
-          ;; root (or thread-bound) form. We need vm.Value here because the
-          ;; result may be compared (`==`) or assigned to a vm.Value local;
-          ;; *vm.Var is a concrete type and won't compare against other
-          ;; vm.Value concrete types like vm.Keyword. For :call sites
-          ;; rt.InvokeValue handles either form, so deref is safe there too.
-          (let [sym (symbol aux)
-                sns (namespace sym)
-                sn  (name sym)]
-            ;; Resolve the var against the running ExecContext so a dynamic
-            ;; binding active in the caller's context (e.g. inside a future or
-            ;; with-scope) is honoured: ec.Deref(rt.LookupVar(ns, name)).
-            (gogen/call
-              (gogen/field-sel (gogen/ident "ec") "Deref")
-              [(gogen/call
-                 (gogen/field-sel (gogen/ident "rt") "LookupVar")
-                 [(gogen/string-lit (if (nil? sns) "core" sns))
-                  (gogen/string-lit sn)])]))
+          ;; In a function with a set! the var is materialised into a one-time
+          ;; snapshot local (see fn-has-set-var?): reference the local here so a
+          ;; later set! to the same var cannot change the value this use observes
+          ;; (the snapshot `vN = ec.Deref(...)` is emitted by lower-inst-stmts via
+          ;; inst-rhs). Otherwise (no set! in the fn) re-emit the deref inline.
+          (if (load-var-snapshot? f nid)
+            (when (and (live? f nid) (infer-go-type t))
+              (value-ident f nid))
+            (load-var-deref-expr aux))
 
           (= op :const)
           (if (= "vm.Value" (go-type-spec t))
@@ -750,6 +806,10 @@
         (when obj-expr
           (gogen/field-sel obj-expr (go-name (name field)))))
 
+      ;; RHS of a :load-var's one-time snapshot local: ec.Deref(rt.LookupVar(...)).
+      (= op :load-var)
+      (load-var-deref-expr (ir/aux nid f))
+
       :else nil)))
 
 (declare inlined-arg?)
@@ -767,7 +827,9 @@
                              (ir/block-params bid f))
               insts  (filter (fn [nid]
                                (let [op (ir/op nid f)]
-                                 (and (local-carrying-op? op)
+                                 (and (or (local-carrying-op? op)
+                                          ;; materialised var snapshot in a set!-fn
+                                          (load-var-snapshot? f nid))
                                       (not= op :block-arg)
                                       (live? f nid)
                                       (not (closure-value? f nid))
@@ -1676,7 +1738,16 @@
         aux (ir/aux nid f)]
     (cond
       (= op :load-arg)  []
-      (= op :load-var)  []
+      ;; In a set!-containing fn a :load-var is materialised: emit the one-time
+      ;; snapshot `vN = ec.Deref(rt.LookupVar(...))` at the load point so later
+      ;; uses read the snapshot, not a value a subsequent set! may have changed.
+      ;; Without a set! the var is re-emitted inline at uses (no statement here).
+      (= op :load-var)
+      (if (and (load-var-snapshot? f nid) (live? f nid))
+        (let [rhs (inst-rhs f closed-exprs nid)]
+          (when rhs
+            [(gogen/assign "=" (value-ident f nid) rhs)]))
+        [])
       (= op :load-closed) []
       (and (= op :const) (any-fn-template? aux))
       []
