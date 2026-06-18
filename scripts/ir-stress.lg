@@ -128,6 +128,47 @@
   (when (and ns-form- (seq? ns-form-) (> (count ns-form-) 1))
     (nth ns-form- 1)))
 
+(defn own-def-names [parsed]
+  "Every top-level name this file defines: the 2nd element of any form whose
+   head is a def-like special/macro (def, defn, defn-, defmacro, defonce,
+   def-, deftype, defprotocol). Used to pre-declare a file's own vars so the
+   per-defn AOT build resolves self/sibling references — exactly the state a
+   loaded namespace is in during production lowering.
+
+   The name slot may be meta-wrapped: `(def ^:private x v)` reads as
+   `(def (with-meta x {:private true}) v)`, so unwrap (with-meta sym ...) to
+   the bare symbol — otherwise ^:private / ^:dynamic siblings stay unresolved."
+  (when (and parsed (seq? parsed))
+    (->> (rest parsed)
+         (keep (fn [f]
+                 (when (and (seq? f) (>= (count f) 2))
+                   (let [h (first f)]
+                     (when (and (symbol? h)
+                                (clojure.string/starts-with? (str h) "def"))
+                       (let [raw (nth f 1)
+                             nm  (if (and (seq? raw) (= (first raw) 'with-meta))
+                                   (second raw)
+                                   raw)]
+                         (when (symbol? nm) nm)))))))
+         (vec))))
+
+(defn declare-own-defns! [parsed]
+  "Intern a stub var for each name this file defines that does not already
+   resolve in the current ns, so forward/mutual/self references resolve at
+   build time without evaluating bodies. Mirrors production, where the
+   namespace is fully loaded (all vars interned) before lowering.
+
+   Only names that DON'T already resolve are stubbed: declare expands to
+   (def name nil), which would clobber an already-bound var (e.g. niling out
+   map/filter when a loaded core file is in the corpus). Gating on resolve
+   keeps loaded functions intact and only fills in the genuinely-missing
+   sibling names."
+  (let [missing (->> (own-def-names parsed)
+                     (remove (fn [nm] (some? (resolve nm))))
+                     (vec))]
+    (when (seq missing)
+      (try (eval (cons 'declare missing)) (catch e nil)))))
+
 (defn require-deps! [ns-form-]
   "Given an (ns name (:require ...)) form, require each dependency
    with aliases set up."
@@ -499,6 +540,7 @@
             (eval (list 'in-ns (list 'quote ns-sym)))
             (catch e nil)))
         (require-deps! ns-form-)
+        (declare-own-defns! parsed)
         (let [results (mapv (fn [d]
                               (let [name (nth d 1)
                                     [r ms] (try-ir-timed d)]
@@ -557,7 +599,8 @@
               ns-sym (ns-name-from ns-form-)]
           (when ns-sym
             (eval (list 'in-ns (list 'quote ns-sym))))
-          (require-deps! ns-form-))
+          (require-deps! ns-form-)
+          (declare-own-defns! parsed))
         (catch e nil)))  ;; Silently skip load errors; we'll catch them per-fixture
     (let [t1 (System/nanoTime)
           ms (double (/ (- t1 t0) 1000000.0))]
