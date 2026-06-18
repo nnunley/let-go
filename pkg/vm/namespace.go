@@ -229,15 +229,19 @@ func (n *Namespace) LookupLocal(symbol Symbol) *Var {
 	return n.localVar(symbol)
 }
 
-// DefStub creates a var with NIL root without triggering the warn-on-shadow
-// check. Intended for bundle decoders that pre-populate var references
-// before the namespace's own chunk runs (which would Def them properly).
+// DefStub interns an UNBOUND var (no root) without triggering the
+// warn-on-shadow check. Intended for bundle decoders that pre-populate var
+// references before the namespace's own chunk runs (which Defs the ones that
+// have an init). Leaving the root unset is load-bearing: a no-init (def x) /
+// (declare x) emits only OP_LOAD_CONST, so the stub is the var that survives
+// into the namespace, and it must report (bound? (var x)) == false to match
+// the source-compiled path (LookupOrAdd). A NIL root would make precompiled /
+// LGB-loaded code wrongly appear bound, breaking def/declare promise semantics.
 // Do NOT use DefStub to intentionally suppress warnings for new code; use
 // Namespace.Exclude (via :refer-clojure :exclude) instead.
 func (n *Namespace) DefStub(name string) *Var {
 	s := Symbol(name)
 	va := NewVar(n, n.name, name)
-	va.SetRoot(NIL)
 	n.mu.Lock()
 	n.registry[s] = va
 	n.mu.Unlock()

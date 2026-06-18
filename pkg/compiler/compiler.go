@@ -1706,6 +1706,17 @@ func defCompiler(c *Context, form vm.Value) error {
 	}
 	c.emitWithArg(vm.OP_LOAD_CONST, c.constant(varr))
 	c.incSP(1)
+	if l == 1 {
+		// No-init form (def x): intern the var but leave its root binding
+		// UNAFFECTED, matching Clojure ("If init is not supplied, the root
+		// binding of the var is unaffected"). This is a forward declaration /
+		// promise — never a write — so it must not clobber an existing root
+		// or a value a later (def x v) will provide. The var itself is the
+		// expression result, already on the stack from OP_LOAD_CONST above.
+		c.tailPosition = tc
+		c.defName = ""
+		return nil
+	}
 	err := c.compileForm(val)
 	if err != nil {
 		return NewCompileError("compiling def value").Wrap(err)

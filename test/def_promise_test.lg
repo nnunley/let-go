@@ -1,0 +1,50 @@
+;; def / declare "promise" semantics — match Clojure:
+;;   (def x)        no-init: interns the var, root binding UNAFFECTED
+;;   (declare a b)  forward declarations with NO bindings (unbound vars)
+;; A no-init def must never clobber an existing or future root value; a
+;; declared-but-undefined var is unbound (a promise) until a real def fulfils it.
+(ns test.def-promise-test
+  (:require
+   [test :refer :all]))
+
+;; --- (def name) with no init must leave an existing root unaffected ---
+(def dp-existing 41)
+(def dp-existing)
+(deftest def-no-init-preserves-root
+  (testing "(def x) with no init leaves an existing root unaffected"
+    (is (= 41 dp-existing))))
+
+;; --- declare must not clobber an existing definition ---
+(def dp-declared 7)
+(declare dp-declared)
+(deftest declare-preserves-root
+  (testing "declare does not overwrite an existing root value"
+    (is (= 7 dp-declared))))
+
+;; --- a declared-but-undefined var is unbound (the promise) ---
+(declare dp-unbound)
+(deftest declare-creates-unbound-var
+  (testing "a declared-but-undefined var reports not bound"
+    (is (not (bound? (var dp-unbound))))))
+
+;; --- a no-init def on a brand-new name also leaves it unbound ---
+(def dp-fresh)
+(deftest def-no-init-fresh-is-unbound
+  (testing "(def x) on a new name interns an unbound var"
+    (is (not (bound? (var dp-fresh))))))
+
+;; --- forward / mutual references resolve once definitions are provided ---
+(declare dp-fwd)
+(defn dp-use [] (dp-fwd))
+(defn dp-fwd [] 99)
+(deftest forward-declaration-resolves
+  (testing "a forward-declared fn resolves when later defined"
+    (is (= 99 (dp-use)))))
+
+;; --- a later real def fulfils the promise ---
+(declare dp-late)
+(def dp-late 123)
+(deftest declare-then-def-fulfils
+  (testing "a real def after declare provides the value"
+    (is (= 123 dp-late))
+    (is (bound? (var dp-late)))))

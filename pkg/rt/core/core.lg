@@ -27,7 +27,7 @@
   `(def ^:private ~name (fn ~@forms)))
 
 (defmacro declare [name]
-  (list 'def name nil))
+  (list 'def name))
 
 (defmacro comment [& _] nil)
 
@@ -674,7 +674,11 @@
            (recur (inc ~i)))))))
 
 (defmacro declare [& names]
-  `(do ~@(map #(list 'def % nil) names)))
+  ;; Forward declarations: intern each var with NO binding (no-init def), so
+  ;; the var is an unbound "promise" a later def fulfils. Emitting (def name)
+  ;; rather than (def name nil) leaves any existing/future root unaffected,
+  ;; matching Clojure ("defs the supplied var names with no bindings").
+  `(do ~@(map #(list 'def %) names)))
 
 (defmacro defonce [name expr]
   (let [bare (if (and (seq? name) (= (first name) 'with-meta)) (second name) name)
