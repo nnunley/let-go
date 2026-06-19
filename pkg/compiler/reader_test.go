@@ -53,6 +53,56 @@ func TestReaderBasic(t *testing.T) {
 	}
 }
 
+func TestReaderSkipsLeadingNoValueForms(t *testing.T) {
+	// ReadSkipNoValue (the read-string entry) skips a leading no-value reader
+	// macro (line comment, #_ discard) and returns the next real form, not the
+	// VOID sentinel. Regression: read-string of a string that begins with a
+	// ';;' comment used to return VOID. (Read itself still returns VOID — see
+	// TestReaderMap* below, which collection readers depend on.)
+	want := vm.EmptyList.Cons(vm.Int(2)).Cons(vm.Int(1)).Cons(vm.Symbol("+"))
+	cases := map[string]vm.Value{
+		";; leading comment\n(+ 1 2)":       want,
+		";; c with ) paren inside\n(+ 1 2)": want,
+		"   ;; indented comment\n(+ 1 2)":   want,
+		";; one\n;; two\n(+ 1 2)":           want,
+		"#_ discarded (+ 1 2)":              want,
+	}
+	for p, e := range cases {
+		r := NewLispReader(strings.NewReader(p), "<reader>")
+		o, err := r.ReadSkipNoValue()
+		assert.NoError(t, err, "input %q", p)
+		assert.Equal(t, e, o, "input %q", p)
+	}
+}
+
+func TestReaderEOFAfterCommentOnly(t *testing.T) {
+	// Comment-only / whitespace-only input has no form: ReadSkipNoValue must
+	// surface EOF rather than silently returning VOID.
+	for _, p := range []string{";; only a comment", "   \n  ", "#_ 1"} {
+		r := NewLispReader(strings.NewReader(p), "<reader>")
+		_, err := r.ReadSkipNoValue()
+		assert.Error(t, err, "input %q should be EOF", p)
+	}
+}
+
+func TestReaderMapDiscardDoesNotConsumeNextKey(t *testing.T) {
+	// Read must keep returning VOID in value position so readMap can drop the
+	// orphaned key: {:a #_ 1 :b 2} => {:b 2}. Skipping VOID here would read :b
+	// as :a's value and leave 2 as an odd key.
+	r := NewLispReader(strings.NewReader("{:a #_ 1 :b 2}"), "<reader>")
+	o, err := r.Read()
+	assert.NoError(t, err)
+	assert.Equal(t, vm.NewArrayMap([]vm.Value{vm.Keyword("b"), vm.Int(2)}), o)
+}
+
+func TestReaderMapUnmatchedConditionalDoesNotConsumeNextKey(t *testing.T) {
+	// Same invariant for a reader conditional with no matching branch.
+	r := NewLispReader(strings.NewReader("{:a #?(:cljs 1) :b 2}"), "<reader>")
+	o, err := r.Read()
+	assert.NoError(t, err)
+	assert.Equal(t, vm.NewArrayMap([]vm.Value{vm.Keyword("b"), vm.Int(2)}), o)
+}
+
 func TestSimpleCall(t *testing.T) {
 	p := "(+ 40 2)"
 	r := NewLispReader(strings.NewReader(p), "<reader>")
