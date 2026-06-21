@@ -1581,6 +1581,21 @@
                         (emit-call-stmts f target mcall)
                         [(gogen/assign "=" target mcall)]))))))))))))
 
+(defn- keyword-callee-total?
+  "True when a :call's callee is a compile-time keyword constant invoked with
+   1 or 2 args. vm.Keyword.Invoke (pkg/vm/keyword.go) returns a non-nil error
+   ONLY for arity outside [1,2]; a :call node's arg-count is statically known,
+   so such a lookup is provably error-free and the emitted callErr check is dead
+   code. Keyword callees are :const nodes (not vars), so this can't be
+   invalidated by redefinition."
+  [f refs]
+  (let [callee    (first refs)
+        arg-count (count (rest refs))]
+    (and callee
+         (= :const (ir/op callee f))
+         (keyword? (ir/aux callee f))
+         (or (= 1 arg-count) (= 2 arg-count)))))
+
 (defn- call-assign-stmts [f closed-exprs nid]
   (or
     (ctor-call-stmts f closed-exprs nid)
@@ -1634,7 +1649,11 @@
                     invoke (gogen/call (gogen/field-sel (gogen/ident "rt") "InvokeValueEC")
                                        [(gogen/ident "ec") callee args-slice])]
                 (when callee
-                  (emit-call-stmts f target invoke))))))))))
+                  (if (keyword-callee-total? f refs)
+                    ;; Total keyword lookup: the error is always nil at arity
+                    ;; 1-2, so discard it (`_`) and skip the dead check.
+                    [(gogen/multi-assign "=" [target (gogen/ident "_")] [invoke])]
+                    (emit-call-stmts f target invoke)))))))))))
 
 (defn- try-assign-stmts [f closed-exprs nid]
   "Lower a :try op (guarded region) to straight-line Go.

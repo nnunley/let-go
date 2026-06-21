@@ -1,0 +1,46 @@
+;; A total keyword-callee call `(:k m)` with arity 1-2 lowers WITHOUT a
+;; `callErr != nil` check.
+;;
+;; vm.Keyword.Invoke (pkg/vm/keyword.go:57) returns a non-nil error ONLY when
+;; the arg-count is outside [1,2]. A :call node's arg-count is statically known,
+;; so a keyword lookup with 1 or 2 args is provably error-free and the emitted
+;; 3-line `if callErr != nil { return … }` block is dead code.
+;;
+;; RED before the fix: rendered Go threads `callErr` for the keyword call.
+;; GREEN after: the keyword invoke discards the always-nil error (`_`), and the
+;; `callErr` token / check is gone. Behavior is identical (error was always nil).
+
+(ns test.gogen-keyword-callerr-test
+  (:require
+   [clojure.string :as str]
+   [gogen :as g]
+   [ir.passes.pipeline :as pipeline]
+   [test :refer :all]))
+
+(defn- rendered-go [form]
+  (binding [pipeline/*target* :go]
+    (let [result (pipeline/compile-form form)]
+      (when (= :lowered (:status result))
+        (g/render (:decl result))))))
+
+(deftest keyword-call-arity1-elides-callerr
+  (testing "(:k m) with one arg lowers to an error-free invoke (no callErr check)"
+    (let [src (rendered-go '(defn kw-get [m] (:foo m)))]
+      (is (some? src) "function should lower")
+      (is (str/includes? src "vm.Keyword") "keyword callee still emitted")
+      (is (not (str/includes? src "callErr"))
+          "the always-nil error check should be elided"))))
+
+(deftest keyword-call-arity2-elides-callerr
+  (testing "(:k m default) with two args also elides the check"
+    (let [src (rendered-go '(defn kw-get2 [m d] (:foo m d)))]
+      (is (some? src) "function should lower")
+      (is (not (str/includes? src "callErr"))
+          "the always-nil error check should be elided for arity 2"))))
+
+(deftest non-keyword-call-keeps-callerr
+  (testing "a var-mediated call still threads callErr (predicate stays narrow, no over-elision)"
+    (let [src (rendered-go '(defn vc [m] (apply m [])))]
+      (is (some? src) "function should lower")
+      (is (str/includes? src "callErr")
+          "var/dynamic calls must keep the error check"))))
