@@ -45,6 +45,10 @@ type hmapNode interface {
 	assoc(shift uint, hash uint32, key Value, val Value, addedLeaf *bool) hmapNode
 	dissoc(shift uint, hash uint32, key Value) hmapNode
 	nodeSeq() []MapEntry
+	// each visits every (key, value) pair in place without allocating an
+	// entry slice. It returns false as soon as fn returns false (allowing
+	// short-circuit), true once the whole subtree has been visited.
+	each(fn func(key, val Value) bool) bool
 }
 
 // MapEntry is a key-value pair.
@@ -259,6 +263,24 @@ func (n *hmapBitmapNode) nodeSeq() []MapEntry {
 		}
 	}
 	return entries
+}
+
+func (n *hmapBitmapNode) each(fn func(key, val Value) bool) bool {
+	nSlots := len(n.array) / 2
+	for i := 0; i < nSlots; i++ {
+		keyOrNil := n.array[2*i]
+		valOrNode := n.array[2*i+1]
+		if keyOrNil != nil {
+			if !fn(keyOrNil.(Value), valOrNode.(Value)) {
+				return false
+			}
+		} else if valOrNode != nil {
+			if !valOrNode.(hmapNode).each(fn) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (n *hmapBitmapNode) cloneAndSet(i int, val any) *hmapBitmapNode {
@@ -488,6 +510,15 @@ func (n *hmapCollisionNode) nodeSeq() []MapEntry {
 		entries[i] = MapEntry{Key: n.array[2*i].(Value), Value: n.array[2*i+1].(Value)}
 	}
 	return entries
+}
+
+func (n *hmapCollisionNode) each(fn func(key, val Value) bool) bool {
+	for i := 0; i < n.count; i++ {
+		if !fn(n.array[2*i].(Value), n.array[2*i+1].(Value)) {
+			return false
+		}
+	}
+	return true
 }
 
 func (n *hmapCollisionNode) findIndex(key Value) int {
@@ -797,16 +828,16 @@ func (m *PersistentMap) Equals(other Value) bool {
 	if m.count != o.count {
 		return false
 	}
-	if m.root == nil && o.root == nil {
+	// count equality + the invariant (count == 0 ⟺ root == nil) means both
+	// roots are non-nil past this point.
+	if m.count == 0 {
 		return true
 	}
-	// Check that every entry in m exists with the same value in o
-	entries := m.root.nodeSeq()
-	for _, e := range entries {
-		v, found := o.root.find(0, hashValue(e.Key), e.Key)
-		if !found || !valueEquiv(e.Value, v) {
-			return false
-		}
-	}
-	return true
+	// Walk m in place (no entry-slice materialization — the old nodeSeq()
+	// here dominated lowering allocation): every key in m must exist in o
+	// with an equiv value. Sizes already match, so this is sufficient.
+	return m.root.each(func(k, v Value) bool {
+		ov, found := o.root.find(0, hashValue(k), k)
+		return found && valueEquiv(v, ov)
+	})
 }

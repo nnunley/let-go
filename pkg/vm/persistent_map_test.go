@@ -258,6 +258,58 @@ func TestPersistentMapEquals(t *testing.T) {
 	}
 }
 
+// TestPersistentMapEqualsDeep exercises Equals over maps deep enough to force
+// HAMT sub-nodes (and thus the recursive walk), guarding the non-materializing
+// rewrite of Equals against regressions: equal-but-differently-built maps,
+// single-value divergence, single-key divergence, and size divergence.
+func TestPersistentMapEqualsDeep(t *testing.T) {
+	const n = 400 // > 32 forces multiple HAMT levels
+	build := func(skip int, bumpKey, bumpVal int) *PersistentMap {
+		kvs := make([]Value, 0, 2*n)
+		for i := 0; i < n; i++ {
+			if i == skip {
+				continue
+			}
+			k := i
+			if i == bumpKey {
+				k = i + 100000
+			}
+			v := i
+			if i == bumpVal {
+				v = i + 1
+			}
+			kvs = append(kvs, Int(k), Int(v))
+		}
+		return NewPersistentMap(kvs)
+	}
+
+	base := build(-1, -1, -1)
+
+	// Same contents, inserted in reverse order — must be Equal.
+	rev := make([]Value, 0, 2*n)
+	for i := n - 1; i >= 0; i-- {
+		rev = append(rev, Int(i), Int(i))
+	}
+	if !base.Equals(NewPersistentMap(rev)) {
+		t.Error("deep maps with identical contents (reverse insert) should be equal")
+	}
+	if !base.Equals(base) {
+		t.Error("map should equal itself")
+	}
+	// One value differs.
+	if base.Equals(build(-1, -1, 137)) {
+		t.Error("maps differing in one value should not be equal")
+	}
+	// One key differs (same size).
+	if base.Equals(build(-1, 213, -1)) {
+		t.Error("maps differing in one key should not be equal")
+	}
+	// One key missing (size differs).
+	if base.Equals(build(50, -1, -1)) {
+		t.Error("maps of different size should not be equal")
+	}
+}
+
 func TestPersistentMapString(t *testing.T) {
 	m := EmptyPersistentMap
 	if m.String() != "{}" {
