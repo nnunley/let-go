@@ -3,14 +3,23 @@ status: active
 last-verified: 2026-06-05
 authoritative-for:
   - docs-index
-human-verified: 2026-06-07
+human-verified: 2026-06-20
 ---
 
 # let-go docs
 
 Design plans, execution roadmaps, and policy for the let-go implementation. Each doc carries a `status:` frontmatter line indicating whether it's the current authority or has been superseded. See "What's current" below.
 
-User-facing reference (for writing/shipping let-go programs) lives under [`guide/`](guide/); the rest of `docs/` is contributor/implementation material.
+## Layout
+
+Docs are bucketed by audience, then by cluster:
+
+- **[`guide/`](guide/)** — user-facing reference for writing and shipping let-go programs: language features, usage, Clojure compatibility.
+- **[`design/`](design/)** — contributor-facing architecture: how a subsystem works or was designed (VM, value representation, IR lowering, runtime image, Go AOT, I/O host decoupling).
+- **[`perf/`](perf/)** — performance baselines, the regression ratchet, and historical data.
+- **`docs/` root** — cross-cutting contributor material that isn't subsystem-scoped: the master plan, roadmaps, contribution policy, and dev workflow (regeneration, frontmatter, testing).
+
+A subdir is earned when a cluster of related docs justifies one; one-off cross-cutting docs stay at root.
 
 ## What's current
 
@@ -24,20 +33,21 @@ User-facing reference (for writing/shipping let-go programs) lives under [`guide
 |---|---|
 | Design contracts, CI gates, interop schema | `contribution-policy.md` |
 | Phase skeleton, success metrics | `master-plan.md` |
-| Calling convention, allocation, TCO | `vm-performance-optimization.md` |
-| Numeric/value representation | `value-representation-and-numeric-performance.md` |
+| Calling convention, allocation, TCO | `design/vm-performance-optimization.md` |
+| Numeric/value representation | `design/value-representation-and-numeric-performance.md` |
 | Persistent collections, seq tower, transients | `clojurelike-refactor-plan.md` |
 | Equality/hashing across types | `clojurelike-refactor-plan.md` (Phase 3) |
 | Transducers, reduction fast paths | `clojurelike-refactor-plan.md` (Phase 4) |
-| Runtime image / stdlib precompile | `runtime-image-and-stdlib-cache.md` |
-| Go AOT / self-host deployment | `go-aot-backend.md` + `contribution-policy.md` §2–3 |
+| Runtime image / stdlib precompile | `design/runtime-image-and-stdlib-cache.md` |
+| Go AOT / self-host deployment | `design/go-aot-backend.md` + `contribution-policy.md` §2–3 |
 | JVM-shape interop (strategy) | `jvm-compat-plan.md` |
 | JVM-shape interop (execution) | `clojure-compat-roadmap.md` |
 | Real-world Clojure compat findings | `xsofy-portability-gaps.md` |
 | Clojure-test-suite (jank) workflow | `clojure-test-suite.md` |
 | Testing strategy, conformance | `testing-and-conformance.md` |
 | Perf ratchet, regression checkpoints, historical baselines | `perf/ratchet.md` |
-| Babashka pod support | `pods.md` |
+| Babashka pods (usage) | `guide/pods.md` |
+| Babashka pods (host protocol / design) | `design/pods.md` |
 | Portable `.cljc` / `:lg` reader conditionals | `guide/portability.md` |
 | Version requirements, range matching (`let-go.semver`) | `guide/semver.md` |
 | `io/resource`, `-resource-paths` / `-source-paths` resolution | `guide/resources-and-source-paths.md` |
@@ -45,8 +55,8 @@ User-facing reference (for writing/shipping let-go programs) lives under [`guide
 | nREPL server + editor setup | `guide/nrepl.md` |
 | Clojure compatibility: namespace table + differences | `guide/clojure-compatibility.md` |
 | Running, compiling, WASM, project mgmt (lgx) | `guide/usage.md` |
-| IR fixup / link pass | `els2023-ir-fixup-audit.md` |
-| Parallel IR lowering + determinism | `parallel-lowering-and-type-cache.md` |
+| IR fixup / link pass | `design/els2023-ir-fixup-audit.md` |
+| Parallel IR lowering + determinism | `design/parallel-lowering-and-type-cache.md` |
 | Runtime I/O, host decoupling | `design/runtime-io-host-decoupling.md` |
 
 ## Reading order if starting cold
