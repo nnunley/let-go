@@ -68,9 +68,13 @@ var goLoweringNSOrder = []string{
 	"ir.lower",
 	"ir.lower-go",
 	"ir.validate",
+	// purity must precede its dependents (dce/cse/licm :require it) and follow
+	// its own dep (mutability); otherwise a fresh bundle omits purity and
+	// purity/effect-free-inst? resolves to nil at runtime in dce/removable?.
+	"ir.passes.mutability",
+	"ir.passes.purity",
 	"ir.passes.dce",
 	"ir.passes.constfold",
-	"ir.passes.mutability",
 	"ir.passes.cse",
 	"ir.passes.typeinfer",
 	"ir.passes.licm",
