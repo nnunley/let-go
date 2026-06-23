@@ -92,6 +92,13 @@
     ;; :else nil and strict lower-go throws "unsupported result type".
     (= t :number)                                "vm.Value"
     (or (= t :unknown) (= t :any) (= t :nil))    "vm.Value"
+    ;; Collection/seq kinds and the Seq interface are heap values represented as
+    ;; vm.Value in locals/results — there is no unboxing (unlike int/float). The
+    ;; TYPE drives interface satisfaction at call boundaries (coerce-arg-to-type),
+    ;; not the local's Go type, so they map to vm.Value here. (Set mirrors
+    ;; ir.lattice/collection-kinds — kept local to avoid a cross-ns require +
+    ;; goLoweringNSOrder churn.)
+    (contains? #{:vector :map :set :list :cons :lazyseq :seq} t) "vm.Value"
     (and (vector? t) (= (first t) :union))       "vm.Value"
     ;; [:dtype T] — a native deftype instance, lowered as a pointer *T to the
     ;; generated struct (drives receiver typing + devirtualized field access).

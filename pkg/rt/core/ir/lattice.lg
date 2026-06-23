@@ -31,7 +31,30 @@
    :any 10
    :bottom 11
    :dtype 12
-   :ratio 13})
+   :ratio 13
+   ;; Concrete collection/seq kinds. Non-maskable (see maskable-type?), like
+   ;; :ratio — they flow as keyword facts through the slow join path, so the
+   ;; proven bitset proptest (scalar bits 0-9) is untouched. They exist so a
+   ;; value can be typed by what vm interfaces it satisfies (Sequable/Counted/
+   ;; Seq), driving typed direct calls in lower-go.
+   :vector 14
+   :map 15
+   :set 16
+   :list 17
+   :cons 18
+   :lazyseq 19})
+
+;; The concrete collection/seq kinds (keyword lattice members, non-maskable).
+(def collection-kinds #{:vector :map :set :list :cons :lazyseq})
+
+;; vm interface membership: which lattice kinds implement each runtime
+;; interface, verified against pkg/vm method sets (Seq()/Count()/First()).
+;; :string is a scalar kind that also implements these. :nil is NEVER a member
+;; — nullability is orthogonal (see non-nil-type?). seq-kinds are the kinds
+;; that ARE a Seq (First/More/Next), distinct from merely Sequable.
+(def ^:private seqable-kinds #{:vector :map :set :list :cons :lazyseq :string})
+(def ^:private counted-kinds #{:vector :map :set :list :cons :lazyseq :string})
+(def ^:private seq-kinds     #{:list :cons :lazyseq})
 
 ;; --- diagnostic instrumentation ---
 ;; Bind *ti-counters* to an atom-map around an analysis to record per-pass
@@ -59,9 +82,39 @@
     ;; exactly), exactly like dtype types. Without this, type->mask would have
     ;; no bit for it and collapse :ratio to mask-any (:any).
     (= t :ratio) false
+    ;; Collection/seq kinds are non-maskable too — they have no bitset bit and
+    ;; survive the threaded state as keyword facts (like :ratio/:dtype).
+    (contains? collection-kinds t) false
     (keyword? t) true
     (union-type? t) (every? maskable-type? (rest t))
     :else false))
+
+;; --- vm interface satisfaction (MUST query over concrete kinds) -------------
+;; A type SATISFIES an interface iff every concrete (non-nil) kind it may be
+;; implements that interface — sound because join only grows the may-set. nil
+;; members are ignored here (nullability is orthogonal; see non-nil-type?), so
+;; e.g. [:union :vector :nil] is Sequable-when-non-nil. :any/:unknown/:bottom/
+;; const/dtype are never provably interface-typed.
+(defn- all-non-nil-members-in? [t kinds]
+  (cond
+    (= t :nil) false
+    (keyword? t) (contains? kinds t)
+    (union-type? t)
+    (let [members (filter (fn [m] (not= m :nil)) (rest t))]
+      (and (seq members) (every? (fn [m] (contains? kinds m)) members)))
+    :else false))
+
+(defn seqable-type? [t] (all-non-nil-members-in? t seqable-kinds))
+(defn counted-type? [t] (all-non-nil-members-in? t counted-kinds))
+(defn seq-type? [t] (all-non-nil-members-in? t seq-kinds))
+
+;; Nullability, orthogonal to interface membership: a value is provably non-nil
+;; iff :nil is not among its members and the type is not a nil-admitting top.
+(defn non-nil-type? [t]
+  (cond
+    (or (= t :nil) (= t :any) (= t :unknown)) false
+    (union-type? t) (not (some (fn [m] (= m :nil)) (rest t)))
+    :else true))
 
 (defn- type-rank [t]
   (let [key (cond
