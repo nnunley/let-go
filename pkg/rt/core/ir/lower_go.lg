@@ -1322,15 +1322,21 @@
 (defn registry-key [ns-sym name-str arity] [ns-sym name-str arity])
 
 (defn registry-entry-from-result [result ns-sym pkg-name]
-  ;; Build a registry entry for a lowered single-arity vm.Value sibling.
+  ;; Build a direct-call registry entry for a lowered single-arity sibling.
   ;; Returns a 1-entry map or nil. (Native entries are built in pipeline.lg.)
+  ;; Gated on :direct-callable? (coercible signature) — BROADER than
+  ;; :override-eligible? (uniform vm.Value, which gates the override wrapper):
+  ;; a typed sibling (func f(ec, x int) int) is recorded with its ACTUAL specs,
+  ;; so callers passing a proven-int arg emit `f(ec, intval)` with no boxing.
+  ;; coerce-arg-to-type keeps it sound — a typed param is only direct-called
+  ;; when the arg is proven that type, else the whole call falls back.
   (when-let [fn-name (:fn-name result)]
-    (when (:override-eligible? result)
+    (when (:direct-callable? result)
       {(registry-key (internal-ns-sym (str ns-sym)) fn-name (:arity result))
        {:go-name (:go-name result) :arity (:arity result)
         :needs-error? (:needs-error? result)
-        :param-specs (vec (repeat (:arity result) "vm.Value"))
-        :result-spec "vm.Value" :native? false :go-pkg nil}})))
+        :param-specs (vec (:param-specs result))
+        :result-spec (:result-spec result) :native? false :go-pkg nil}})))
 
 (defn native-registry
   "Build the native half of *lowered-registry* from the modules exposed by
@@ -1424,20 +1430,16 @@
       (= src-spec target-type)
       ;; typeinfer landed on the same Go type already — pass through.
       bare
-      (= target-type "string")
-      (gogen/call (gogen/ident "string")
-                  [(gogen/type-assert boxed (gogen/type "vm.String"))])
-      (= target-type "bool")
-      (gogen/call (gogen/ident "bool")
-                  [(gogen/type-assert boxed (gogen/type "vm.Boolean"))])
+      ;; *T (deftype) — devirtualized constructor/method calls prove the dtype
+      ;; upstream, so the pointer assert is sound.
       (and (string? target-type) (pos? (count target-type)) (= \* (nth target-type 0)))
       (gogen/type-assert boxed (gogen/type target-type))
-      (or (= target-type "int") (= target-type "int64"))
-      (gogen/call (gogen/ident target-type)
-                  [(gogen/type-assert boxed (gogen/type "vm.Int"))])
-      (= target-type "float64")
-      (gogen/call (gogen/ident "float64")
-                  [(gogen/type-assert boxed (gogen/type "vm.Float"))])
+      ;; A typed SCALAR param (int/int64/float64/bool/string) is only sound to
+      ;; pass when the arg is PROVEN that type — handled by the src==target
+      ;; pass-through above. An unchecked unbox-assert on an unproven vm.Value
+      ;; would change dynamic semantics (runtime panic vs the bytecode path's
+      ;; graceful handling), so fall back to the trampoline (return nil) instead
+      ;; of emitting `int(x.(vm.Int))` against an unproven value.
       :else nil)))
 
 (defn- box-result-from-type
@@ -1490,7 +1492,7 @@
    back gracefully (returns nothing) when any arg can't be coerced —
    call-assign-stmts then skips this branch and the next cond handles
    the trampoline path."
-  [f closed-exprs target refs entry]
+  [f closed-exprs nid target refs entry]
   (let [arg-rids   (rest refs)
         param-specs (vec (:param-specs entry))
         result-spec (:result-spec entry)
@@ -1519,13 +1521,18 @@
                (not= result-spec "vm.Value"))
           (let [boxed (box-result-from-type raw-call result-spec)]
             [(gogen/assign "=" target boxed)])
-          ;; Typed result + error: result, err := <call>; if err return; target = vm.<Box>(result)
+          ;; Typed result + error: tr<nid>, te<nid> := <call>; if err return;
+          ;; target = vm.<Box>(tr<nid>). The intermediate result+err vars are
+          ;; declared in-place with `:=` under UNIQUE names keyed by the node's
+          ;; Indexed-RPN position nid (the typed result can't be assigned to the
+          ;; vm.Value target directly, and a fixed `result` name would collide
+          ;; across multiple typed-error calls in one fn). The RPN index is
+          ;; positional → stable, so the names stay deterministic across regens.
           (and (:needs-error? entry)
                (not= result-spec "vm.Value"))
-          (let [_      (mark-call-err-used!)
-                res-id (gogen/ident "result")
-                err-id (gogen/ident "callErr")
-                assign (gogen/multi-assign "=" [res-id err-id] [raw-call])
+          (let [res-id (gogen/ident (str "tr" nid))
+                err-id (gogen/ident (str "te" nid))
+                assign (gogen/multi-assign ":=" [res-id err-id] [raw-call])
                 zero-expr (case (function-return-spec f)
                             "bool"    (gogen/ident "false")
                             "int"     (gogen/int-lit 0)
@@ -1676,7 +1683,7 @@
                        (value-ident f nid)
                        (gogen/ident "_"))
           entry      (lookup-direct-callable f (first refs) arg-count)
-          direct     (when entry (emit-typed-direct-call f closed-exprs target refs entry))]
+          direct     (when entry (emit-typed-direct-call f closed-exprs nid target refs entry))]
       (if direct
         direct
         (let [nn         (load-var-ns+name f (first refs))
@@ -2666,6 +2673,22 @@
        (= "vm.Value" (function-return-spec f))
        (every? (fn [s] (= "vm.Value" s)) (function-param-specs f))))
 
+(defn- override-coercible? [f]
+  ;; True iff the lowered Go signature is a DIRECT-CALL target: non-variadic and
+  ;; every param/result spec is one the call site can coerce soundly
+  ;; (supported-coercion-type?). Broader than override-uniform-value? — it admits
+  ;; TYPED signatures (e.g. func f(ec, x int) int), which the override wrapper
+  ;; cannot adapt but emit-typed-direct-call CAN (coercion is sound because
+  ;; coerce-arg-to-type only direct-calls a typed param when the arg is proven
+  ;; that type, else falls back). Feeds the direct-call registry, NOT the
+  ;; NativeFn override wrapper (that stays gated on override-uniform-value?).
+  (let [ret (function-return-spec f)
+        ps  (function-param-specs f)]
+    (and (not (ir/fn-variadic? f))
+         (some? ret)
+         (supported-coercion-type? ret)
+         (every? (fn [s] (and (some? s) (supported-coercion-type? s))) ps))))
+
 (defn- lower-fn-lit [f closed-exprs cid]
   ;; Returns nil on any unlowerable inner — callers (closure-expr →
   ;; lower-template-closure-expr) propagate nil up through value-expr,
@@ -2739,6 +2762,13 @@
        :arity (ir/fn-arity f)
        :needs-error? needs-error?
        :override-eligible? (override-uniform-value? f)
+       ;; :direct-callable? + the actual typed specs feed the direct-call
+       ;; REGISTRY (registry-entry-from-result), separate from :override-eligible?
+       ;; which feeds the NativeFn override wrapper. A typed sibling (e.g.
+       ;; func f(ec, x int) int) is direct-callable but NOT override-eligible.
+       :direct-callable? (override-coercible? f)
+       :param-specs (function-param-specs f)
+       :result-spec (function-return-spec f)
        ;; Prepend the ExecContext param: every top-level lowered fn is
        ;; `func name(ec *vm.ExecContext, arg0 …)`. Inline lambdas (lower-fn-lit)
        ;; do NOT get this param — they capture the enclosing fn's ec lexically.
