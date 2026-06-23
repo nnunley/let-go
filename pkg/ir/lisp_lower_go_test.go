@@ -1005,16 +1005,17 @@ func TestLowerNsToGoLiftsIntraNsCall(t *testing.T) {
 	}
 }
 
-// A cross-namespace callee (clojure.core/count) is lifted to cached-var IFn
-// dispatch — it no longer pays a per-call rt.LookupVar at the call site.
-// (Superseded the old "stays on InvokeValue" scope guard: the IFn-dispatch
-// slice is exactly what lifts cross-ns calls.)
+// A cross-namespace callee that stays on the trampoline (clojure.core/str —
+// variadic, so it is NOT a fixed-arity native-direct target) is lifted to
+// cached-var IFn dispatch — it no longer pays a per-call rt.LookupVar at the
+// call site. (count, formerly used here, is now a native-direct call into
+// corefns.Count, so it no longer exercises the cached-var fallback.)
 func TestLowerNsToGoLiftsCrossNsCall(t *testing.T) {
 	ensureLoader()
 	runLispExpr(t, `(create-ns (quote directtest2))`)
 	v := runLispExpr(t,
 		`(ir.passes.pipeline/lower-ns-to-go "directtest2" (quote directtest2)
-		   [(quote (defn caller2 [y] (count y)))])`)
+		   [(quote (defn caller2 [y] (str y)))])`)
 	src := string(v.(vm.String))
 	f := parseLoweredGo(t, src)
 	caller, ok := findFunc(f, func(n string) bool { return n == "caller2" })
@@ -1022,10 +1023,10 @@ func TestLowerNsToGoLiftsCrossNsCall(t *testing.T) {
 		t.Fatalf("no caller2 in:\n%s", src)
 	}
 	if _, ok := findIFnDispatch(caller.Body); !ok {
-		t.Fatalf("expected cross-ns count to lift to cached-var IFn dispatch:\n%s", src)
+		t.Fatalf("expected cross-ns str to lift to cached-var IFn dispatch:\n%s", src)
 	}
-	if callsLookupVarNamed(caller, "count") {
-		t.Fatalf("caller2 must not do a per-call rt.LookupVar for count:\n%s", src)
+	if callsLookupVarNamed(caller, "str") {
+		t.Fatalf("caller2 must not do a per-call rt.LookupVar for str:\n%s", src)
 	}
 }
 
@@ -1042,18 +1043,18 @@ func TestLowerGoCrossNsEmitsCachedVar(t *testing.T) {
 	runLispExpr(t, `(create-ns (quote crossnsvar))`)
 	v := runLispExpr(t,
 		`(ir.passes.pipeline/lower-ns-to-go "crossnsvar" (quote crossnsvar)
-		   [(quote (defn caller3 [y] (count y)))])`)
+		   [(quote (defn caller3 [y] (str y)))])`)
 	src := string(v.(vm.String))
 	f := parseLoweredGo(t, src)
 
-	isCountVar := func(n string) bool {
-		return strings.HasPrefix(n, "__v_") && strings.HasSuffix(n, "count")
+	isStrVar := func(n string) bool {
+		return strings.HasPrefix(n, "__v_") && strings.HasSuffix(n, "str")
 	}
 
-	// 1. package-level cached *vm.Var decl for count.
-	name, typ, ok := findPkgVar(f, isCountVar)
+	// 1. package-level cached *vm.Var decl for str.
+	name, typ, ok := findPkgVar(f, isStrVar)
 	if !ok {
-		t.Fatalf("expected package-level cached var for count:\n%s", src)
+		t.Fatalf("expected package-level cached var for str:\n%s", src)
 	}
 	if typ != "*vm.Var" {
 		t.Fatalf("cached var %s has type %q, want *vm.Var", name, typ)
@@ -1063,7 +1064,7 @@ func TestLowerGoCrossNsEmitsCachedVar(t *testing.T) {
 	//    per-callee accessor func is emitted (that bloat is what rt.CachedVarFn
 	//    replaces).
 	if _, ok := findIFnDispatch(f); !ok {
-		t.Fatalf("expected rt.CachedVarFn IFn dispatch for count:\n%s", src)
+		t.Fatalf("expected rt.CachedVarFn IFn dispatch for str:\n%s", src)
 	}
 	if _, ok := findFunc(f, func(n string) bool { return strings.HasPrefix(n, "__getv_") }); ok {
 		t.Fatalf("no per-callee accessor func should be emitted (use rt.CachedVarFn):\n%s", src)
@@ -1072,7 +1073,7 @@ func TestLowerGoCrossNsEmitsCachedVar(t *testing.T) {
 	// 3. resolution is lazy: no init() may eagerly call rt.LookupVar (that would
 	//    cache nil before bundle replay loads namespaces).
 	for _, in := range initFuncs(f) {
-		if callsLookupVarNamed(in, "count") {
+		if callsLookupVarNamed(in, "str") {
 			t.Fatalf("cached var must NOT be resolved eagerly in init():\n%s", src)
 		}
 	}
@@ -1090,7 +1091,7 @@ func TestLowerGoCrossNsCallLiftsToIFn(t *testing.T) {
 	runLispExpr(t, `(create-ns (quote crossnsifn))`)
 	v := runLispExpr(t,
 		`(ir.passes.pipeline/lower-ns-to-go "crossnsifn" (quote crossnsifn)
-		   [(quote (defn caller4 [y] (count y)))])`)
+		   [(quote (defn caller4 [y] (str y)))])`)
 	src := string(v.(vm.String))
 	f := parseLoweredGo(t, src)
 
@@ -1105,15 +1106,15 @@ func TestLowerGoCrossNsCallLiftsToIFn(t *testing.T) {
 	if d.nargs != 1 {
 		t.Fatalf("Invoke got %d args, want 1", d.nargs)
 	}
-	if !strings.HasSuffix(d.varName, "count") {
-		t.Fatalf("dispatch var %q does not target count", d.varName)
+	if !strings.HasSuffix(d.varName, "str") {
+		t.Fatalf("dispatch var %q does not target str", d.varName)
 	}
-	if d.nsArg != "clojure.core" || d.nameArg != "count" {
-		t.Fatalf("CachedVarFn resolves (%q,%q), want (clojure.core,count)", d.nsArg, d.nameArg)
+	if d.nsArg != "clojure.core" || d.nameArg != "str" {
+		t.Fatalf("CachedVarFn resolves (%q,%q), want (clojure.core,str)", d.nsArg, d.nameArg)
 	}
-	// The call site must NOT do a per-call rt.LookupVar for count anymore.
-	if callsLookupVarNamed(caller, "count") {
-		t.Fatalf("caller4 still does a per-call rt.LookupVar for count:\n%s", src)
+	// The call site must NOT do a per-call rt.LookupVar for str anymore.
+	if callsLookupVarNamed(caller, "str") {
+		t.Fatalf("caller4 still does a per-call rt.LookupVar for str:\n%s", src)
 	}
 }
 
