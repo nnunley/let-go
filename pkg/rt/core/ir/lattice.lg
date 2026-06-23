@@ -293,15 +293,23 @@
     (fact-from-type (type-join (fact-type a) (fact-type b)))))
 
 (defn new-typeinfra-state [f]
+  ;; Indexed-RPN positional state: :inst-facts and :touched are transient
+  ;; vectors indexed by nid (= the dense InstId add-inst assigns), mirroring the
+  ;; IR's own :insts vector. seed-state-from-inst-types! fills them to
+  ;; inst-count; the fixpoint then assoc!s in place — O(1) positional, no
+  ;; hashing, no HAMT path-copy, and no swap! (the transients are mutated in
+  ;; place and the atom keeps pointing at the same objects). This replaces a
+  ;; HAMT map + HAMT set keyed by a dense integer, which dominated lowering
+  ;; allocation (inst-facts assoc + touched conj + the per-update Atom.Swap).
   (atom
-    {:inst-facts {}
-     :touched #{}
+    {:inst-facts (transient [])
+     :touched    (transient [])
      :counters *ti-counters*
      :cache-meta {:fn-key (ir/fn-name f)
                   :cache-hit? false}}))
 
 (defn state-fact [state nid]
-  (get (:inst-facts @state) nid))
+  (nth (:inst-facts @state) nid))
 
 (defn state-type [state nid]
   (fact-type (state-fact state nid)))
@@ -310,21 +318,31 @@
   (fact-mask (state-fact state nid)))
 
 (defn- assoc-state-fact [state nid fact]
-  (swap! state
-         (fn [s]
-           (assoc s
-                  :inst-facts (assoc (:inst-facts s) nid fact)
-                  :touched (conj (:touched s) nid))))
+  ;; In-place positional update — no swap!, no path-copy. The transient vectors
+  ;; held by the atom are mutated directly (assoc! at index nid, in bounds since
+  ;; every nid is a dense InstId < inst-count).
+  (let [s @state]
+    (assoc! (:inst-facts s) nid fact)
+    (assoc! (:touched s) nid true))
   state)
 
 (defn seed-state-from-inst-types! [state f]
-  (loop [i 0 insts (:insts @f)]
-    (if (< i (count insts))
-      (let [raw-type (nth (nth insts i) 5)
-            seeded   (if (or (nil? raw-type) (= raw-type :unknown)) :bottom raw-type)]
-        (swap! state update :inst-facts assoc i (fact-from-type seeded))
-        (recur (inc i) insts))
-      state)))
+  ;; Build the positional vectors to length inst-count, in nid order, via conj!.
+  ;; Seeding does NOT mark :touched (only genuine joins do) so seeded-but-
+  ;; unchanged nodes aren't flushed back over the inst's :unknown type slot.
+  (let [s     @state
+        facts (:inst-facts s)
+        tch   (:touched s)
+        insts (:insts @f)
+        n     (count insts)]
+    (loop [i 0]
+      (if (< i n)
+        (let [raw-type (nth (nth insts i) 5)
+              seeded   (if (or (nil? raw-type) (= raw-type :unknown)) :bottom raw-type)]
+          (conj! facts (fact-from-type seeded))
+          (conj! tch false)
+          (recur (inc i)))
+        state))))
 
 (defn join-inst-type! [state nid t]
   (let [joined (join-facts (state-fact state nid) (fact-from-type t))]
@@ -339,6 +357,15 @@
       (assoc-state-fact state nid joined))))
 
 (defn flush-state-types! [state f]
-  (doseq [nid (:touched @state)]
-    (ir/set-type! f nid (state-type state nid)))
+  ;; Walk nids positionally and write back only the ones a join marked
+  ;; :touched. (Transients don't seq, and this preserves the "flush only
+  ;; changed" contract — seeded-but-unchanged :bottom nodes must not clobber
+  ;; the inst's :unknown type.)
+  (let [tch (:touched @state)
+        n   (count (:insts @f))]
+    (loop [nid 0]
+      (when (< nid n)
+        (when (nth tch nid)
+          (ir/set-type! f nid (state-type state nid)))
+        (recur (inc nid)))))
   state)
