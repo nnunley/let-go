@@ -558,6 +558,10 @@ func main() {
 		return
 	}
 
+	// In profiling builds, profile only the script/REPL execution below.
+	// Default builds compile this to a no-op so the release binary stays small.
+	startProfiling()
+
 	// Script mode: treat only the first positional as the script to run.
 	// Any further positionals belong to the script (it reads os/args).
 	ranSomething := false
@@ -598,4 +602,5 @@ func main() {
 		repl(context)
 	}
 
+	stopProfiling()
 }
