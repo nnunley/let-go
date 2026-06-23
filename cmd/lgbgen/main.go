@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"sort"
 	"strings"
@@ -305,10 +306,12 @@ func main() {
 	goOutDir := "pkg/rt/core_go_lowered"
 	var target string
 	var cpuProfilePath string
+	var memProfilePath string
 
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	fs.StringVar(&target, "target", "", "generation target: go, both, or empty for bundle-only")
 	fs.StringVar(&cpuProfilePath, "cpuprofile", "", "write Go CPU profile for the lgbgen process")
+	fs.StringVar(&memProfilePath, "memprofile", "", "write Go allocation profile (allocs) for the lgbgen process")
 	fs.Parse(os.Args[1:])
 
 	switch target {
@@ -361,6 +364,20 @@ func main() {
 			os.Exit(130)
 		}()
 		defer stopProfile()
+	}
+	if memProfilePath != "" {
+		defer func() {
+			f, err := os.Create(memProfilePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "create memprofile %s: %v\n", memProfilePath, err)
+				return
+			}
+			defer f.Close()
+			runtime.GC() // materialize up-to-date allocation stats
+			if err := pprof.Lookup("allocs").WriteTo(f, 0); err != nil {
+				fmt.Fprintf(os.Stderr, "write memprofile %s: %v\n", memProfilePath, err)
+			}
+		}()
 	}
 
 	// rt.init() has already run — native builtins are registered in CoreNS.
