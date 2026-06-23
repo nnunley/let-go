@@ -1,0 +1,17 @@
+;; Compute-bound microbenchmark for the gogen_ir native-lowering perf gate.
+;;
+;; Stresses lowered core seq machinery (range/map/filter/reduce + arithmetic)
+;; with NO println spam and negligible startup, so wall-clock ≈ pure eval time.
+;; Use it to measure whether native (-tags gogen_ir) lowering actually beats the
+;; bytecode VM. See README.md in this directory for the harness + baseline.
+;;
+;; Outer reduce (×60) amplifies the inner sum-of-squares so compute dominates
+;; the ~0.05s process startup.
+(def result
+  (reduce
+    (fn [acc _]
+      (+ acc (reduce + 0 (map (fn [x] (* x x)) (filter even? (range 50000))))))
+    0
+    (range 60)))
+
+(println result)

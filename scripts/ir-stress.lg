@@ -234,6 +234,12 @@
                            (or (= h 'defn) (= h 'defn-)))))
             (rest src-form))))
 
+;; Fixture enumeration is delegated to the lowering pipeline's canonical
+;; `lowerable-fn-forms` (ir.passes.pipeline) — see stress-file. A `defn` is
+;; itself a macro `(def name (fn ...))`, so the pipeline's expansion-based
+;; enumeration is the single source of truth for "what lowering operates on";
+;; the harness no longer carries its own divergent notion.
+
 (defn err-prefix [msg]
   (let [m (str msg)
         n (min 60 (count m))]
@@ -569,8 +575,7 @@
 
 (defn stress-file [path]
   "Compile each defn in path, tracking times and error buckets."
-  (let [parsed (read-all path)
-        defns  (vec (defn-forms parsed))]
+  (let [parsed (read-all path)]
     (if (nil? parsed)
       {:file path :read-error true}
       (let [ns-form- (first (filter (fn [f] (and (seq? f) (= (first f) 'ns)))
@@ -582,21 +587,31 @@
             (catch e nil)))
         (require-deps! ns-form-)
         (require-top-level! parsed)
-        (declare-own-defns! parsed)
-        (let [results (mapv (fn [d]
-                              (let [name (nth d 1)
-                                    [r ms] (try-ir-timed d)]
-                                (log! path name r ms)
-                                [name [r ms]]))
-                            defns)
-              ok     (count (filter (fn [[_ [r _]]] (= :ok r)) results))
-              errs   (filter (fn [[_ [r _]]] (not= :ok r)) results)
-              times  (map (fn [[_ [_ t]]] t) results)
-              err-classifications (map (fn [[_ [r _]]] r) errs)
-              error-buckets (frequencies (filter (fn [e] (not (nil? e))) err-classifications))]
-          {:file path :total (count defns) :ok ok :err (count errs)
-           :times times
-           :error-buckets error-buckets})))))
+        ;; One expansion pass over the file (AFTER the requires, so the file's
+        ;; macros — defn, deftest, when-var-exists, ... — are available): yields
+        ;; both the lowerable fixtures and every name the ns defines.
+        (let [{defns :fixtures names :defined-names}
+              (ir.passes.pipeline/analyze-ns-forms (rest parsed))]
+          ;; Pre-declare every defined name (incl. macro-generated) that doesn't
+          ;; already resolve, so sibling/forward refs resolve at build time —
+          ;; mirroring a fully-loaded ns, without clobbering loaded vars
+          ;; (map/filter/...). Supersedes the defn-only declare-own-defns!.
+          (when-let [decl-names (seq (remove (fn [nm] (some? (resolve nm))) names))]
+            (try (eval (cons 'declare decl-names)) (catch e nil)))
+          (let [results (mapv (fn [d]
+                                (let [name (nth d 1)
+                                      [r ms] (try-ir-timed d)]
+                                  (log! path name r ms)
+                                  [name [r ms]]))
+                          defns)
+                ok     (count (filter (fn [[_ [r _]]] (= :ok r)) results))
+                errs   (filter (fn [[_ [r _]]] (not= :ok r)) results)
+                times  (map (fn [[_ [_ t]]] t) results)
+                err-classifications (map (fn [[_ [r _]]] r) errs)
+                error-buckets (frequencies (filter (fn [e] (not (nil? e))) err-classifications))]
+            {:file path :total (count defns) :ok ok :err (count errs)
+             :times times
+             :error-buckets error-buckets}))))))
 
 (defn trace-mode-run []
   "Drill into one defn. Loads the corpus file like the main harness so the

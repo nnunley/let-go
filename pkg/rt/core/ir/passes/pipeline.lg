@@ -255,16 +255,140 @@
     (into {} (doall (map (fn [[k v]] [(expand-all k) (expand-all v)]) form)))
     :else form))
 
-(def ^:dynamic *target* :bytecode)
-;; When set to :go, compile-form* routes through ir.lower-go instead of ir.lower.
-;; Set this before calling compile-form to generate Go-lowered output.
+;; --- canonical enumeration of a namespace's lowerable fn-units -------------
+;; A `defn` is itself a macro: it expands to `(def NAME (fn ...))`. So the set
+;; of functions a namespace contributes to lowering is NOT "the literal `defn`
+;; forms" — it is every `(def NAME (fn ...))` that macroexpansion reveals,
+;; including macro-generated ones (e.g. `deftest` -> `(do (def t (fn [] ...))
+;; (register-test! ...))`). This is the single source of truth for "what
+;; lowering operates on", shared by the stress harness today and (eventually)
+;; production form-selection — so coverage measurement never drifts from what
+;; the pipeline actually lowers. Requires the file's macros to be loaded first.
 
 (defn- unwrap-name [raw-name]
   "Strip (with-meta sym {...}) wrapper from ^:private etc. metadata annotations.
-   Returns the bare symbol."
+   Returns the bare symbol (or raw-name unchanged)."
   (if (and (seq? raw-name) (= 'with-meta (first raw-name)))
     (second raw-name)
     raw-name))
+
+(defn- try-expand-all
+  "expand-all, but returns nil instead of throwing — a form that won't expand
+   simply contributes no units."
+  [form]
+  (try (expand-all form) (catch e nil)))
+
+(defn- def-target-name
+  "Name a `(def NAME ...)` form defines (NAME possibly meta-wrapped), else nil."
+  [form]
+  (when (and (seq? form) (= (first form) 'def) (>= (count form) 2))
+    (unwrap-name (nth form 1))))
+
+(defn def-fn-form->defn
+  "If form is `(def NAME (fn ...))` / `(def NAME (fn* ...))`, return the
+   equivalent `(defn NAME <fn-tail>)`; else nil. `expand-all` rewrites `fn` ->
+   `fn*`, so both heads must match. The fn-tail is a single `[args] body...` or
+   multi-arity `([args] ...)` lists — both valid defn shapes (compile-form
+   re-expands them on the way to build)."
+  [form]
+  (when (and (seq? form) (= (first form) 'def) (>= (count form) 3))
+    (let [nm  (def-target-name form)
+          val (nth form 2)]
+      (when (and (symbol? nm) (seq? val)
+                 (or (= (first val) 'fn) (= (first val) 'fn*)))
+        (let [tail (rest val)
+              ;; drop an optional self-name symbol after `fn`/`fn*`
+              tail (if (symbol? (first tail)) (rest tail) tail)]
+          (apply list 'defn nm tail))))))
+
+(defn- set-macro-target
+  "If form is `(set-macro! (var NAME))`, return NAME; else nil. Used to exclude
+   `defmacro`s — a `defmacro` expands to `(do (defn name ...) (set-macro! (var
+   name)))`, and macros are compile-time only (mirrors lgbgen's isDefnOnly
+   excluding `defmacro`). Form-level detection is required: expansion happens
+   before var resolution, so the runtime macro flag isn't available here."
+  [form]
+  (when (and (seq? form) (= (first form) 'set-macro!) (>= (count form) 2)
+             (seq? (nth form 1)) (= (first (nth form 1)) 'var))
+    (second (nth form 1))))
+
+(defn collect-lowerable-fns
+  "Walk a (macroexpanded) form, descending `do` wrappers, collecting every
+   `(def NAME (fn ...))` as a normalized defn form, appended to acc. Names that
+   a `(set-macro! (var NAME))` sibling marks as macros are excluded."
+  [form acc]
+  (cond
+    (nil? form) acc
+    (and (seq? form) (= (first form) 'do))
+    (let [macros (set (keep set-macro-target (rest form)))]
+      (reduce (fn [a g]
+                (if (and (seq? g) (= (first g) 'do))
+                  (collect-lowerable-fns g a)
+                  (let [d (def-fn-form->defn g)]
+                    (if (and d (not (contains? macros (nth d 1))))
+                      (conj a d)
+                      a))))
+              acc (rest form)))
+    :else
+    (let [d (def-fn-form->defn form)]
+      (if d (conj acc d) acc))))
+
+(defn- walk-marked-names
+  "Collect every name marked by a `(HEAD ...)` form ANYWHERE in form, via
+   `extract`. Recurses into matched forms too — a `def` is namespace-level even
+   when nested (e.g. `(def v 0)` inside a test-fn body still interns `v`).
+   Quoted forms are data, not code, and are skipped."
+  [head extract form acc]
+  (cond
+    (and (seq? form) (= (first form) 'quote)) acc
+    (and (seq? form) (= (first form) head))
+    (let [n   (extract form)
+          acc (if n (conj acc n) acc)]
+      (reduce (fn [a g] (walk-marked-names head extract g a)) acc (rest form)))
+    (seq? form)    (reduce (fn [a g] (walk-marked-names head extract g a)) acc form)
+    (vector? form) (reduce (fn [a g] (walk-marked-names head extract g a)) acc form)
+    :else acc))
+
+(defn analyze-ns-forms
+  "Expand each top-level form ONCE and return
+   `{:fixtures <lowerable defn-forms> :defined-names <symbols>}` — the single
+   source of truth for what lowering operates on, shared by the stress harness
+   today and (eventually) production form-selection so coverage never drifts
+   from what the pipeline actually lowers. :fixtures are the harvested
+   `(def NAME (fn ...))` units (incl. macro-generated like `deftest` bodies,
+   excl. `defmacro`); :defined-names is every def'd name anywhere (excl. macros),
+   for faithful sibling/forward pre-declaration. File macros MUST be loaded first
+   so expansion resolves them; a form that won't expand contributes nothing."
+  [forms]
+  (reduce
+    (fn [acc f]
+      (let [ex (try-expand-all f)]
+        (if (nil? ex)
+          acc
+          (let [macros (set (walk-marked-names 'set-macro! set-macro-target ex []))]
+            {:fixtures (into (:fixtures acc) (collect-lowerable-fns ex []))
+             :defined-names (into (:defined-names acc)
+                                  (remove (fn [n] (contains? macros n))
+                                          (walk-marked-names 'def def-target-name ex [])))}))))
+    {:fixtures [] :defined-names []}
+    forms))
+
+(defn lowerable-fn-forms
+  "Lowerable fn-units of a namespace's forms (see analyze-ns-forms). Convenience
+   accessor — prefer analyze-ns-forms when you also need :defined-names, to avoid
+   re-expanding the forms."
+  [forms]
+  (:fixtures (analyze-ns-forms forms)))
+
+(defn defined-names
+  "Every name a namespace's forms define, excluding macros (see analyze-ns-forms).
+   Convenience accessor — prefer analyze-ns-forms when you also need :fixtures."
+  [forms]
+  (:defined-names (analyze-ns-forms forms)))
+
+(def ^:dynamic *target* :bytecode)
+;; When set to :go, compile-form* routes through ir.lower-go instead of ir.lower.
+;; Set this before calling compile-form to generate Go-lowered output.
 
 (defn- compile-form* [form]
   "Drives (defn NAME [args] body...) through expand → build → optimize → lower.
