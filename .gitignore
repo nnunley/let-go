@@ -196,3 +196,7 @@ pkg/rt/core_go_lowered/
 
 # lean-ctx local tool state
 .lean-ctx/
+# AOT-lowered example outputs (regenerable via scripts/lg-compile)
+examples/aot/ys-on-let-go/go_lowered/
+examples/aot/cross-package/go/
+examples/aot/yamlstar/go/
