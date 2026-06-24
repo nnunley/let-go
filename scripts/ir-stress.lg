@@ -227,13 +227,6 @@
                  (let [h (str (first f))] (or (= h "require") (= h "use"))))
         (try (eval f) (catch e nil))))))
 
-(defn defn-forms [src-form]
-  (when (and src-form (seq? src-form))
-    (filter (fn [f] (and (seq? f)
-                         (let [h (first f)]
-                           (or (= h 'defn) (= h 'defn-)))))
-            (rest src-form))))
-
 ;; Fixture enumeration is delegated to the lowering pipeline's canonical
 ;; `lowerable-fn-forms` (ir.passes.pipeline) — see stress-file. A `defn` is
 ;; itself a macro `(def name (fn ...))`, so the pipeline's expansion-based
@@ -630,11 +623,16 @@
         (try (eval (list 'in-ns (list 'quote ns-sym))) (catch e nil)))
       (require-deps! ns-form-)
       (require-top-level! parsed)
-      (let [defns      (vec (defn-forms parsed))
+      ;; Enumerate fixtures through the SAME canonical analyze-ns-forms the main
+      ;; harness uses, so macro-generated fixtures (deftest bodies, etc.) are
+      ;; traceable. The old literal `defn-forms` scanner only saw bare defn/defn-
+      ;; and made `ir-stress trace ... and.cljc test-and` report a bogus
+      ;; "no defn named 'test-and'" even though main mode reports that fixture.
+      (let [defns      (:fixtures (ir.passes.pipeline/analyze-ns-forms (rest parsed)))
             target     (first (filter (fn [d] (= (nth d 1) trace-defn-name)) defns))]
         (when (nil? target)
-          (println (str "no defn named '" trace-defn-name "' in " path))
-          (println "Available defns:")
+          (println (str "no fixture named '" trace-defn-name "' in " path))
+          (println "Available fixtures:")
           (doseq [d defns] (println (str "  " (nth d 1))))
           (System/exit 1))
         (print-trace-report trace-defn-name (trace-one-defn target))))))
@@ -689,19 +687,30 @@
 
       ;; Aggregate both passes
       (let [all-results (concat results results2)
-            total   (reduce + 0 (map (fn [r] (or (:total r) 0)) all-results))
+            ;; A file the reader can't parse yields NO fixtures, so it would
+            ;; silently vanish from the pass-rate denominator (neither passed
+            ;; nor failed) — a coverage gate that hides unreadable files reads
+            ;; "65% lower" while quietly ignoring whole files. Count each
+            ;; read-error file as one failed fixture so it lands in the
+            ;; denominator and pulls the rate down, and surface it explicitly.
+            read-error-count (count (filter :read-error all-results))
+            total   (+ read-error-count
+                       (reduce + 0 (map (fn [r] (or (:total r) 0)) all-results)))
             oks     (reduce + 0 (map (fn [r] (or (:ok r) 0)) all-results))
             all-times (mapcat (fn [r] (or (:times r) [])) all-results)
-            all-errs (reduce (fn [acc r]
-                               (merge-with + acc (or (:error-buckets r) {})))
-                       {}
-                       all-results)]
+            all-errs (let [base (reduce (fn [acc r]
+                                          (merge-with + acc (or (:error-buckets r) {})))
+                                  {}
+                                  all-results)]
+                       (if (pos? read-error-count)
+                         (merge-with + base {:read-error read-error-count})
+                         base))]
 
         ;; Per-file summary
         (println "=== Per-file results (cold pass) ===")
         (doseq [r results]
           (if (:read-error r)
-            (println (str (:file r) ": READ-ERROR (xsofy not checked out?)"))
+            (println (str (:file r) ": READ-ERROR (unreadable — counts as 1 failure)"))
             (println (str (:file r) ": " (:ok r) "/" (:total r) " ok"))))
 
         ;; Overall stats
@@ -709,6 +718,9 @@
         (println (str "Total fixtures: " total))
         (println (str "Passed: " oks " (" (int (/ (* oks 100) (max 1 total))) "%)"))
         (println (str "Failed: " (- total oks)))
+        (when (pos? read-error-count)
+          (println (str "  (incl. " read-error-count
+                        " unreadable file(s), each counted as 1 failure)")))
 
         ;; Timing stats
         (let [cold-stats (stats-for (mapcat (fn [r] (or (:times r) [])) results))
