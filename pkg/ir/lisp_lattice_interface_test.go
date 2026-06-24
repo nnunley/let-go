@@ -38,11 +38,18 @@ func TestLatticeCollectionKindsAndInterfaceSatisfaction(t *testing.T) {
 		 ;; Counted
 		 (ir.lattice/counted-type? :cons)
 		 (ir.lattice/counted-type? :int)
+		 ;; Seq: every concrete collection vm type implements vm.Seq
+		 ;; (First/More/Next/Cons), so :string and :vector are Seq too — this is
+		 ;; a Go method-set test, not Clojure's seq? predicate.
+		 (ir.lattice/seq-type? :string)
+		 (ir.lattice/seq-type? :vector)
+		 (ir.lattice/seq-type? :list)
+		 (ir.lattice/seq-type? :int)
 		 ;; nullability is orthogonal — a separate member
 		 (ir.lattice/non-nil-type? :vector)
 		 (ir.lattice/non-nil-type? [:union :vector :nil])
 		 (ir.lattice/non-nil-type? :nil)])`)
-	want := `[[:union :vector :map] :vector true true false true false true true false true false false]`
+	want := `[[:union :vector :map] :vector true true false true false true true false true true true false true false false]`
 	if got != want {
 		t.Fatalf("lattice interface-satisfaction mismatch:\n got: %s\nwant: %s", got, want)
 	}

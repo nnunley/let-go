@@ -48,13 +48,22 @@
 (def collection-kinds #{:vector :map :set :list :cons :lazyseq})
 
 ;; vm interface membership: which lattice kinds implement each runtime
-;; interface, verified against pkg/vm method sets (Seq()/Count()/First()).
-;; :string is a scalar kind that also implements these. :nil is NEVER a member
-;; — nullability is orthogonal (see non-nil-type?). seq-kinds are the kinds
-;; that ARE a Seq (First/More/Next), distinct from merely Sequable.
+;; interface. Membership is the Go method-set test against pkg/vm — a kind
+;; belongs iff its concrete vm type satisfies the interface, NOT whether
+;; Clojure's seq? predicate is true for it. :string belongs everywhere
+;; vm.String does (it implements First/More/Next/Cons/Seq()/RawCount). :nil
+;; is NEVER a member — nullability is orthogonal (see non-nil-type?).
+;;
+;; Verified against pkg/vm/value.go: every concrete collection kind backs a
+;; vm type that implements ALL THREE of vm.Seq (First/More/Next/Cons),
+;; vm.Sequable (Seq()), and vm.Counted (RawCount) — ArrayVector, Map, Set,
+;; *List, *Cons, *LazySeq, String. So at this kind granularity the three sets
+;; coincide. They stay distinct predicates because finer vm types diverge
+;; once represented (e.g. *InfiniteRange is vm.Seq but not vm.Counted), at
+;; which point only the relevant set gains the new kind.
 (def ^:private seqable-kinds #{:vector :map :set :list :cons :lazyseq :string})
 (def ^:private counted-kinds #{:vector :map :set :list :cons :lazyseq :string})
-(def ^:private seq-kinds     #{:list :cons :lazyseq})
+(def ^:private seq-kinds     #{:vector :map :set :list :cons :lazyseq :string})
 
 ;; --- diagnostic instrumentation ---
 ;; Bind *ti-counters* to an atom-map around an analysis to record per-pass
