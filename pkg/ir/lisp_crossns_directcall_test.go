@@ -55,3 +55,48 @@ func TestCrossNsLoweredDirectCallEmit(t *testing.T) {
 		t.Fatalf("expected a direct call, but found a trampoline:\n--- go ---\n%s", rendered)
 	}
 }
+
+// When a typed param can't be coerced, emit-typed-direct-call falls back to the
+// trampoline. The callee's Go import must NOT be recorded in that case — a
+// leaked, unused import makes the emitted file fail to compile. Regression for
+// recording the import in lookup-direct-callable (before coercion) rather than
+// after emission succeeds.
+func TestCrossNsDirectCallFallbackDoesNotLeakImport(t *testing.T) {
+	ensureLoader()
+	runLispExpr(t, `(do (create-ns (quote leakns)) (intern (quote leakns) (quote callee)))`)
+	runLispExpr(t, `(def lg-test-leak-imports (atom #{}))`)
+
+	fn := buildLispIR(t, `(defn lcaller [x] (leakns/callee x))`)
+	optimizeLispIR(t, fn)
+	passVarCounter++
+	varName := fmt.Sprintf("*xns-leak-fn-%d*", passVarCounter)
+	rt.NS(rt.NameCoreNS).Def(varName, fn)
+
+	// Entry with a scalar "int" param: passes lookup's supported-coercion-type?
+	// gate, but coerce-arg-to-type returns nil for the unproven vm.Value arg x,
+	// forcing the trampoline fallback.
+	v := runLispExpr(t, fmt.Sprintf(`
+	  (let [reg {(ir.lower-go/registry-key (quote leakns) "callee" 1)
+	             {:go-name "Callee" :arity 1 :needs-error? false
+	              :param-specs ["int"] :result-spec "vm.Value"
+	              :native? false
+	              :go-pkg "github.com/nooga/let-go/pkg/rt/core_go_lowered/leakns"}}]
+	    (binding [ir.lower-go/*lowered-registry* reg
+	              ir.lower-go/*native-imports-used* lg-test-leak-imports]
+	      (ir.lower-go/lower %s :strict)))`, varName))
+	m, ok := v.(*vm.PersistentMap)
+	if !ok {
+		t.Fatalf("expected lower to return a map, got %T", v)
+	}
+	rendered := bindAndRenderGoDecl(t, m)
+
+	// Sanity: the call really did fall back to the trampoline (otherwise the
+	// import-empty assertion below would be vacuous).
+	if !strings.Contains(rendered, "InvokeValue") && !strings.Contains(rendered, "CachedVarFn") {
+		t.Fatalf("expected a trampoline fallback for an uncoercible int param:\n--- go ---\n%s", rendered)
+	}
+	// The fix: no import recorded when emission fell back.
+	if imports := string(runLispExpr(t, `(pr-str (deref lg-test-leak-imports))`).(vm.String)); imports != "#{}" {
+		t.Fatalf("fallback leaked an import: *native-imports-used* = %s, want #{}", imports)
+	}
+}
