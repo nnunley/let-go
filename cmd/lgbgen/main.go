@@ -635,6 +635,33 @@ func pruneEmptyDirs(root string) {
 	}
 }
 
+// writeGeneratedFile writes data to path, (re)creating the parent directory and
+// retrying on a transient ENOENT. Generating the whole lowered tree is dozens of
+// sequential file writes; under a macOS Seatbelt sandbox a freshly-created
+// directory can intermittently surface a spurious "no such file or directory" on
+// the immediately following write, aborting an otherwise-correct multi-minute
+// regen on a different file each run. A bounded retry makes a full regen reliable
+// without masking a genuine, persistent failure — a non-transient error returns
+// immediately, and a still-ENOENT after the retries are exhausted still errors.
+func writeGeneratedFile(path string, data []byte) error {
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if err = os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			continue
+		}
+		if err = os.WriteFile(path, data, 0644); err == nil {
+			return nil
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return err
+}
+
 // runGoTarget re-pipelines each namespace's defn forms through the Go
 // lowering pipeline and writes .go source files to outDir.
 func runGoTarget(outDir string) {
@@ -748,7 +775,7 @@ func runGoTarget(outDir string) {
 		// Stamp the generated banner so cleanGoOutputDir can later recognize
 		// this as an lgbgen-owned file and never mistake a user file for one.
 		banneredSrc := goGeneratedBanner + "\n\n" + string(goSrc)
-		if err := os.WriteFile(filename, []byte(banneredSrc), 0644); err != nil {
+		if err := writeGeneratedFile(filename, []byte(banneredSrc)); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: write %s: %v\n", ns.name, filename, err)
 			os.Exit(1)
 		}
@@ -813,7 +840,7 @@ func writeGogenWireup(pkgNames []string) {
 		{filepath.Join("pkg", "ir", "zz_gogen_ir_wire_test.go"), "ir_test", "gogen_ir"},
 	}
 	for _, f := range files {
-		if err := os.WriteFile(f.path, []byte(render(f.pkg, f.buildTag)), 0644); err != nil {
+		if err := writeGeneratedFile(f.path, []byte(render(f.pkg, f.buildTag))); err != nil {
 			fmt.Fprintf(os.Stderr, "write %s: %v\n", f.path, err)
 			os.Exit(1)
 		}
