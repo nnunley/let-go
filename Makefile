@@ -295,6 +295,23 @@ ir-stress: build
 	  LG_STRESS_LOG=$${LG_STRESS_LOG:-/tmp/ir-stress.log} \
 	  ./lg scripts/ir-stress.lg corpus scripts/ir-stress-corpus.edn
 
+# Jank lowering-coverage gate: lower-go AOT pass-rate over the vendored jank
+# Clojure-compat suite (test/clojure-test-suite, a git submodule). Unlike the
+# internal corpus, these .cljc files exercise the broader Clojure surface, so
+# the buckets surface lowering gaps the internal corpus can't (e.g. BigDecimal
+# literals, multimethods). LG_SOURCE_PATHS lists the repo's compat shim FIRST so
+# its portability.lg shadows the suite's own portability.cljc. Fixtures are the
+# macro-generated test fns (deftest bodies), enumerated by the pipeline's
+# canonical lowerable-fn-forms. Env overridable like ir-stress.
+JANK_SUITE_DIR := test/clojure-test-suite/test/clojure
+jank-stress: build
+	LG_SOURCE_PATHS="test/compat:test/clojure-test-suite/test" \
+	  LG_STRESS_PASSES=$${LG_STRESS_PASSES:-1} \
+	  LG_STRESS_TIMEOUT_MS=$${LG_STRESS_TIMEOUT_MS:-15000} \
+	  LG_STRESS_LOG=$${LG_STRESS_LOG:-/tmp/jank-lowering.log} \
+	  ./lg scripts/ir-stress.lg lower-go $(JANK_SUITE_DIR) \
+	    $$(cd $(JANK_SUITE_DIR) && ls core_test/*.cljc string_test/*.cljc)
+
 # Combined speed + size gates. Both ratchets need the gogen_ir lowered tree, and
 # each would otherwise regenerate it (the dominant cost). `ratchets` regenerates
 # it ONCE via `lowered`, runs the speed gate against it, then runs the size gate
