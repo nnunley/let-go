@@ -301,6 +301,51 @@ func sortStrings(s []string) {
 	}
 }
 
+// validateGoLoweringOrder guards the hand-maintained goLoweringNSOrder against
+// the silent footgun that this list is: a namespace bundled for Go lowering
+// can :require another bundle-able namespace whose functions it calls while
+// the lowering pipeline RUNS (e.g. ir.passes.dce calls ir.passes.purity's
+// effect-free-inst?). If that dependency is omitted from the list it is never
+// compiled into VM state, and the reference resolves to nil at lowering time —
+// no compile error, just a pass that silently misbehaves on a fresh regen.
+//
+// The check: every :require edge from a listed namespace must point to a
+// namespace that is EITHER already listed OR not bundle-able here. A namespace
+// is bundle-able iff it has embedded source and is not `lgbgen:skip` —
+// skip'd namespaces (core/string/set/graph) carry runtime intern blocks and
+// are served from source on demand by the NS loader, so a missing skip'd
+// require is fine; a missing non-skip require is the footgun. Touches no
+// ordering, so lowering determinism is unaffected.
+func validateGoLoweringOrder(order []string) error {
+	listed := make(map[string]bool, len(order))
+	for _, n := range order {
+		listed[n] = true
+	}
+	bundleable := func(name string) bool {
+		src, ok := rt.EmbeddedSource(name)
+		return ok && !hasLgbgenSkipDirective(src)
+	}
+	var problems []string
+	for _, n := range order {
+		src, ok := rt.EmbeddedSource(n)
+		if !ok {
+			continue
+		}
+		for _, dep := range parseRequires(src) {
+			if !listed[dep] && bundleable(dep) {
+				problems = append(problems,
+					fmt.Sprintf("  %s requires %s, which is bundle-able but missing from goLoweringNSOrder",
+						n, dep))
+			}
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("goLoweringNSOrder is incomplete — these requires would resolve to nil at lowering time:\n%s\nAdd each missing namespace to goLoweringNSOrder (before its dependents).",
+			strings.Join(problems, "\n"))
+	}
+	return nil
+}
+
 func main() {
 	// lgbgen is a short-lived batch tool that allocates heavily (the interpreted
 	// lowering churns ~14GB of transient persistent structures), so the default
@@ -434,6 +479,10 @@ func main() {
 	}
 
 	// Phase 1: compile all namespaces from source (bytecode, sets up VM state).
+	if err := validateGoLoweringOrder(goLoweringNSOrder); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
 	embeddedNS, err := orderedEmbeddedNS(goLoweringNSOrder)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "go-lowering ns list failed: %v\n", err)
