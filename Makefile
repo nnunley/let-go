@@ -191,7 +191,7 @@ bench-ratchet-full-update: lowered $(GO)
 	go run ./cmd/bench-ratchet -full update
 
 clean-lowered:
-	find pkg/rt/core_go_lowered -name '*.go' -type f -delete
+	$(RM) -r pkg/rt/core_go_lowered
 	$(RM) lg_gogen_ir.go lg_gogen_accel.go cmd/lgbgen/main_gogen_ir.go cmd/lgbgen/main_gogen_accel.go pkg/ir/zz_gogen_ir_wire_test.go pkg/ir/zz_gogen_accel_wire_test.go pkg/rt/generated.provenance
 	@echo "Cleaned lowered Go tree and wireup files"
 
