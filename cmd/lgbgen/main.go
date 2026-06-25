@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"runtime/pprof"
 	"sort"
 	"strings"
@@ -296,6 +297,16 @@ func sortStrings(s []string) {
 }
 
 func main() {
+	// lgbgen is a short-lived batch tool that allocates heavily (the interpreted
+	// lowering churns ~14GB of transient persistent structures), so the default
+	// GOGC=100 spends ~40-50% of the run in GC for a small live set. Raising it
+	// to 800 cut a --target=go run from min 31s to 27s (~13%, min-of-3) with
+	// negligible peak-memory cost (~hundreds of MB). Honor an explicit GOGC env
+	// so callers can tune or disable it; GC percentage never affects output.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(800)
+	}
+
 	// Parse mode: --target=go <out-dir>, --target=both [bundle-path], or
 	// default bytecode mode. `both` emits the .lgb bundle AND the gogen_ir
 	// Go tree from a single core compile (see the dispatch below). Optional
