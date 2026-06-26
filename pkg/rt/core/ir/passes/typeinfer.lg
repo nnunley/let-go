@@ -179,6 +179,15 @@
     (ratio?   aux) :ratio
     (string?  aux) :string
     (char?    aux) :char
+    ;; Collection/seq literals → concrete lattice kinds, so a value flowing from
+    ;; a literal is typed by the vm interfaces it satisfies (Sequable/Counted/
+    ;; Seq), enabling typed direct calls in lower-go. Order matters: a vector is
+    ;; not a seq?, a map/set are distinct; list? before seq? (a list is a seq).
+    (vector?  aux) :vector
+    (map?     aux) :map
+    (set?     aux) :set
+    (list?    aux) :list
+    (seq?     aux) :cons
     :else          :any))
 
 ;; --- CFG helpers -----------------------------------------------------

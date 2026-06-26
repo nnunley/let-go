@@ -92,6 +92,13 @@
     ;; :else nil and strict lower-go throws "unsupported result type".
     (= t :number)                                "vm.Value"
     (or (= t :unknown) (= t :any) (= t :nil))    "vm.Value"
+    ;; Collection/seq kinds and the Seq interface are heap values represented as
+    ;; vm.Value in locals/results — there is no unboxing (unlike int/float). The
+    ;; TYPE drives interface satisfaction at call boundaries (coerce-arg-to-type),
+    ;; not the local's Go type, so they map to vm.Value here. (Set mirrors
+    ;; ir.lattice/collection-kinds — kept local to avoid a cross-ns require +
+    ;; goLoweringNSOrder churn.)
+    (contains? #{:vector :map :set :list :cons :lazyseq :seq} t) "vm.Value"
     (and (vector? t) (= (first t) :union))       "vm.Value"
     ;; [:dtype T] — a native deftype instance, lowered as a pointer *T to the
     ;; generated struct (drives receiver typing + devirtualized field access).
@@ -1324,6 +1331,42 @@
         :needs-error? (:needs-error? result)
         :param-specs (vec (repeat (:arity result) "vm.Value"))
         :result-spec "vm.Value" :native? false :go-pkg nil}})))
+
+(defn native-registry
+  "Build the native half of *lowered-registry* from the modules exposed by
+   (rt/native-modules): a flat {[ns-sym name arity] entry} map. Each native
+   module is {:go-pkg :ns :fns {name {:go-ident :arity :variadic?
+   :param-specs :result-spec :needs-error?}}}.
+
+   Variadic fns are skipped — the direct-call path can't coerce a rest
+   slice, so they stay on the trampoline. Entries are keyed under the
+   INTERNAL ns symbol (internal-ns-sym), matching how lookup-direct-callable
+   derives call-ns, so both qualified (clojure.core/seq) and referred-core
+   (bare seq) calls resolve via resolve-call-entry."
+  [native-modules]
+  (reduce-kv
+    (fn [acc ns-str mods]
+      (let [ns-sym (internal-ns-sym ns-str)]
+        (reduce
+          (fn [acc2 mod]
+            (let [go-pkg (:go-pkg mod)]
+              (reduce-kv
+                (fn [acc3 fn-name desc]
+                  (if (:variadic? desc)
+                    acc3
+                    (assoc acc3
+                           (registry-key ns-sym fn-name (:arity desc))
+                           {:go-name      (:go-ident desc)
+                            :arity        (:arity desc)
+                            :needs-error? (:needs-error? desc)
+                            :param-specs  (vec (:param-specs desc))
+                            :result-spec  (:result-spec desc)
+                            :native?      true
+                            :go-pkg       go-pkg
+                            :variadic?    false})))
+                acc2 (:fns mod))))
+          acc mods)))
+    {} native-modules))
 
 (defn resolve-registry-entry
   "Exact-key lookup into *lowered-registry* (the flat {[ns name arity] entry}
@@ -2871,7 +2914,9 @@
                             (let [entries (:imports result)]
                               (if entries entries [])))
                           results))
-        decls   (mapv (fn [result] (:decl result)) results)
+        ;; Some results carry only :imports (e.g. native-module import
+        ;; carriers) with a nil :decl — skip those when collecting decls.
+        decls   (filterv some? (mapv (fn [result] (:decl result)) results))
         import-nodes (mapv import-spec-node imports)]
     (gogen/file pkg import-nodes decls)))
 

@@ -55,6 +55,117 @@ func Seq(v vm.Value) (vm.Value, error) {
 	return n, nil
 }
 
+// seqOf mirrors the unexported pkg/rt/lang.go helper of the same name —
+// corefns cannot import rt (rt imports corefns), so the logic is duplicated.
+// The corefns_diff_test guards against drift from the original.
+func seqOf(v vm.Value) (vm.Seq, error) {
+	if v == vm.NIL {
+		return nil, nil
+	}
+	if v == vm.EmptyList {
+		return nil, nil
+	}
+	if _, isLazy := v.(*vm.LazySeq); !isLazy {
+		if sq, ok := v.(vm.Sequable); ok {
+			s := sq.Seq()
+			if s == nil || s == vm.EmptyList {
+				return nil, nil
+			}
+			return s, nil
+		}
+	}
+	if s, ok := v.(vm.Seq); ok {
+		return s, nil
+	}
+	return nil, fmt.Errorf("don't know how to create ISeq from %s", v.Type())
+}
+
+// First mirrors the clojure.core/first builtin (pkg/rt/lang.go).
+func First(v vm.Value) (vm.Value, error) {
+	if v == vm.NIL {
+		return vm.NIL, nil
+	}
+	if seq, ok := v.(vm.Seq); ok {
+		return seq.First(), nil
+	}
+	if sq, ok := v.(vm.Sequable); ok {
+		s := sq.Seq()
+		if s == nil || s == vm.EmptyList {
+			return vm.NIL, nil
+		}
+		return s.First(), nil
+	}
+	return vm.NIL, fmt.Errorf("first expected Seq")
+}
+
+// Second mirrors the clojure.core/second builtin (pkg/rt/lang.go).
+func Second(v vm.Value) (vm.Value, error) {
+	if v == vm.NIL {
+		return vm.NIL, nil
+	}
+	seq, err := seqOf(v)
+	if err != nil {
+		return vm.NIL, fmt.Errorf("second expected Seq")
+	}
+	if seq == nil {
+		return vm.NIL, nil
+	}
+	n := seq.Next()
+	if n == nil {
+		return vm.NIL, nil
+	}
+	return n.First(), nil
+}
+
+// Next mirrors the clojure.core/next builtin (pkg/rt/lang.go).
+func Next(v vm.Value) (vm.Value, error) {
+	if v == vm.NIL {
+		return vm.NIL, nil
+	}
+	seq, err := seqOf(v)
+	if err != nil {
+		return vm.NIL, fmt.Errorf("next expected Seq")
+	}
+	if seq == nil {
+		return vm.NIL, nil
+	}
+	n := seq.Next()
+	if n == nil {
+		return vm.NIL, nil
+	}
+	return n, nil
+}
+
+// Rest mirrors the clojure.core/rest builtin (pkg/rt/lang.go).
+func Rest(v vm.Value) (vm.Value, error) {
+	if v == vm.NIL {
+		return vm.EmptyList, nil
+	}
+	s, err := seqOf(v)
+	if err != nil {
+		return vm.NIL, fmt.Errorf("rest expected Seq")
+	}
+	if s == nil {
+		return vm.EmptyList, nil
+	}
+	return s.More(), nil
+}
+
+// Count mirrors the clojure.core/count builtin (pkg/rt/lang.go).
+func Count(v vm.Value) (vm.Value, error) {
+	if v == vm.NIL {
+		return vm.MakeInt(0), nil
+	}
+	if s, ok := v.(vm.String); ok {
+		return vm.MakeInt(len([]rune(string(s)))), nil
+	}
+	seq, ok := v.(vm.Counted)
+	if !ok {
+		return vm.NIL, fmt.Errorf("count expected Counted")
+	}
+	return seq.Count(), nil
+}
+
 func init() {
 	rt.RegisterNativeModule(&rt.NativeModule{
 		GoPkg:     "github.com/nooga/let-go/pkg/rt/corefns",
@@ -62,6 +173,41 @@ func init() {
 		Fns: map[string]rt.NativeDirectFn{
 			"seq": {
 				GoIdent:    "Seq",
+				Arity:      1,
+				ParamSpecs: []string{"vm.Value"},
+				ResultSpec: "vm.Value",
+				NeedsError: true,
+			},
+			"first": {
+				GoIdent:    "First",
+				Arity:      1,
+				ParamSpecs: []string{"vm.Value"},
+				ResultSpec: "vm.Value",
+				NeedsError: true,
+			},
+			"second": {
+				GoIdent:    "Second",
+				Arity:      1,
+				ParamSpecs: []string{"vm.Value"},
+				ResultSpec: "vm.Value",
+				NeedsError: true,
+			},
+			"next": {
+				GoIdent:    "Next",
+				Arity:      1,
+				ParamSpecs: []string{"vm.Value"},
+				ResultSpec: "vm.Value",
+				NeedsError: true,
+			},
+			"rest": {
+				GoIdent:    "Rest",
+				Arity:      1,
+				ParamSpecs: []string{"vm.Value"},
+				ResultSpec: "vm.Value",
+				NeedsError: true,
+			},
+			"count": {
+				GoIdent:    "Count",
 				Arity:      1,
 				ParamSpecs: []string{"vm.Value"},
 				ResultSpec: "vm.Value",
