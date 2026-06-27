@@ -517,12 +517,33 @@
   ;; a join block BEFORE we build the head.  Otherwise the head (e.g. a
   ;; LoadVar for `not`) ends up in the entry block while the Call ends
   ;; up in the join block — a cross-block ref.
-  (let [head    (first form)
-        arg-ids (build-args (rest form) ctx)
-        fn-id   (if (symbol? head)
-                  (build-symbol head ctx)
-                  (build-form head ctx))]
-    (build-call-with-head fn-id (rest form) ctx)))
+  ;; Build args ONCE, here, then the head. Binding each arg result to a gensym
+  ;; local across the head build re-threads it through any block change the head
+  ;; introduces (mirror of build-call-with-head, which threads the head through
+  ;; the arg build). Emitting the Call directly avoids a second build-args pass:
+  ;; the old code pre-built args for their block-switching side effect, discarded
+  ;; the result, then let build-call-with-head rebuild them — duplicating every
+  ;; argument expression (a dead copy + the live copy) into the IR.
+  (push-locals! ctx)
+  (let [arg-ids  (build-args (rest form) ctx)
+        arg-syms (mapv (fn [aid]
+                         (if (terminated? aid)
+                           nil
+                           (let [s (ctx-gensym! ctx "arg__")]
+                             (bind-local! ctx s aid)
+                             s)))
+                       arg-ids)
+        head     (first form)
+        fn-id    (if (symbol? head)
+                   (build-symbol head ctx)
+                   (build-form head ctx))
+        threaded (vec (map (fn [s orig] (if s (or (lookup-local ctx s) orig) orig))
+                           arg-syms
+                           arg-ids))]
+    (pop-locals! ctx)
+    (add-inst! ctx (ctx-block ctx) :call
+      (vec (cons fn-id threaded))
+      (count threaded))))
 
 (defn- method-call-head?
   "True for Go method-interop heads like .WriteString — an UNQUALIFIED symbol
