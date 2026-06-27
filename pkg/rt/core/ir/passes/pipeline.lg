@@ -233,6 +233,15 @@
   ;; which aren't list? but ARE seq?. Build-form will likewise need to
   ;; accept seq? not list? if we want to feed it Cons-shaped output.
   (cond
+    ;; The empty list () is a self-evaluating literal, NOT a call. Without this
+    ;; guard the (seq? form) branch reconstructs it as (apply list (expand-all
+    ;; (first ())) (map expand-all (rest ()))) = (apply list nil) = (nil) — a
+    ;; one-element (nil) list the IR builder then lowers as a call to a nil head
+    ;; (rt.InvokeValueEC(ec, vm.NIL, …)). Surfaced once clojure.core was
+    ;; Go-lowered: (defn reverse [coll] (reduce conj () coll)).
+    (and (seq? form) (empty? form))
+    form
+
     (seq? form)
     (let [head (first form)]
       (if (contains? build-known-heads head)

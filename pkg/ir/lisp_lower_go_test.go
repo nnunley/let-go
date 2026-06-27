@@ -87,6 +87,39 @@ func bindAndRenderGoFile(t *testing.T, file vm.Value) string {
 	return string(s)
 }
 
+// Regression: the empty-list literal () is a self-evaluating constant (the
+// empty list), NOT a call with no operator. Two bugs conspired to lower it to
+// an invoke of a nil callee (rt.InvokeValueEC(ec, vm.NIL, …)), which faulted at
+// runtime ("invoke of nil") once clojure.core was Go-lowered — e.g.
+// (defn reverse [coll] (reduce conj () coll)) inside the native IR pipeline:
+//  1. pipeline/expand-all reconstructed () as (apply list (expand-all nil)) =
+//     (nil) — a one-element (nil) list.
+//  2. ir.build/build-list had no empty-list case, so () fell through to a call.
+//
+// Fixed at both layers; this guards against regressing either.
+func TestLowerGoEmptyListLowersToEmptyListConstNotNilInvoke(t *testing.T) {
+	ensureLoader()
+
+	// Layer 1: expand-all must preserve () (not turn it into (nil)).
+	expanded := runLispExpr(t, `(pr-str (ir.passes.pipeline/expand-all (quote ())))`)
+	if s, ok := expanded.(vm.String); !ok || string(s) != "()" {
+		t.Fatalf("expand-all should preserve the empty list (), got %v", expanded)
+	}
+
+	// Layer 2: build + lower a fn whose body uses () — it must lower to the
+	// empty-list constant, never an invoke of nil.
+	fn := buildLispIR(t, `(defn rev [coll] (reduce conj () coll))`)
+	optimizeLispIR(t, fn)
+	result := lowerGo(t, fn, ":strict")
+	rendered := bindAndRenderGoDecl(t, result)
+	if strings.Contains(rendered, "rt.InvokeValueEC(ec, vm.NIL") {
+		t.Fatalf("empty list () lowered to an invoke of nil:\n--- go ---\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "vm.EmptyList") {
+		t.Fatalf("expected () to lower to vm.EmptyList:\n--- go ---\n%s", rendered)
+	}
+}
+
 func TestLowerGoStrictArithmeticLowersToFuncDeclAST(t *testing.T) {
 	ensureLoader()
 

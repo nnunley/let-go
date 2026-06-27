@@ -196,3 +196,9 @@ pkg/rt/core_go_lowered/
 
 # lean-ctx local tool state
 .lean-ctx/
+
+# AOT examples: lg-compile emits a Go tree under examples/aot/<name>/go/ from
+# the example's .lg sources. Like core_go_lowered/, this is GENERATED and
+# regenerable (the example's own makefile rebuilds it), so it must not be
+# committed — only the .lg sources are tracked.
+examples/aot/*/go/
