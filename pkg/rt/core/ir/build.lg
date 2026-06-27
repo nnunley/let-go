@@ -573,6 +573,12 @@
   (let [head    (first form)
         builtin (get builtin-ops head)]
     (cond
+      ;; The empty list `()` is a self-evaluating constant (the empty list),
+      ;; NOT a call with no operator. Without this, `head` is nil and the form
+      ;; falls through to (build-call ()), which lowers to an invoke of a nil
+      ;; callee (rt.InvokeValueEC(ec, vm.NIL, …)). The bytecode compiler emits
+      ;; OP_LOAD_CONST vm.EmptyList here; mirror that with a :const Inst.
+      (empty? form)   (add-inst! ctx (ctx-block ctx) :const [] form)
       (= head 'if)    (build-if form ctx)
       (= head 'let)   (build-let form ctx)
       (= head 'let*)  (build-let form ctx)

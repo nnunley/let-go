@@ -266,7 +266,7 @@ check-generated: check-generated-manifest $(GO)
 		exit 1; \
 	fi
 	@echo ">> lowered tree: compile + dispatch natively under -tags gogen_ir"
-	@go build -tags gogen_ir ./...
+	@go build -tags gogen_ir ./pkg/rt/...
 	@out=$$(printf '(require (quote ir.passes.dce)) (println "DCE-TYPE:" (type ir.passes.dce/dce))' \
 	        | go run -tags gogen_ir . /dev/stdin 2>&1); \
 	if echo "$$out" | grep -q "DCE-TYPE: let-go.lang.NativeFn"; then \
