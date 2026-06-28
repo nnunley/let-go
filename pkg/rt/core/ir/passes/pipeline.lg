@@ -416,6 +416,30 @@
     (= 'deftype (first form))
     {:decl-kind :deftype :name (nth form 1) :fields (nth form 2) :impls (vec (drop 3 form))}
 
+    ;; Capture defmulti as a declaration form. Mirror the defmulti macro's
+    ;; argument parse (name docstring? attr-map? dispatch-fn & options) so the
+    ;; dispatcher registry can later recognise a type-dispatch fn and the
+    ;; default method's dispatch value.
+    (= 'defmulti (first form))
+    (let [margs       (drop 2 form)
+          margs       (if (string? (first margs)) (next margs) margs)
+          margs       (if (map? (first margs)) (next margs) margs)
+          dispatch-fn (first margs)
+          opts        (apply hash-map (or (next margs) '()))]
+      {:decl-kind   :defmulti
+       :name        (unwrap-name (nth form 1))
+       :dispatch-fn dispatch-fn
+       :default-val (get opts :default :default)})
+
+    ;; Capture defmethod as a declaration form. The dispatch value selects the
+    ;; switch arm; the fn-tail ([args] body...) is the method body lowered into
+    ;; that arm.
+    (= 'defmethod (first form))
+    {:decl-kind    :defmethod
+     :name         (unwrap-name (nth form 1))
+     :dispatch-val (nth form 2)
+     :fn-tail      (vec (drop 3 form))}
+
     ;; Otherwise, fall through to the existing defn logic
     :else
     (let [name-sym    (unwrap-name (nth form 1))
@@ -662,6 +686,22 @@
       "init" [] []
       [(gogen/expr-stmt register-call)])))
 
+(defn- native-multifn-init-decl [ns-name names]
+  "Build an init() that registers this ns's native-baked multimethods via
+   rt.RegisterNativeMultiFns(\"ns\", []string{...}). The runtime freezes them
+   as the native dispatch baseline once the ns finishes loading, so the
+   generated type-switch guard (rt.MultiFnNativeFrozen) can detect a later
+   defmethod and fall back to runtime dispatch."
+  (let [slice-lit (gogen/composite-lit
+                    (gogen/type "[]string")
+                    (mapv gogen/string-lit names))
+        register  (gogen/call
+                    (gogen/field-sel (gogen/ident "rt") "RegisterNativeMultiFns")
+                    [(gogen/string-lit ns-name) slice-lit])]
+    (gogen/func-decl
+      "init" [] []
+      [(gogen/expr-stmt register)])))
+
 (defn- override-entries [valid-results]
   "Lowered results eligible for override registration: single-arity fns
    (carry :fn-name) whose Go signature is uniformly vm.Value, so the
@@ -737,13 +777,20 @@
   ;; terminates; it's just slower than the interactive/bytecode default.
   (let [decl-form?  (fn [form]
                       (and (seq? form)
-                           (contains? #{'defprotocol 'deftype} (first form))))
+                           (contains? #{'defprotocol 'deftype 'defmulti 'defmethod} (first form))))
         decl-forms  (filterv decl-form? forms)
         defn-forms0 (filterv (fn [form] (not (decl-form? form))) forms)
         ;; Capture each declaration form ({:decl-kind … :name … …}).
         captures    (mapv (fn [form] (binding [*target* :go] (compile-form* form))) decl-forms)
         protocols   (filterv (fn [c] (= :defprotocol (:decl-kind c))) captures)
         deftypes    (filterv (fn [c] (= :deftype (:decl-kind c))) captures)
+        ;; Multimethod captures. Methods are grouped by multifn name preserving
+        ;; SOURCE ORDER (the switch arms are emitted in this order → deterministic).
+        defmulti-caps  (filterv (fn [c] (= :defmulti (:decl-kind c))) captures)
+        defmethod-caps (filterv (fn [c] (= :defmethod (:decl-kind c))) captures)
+        methods-by-mm  (reduce (fn [m c]
+                                 (update m (str (:name c)) (fnil conj []) c))
+                               {} defmethod-caps)
         ;; Registries built from THIS namespace's captures, bound below so the
         ;; namespace's own defns type ctor results as [:dtype T] (typeinfer),
         ;; lower (->T …) to the native _T(…) constructor, and devirtualize
@@ -776,7 +823,108 @@
                                       (into (mapv (fn [d] {:decl d :imports [vm-import]}) (:decls s))
                                             (mapv (fn [d] {:decl d :imports [vm-import rt-import]}) (:decls m)))))
                                   deftypes))
-            type-decls (into protocol-decls deftype-decls)
+            ;; Native multimethod lowering. For each defmulti whose dispatch fn is
+            ;; a recognized (fn [x] (type x)) shape, try to map each method's
+            ;; dispatch-val to a Go type AND lower its body to a package-level Go
+            ;; fn (_mm_*). A method counts as a native arm only if BOTH succeed;
+            ;; a multifn with >=1 native arm becomes a :type dispatcher (the rest
+            ;; — and all other Go representations — route through the runtime
+            ;; vm.MultiFn default arm). Method bodies are lowered HERE, with
+            ;; *defmulti-dispatchers* still unbound, so a body that recursively
+            ;; calls the multifn uses the trampoline (no dangling self-reference
+            ;; before the decls exist). Source order is preserved → deterministic.
+            defmulti-lowered
+            (mapv
+              (fn [dm]
+                (let [mm-name (str (:name dm))
+                      di      (lower-go/recognize-type-dispatch-fn (:dispatch-fn dm))
+                      methods (get methods-by-mm mm-name [])]
+                  (if (nil? di)
+                    ;; Not the (type x) shape → value/unknown dispatch. Register a
+                    ;; MINIMAL entry (just :dispatch-type) so the multifn is VISIBLE
+                    ;; to the coverage tooling (ITER-0012) and trampolines BY TAG
+                    ;; rather than by omission. No :home-ns/:dispatch-arg-index/:arms:
+                    ;; defmulti-call-stmts' (= :type …) guard rejects it before any of
+                    ;; those are read, so emission is byte-identical AND we avoid the
+                    ;; (resolve …) call here (keeps the registry deterministic).
+                    {:name  mm-name
+                     :entry {:dispatch-type (lower-go/classify-dispatch (:dispatch-fn dm))}
+                     :decls []}
+                    (let [arm+decl
+                          (vec (keep-indexed
+                                 (fn [i meth]
+                                   (let [gt (lower-go/dispatch-val-to-go-type (:dispatch-val meth))]
+                                     (when gt
+                                       (let [go-name (lower-go/defmulti-method-go-name mm-name i)
+                                             fn-form (apply list 'defn (symbol go-name) (:fn-tail meth))
+                                             result  (try (binding [*target* :go] (compile-form* fn-form))
+                                                          (catch _e nil))]
+                                         ;; Native arm only if the method lowered to the UNIFORM
+                                         ;; vm.Value ABI (all params + result vm.Value) — then the
+                                         ;; call site passes boxed args + reads a vm.Value result
+                                         ;; with no coercion. Typed-specialized methods (int/bool/…)
+                                         ;; drop their arm and route through the runtime default.
+                                         (when (and result
+                                                    (= :lowered (:status result))
+                                                    (= "vm.Value" (:result-spec result))
+                                                    (every? (fn [s] (= "vm.Value" s)) (:param-specs result)))
+                                           {:arm  {:go-case-type gt
+                                                   :go-fn-name   (:go-name result)
+                                                   :param-count  (count (first (:fn-tail meth)))
+                                                   :needs-error? (:needs-error? result)}
+                                            :decl {:decl (:decl result)
+                                                   :imports (or (:imports result) [vm-import rt-import])}})))))
+                                 methods))
+                          ;; Runtime multimethod semantics are last-write-wins
+                          ;; by dispatch value: a later (defmethod mm dv …)
+                          ;; replaces the earlier method in the MultiFn map. For
+                          ;; the native :type switch each :go-case-type IS that
+                          ;; dispatch value's Go representation, so two
+                          ;; (defmethod mm (type []) …) would otherwise emit
+                          ;; duplicate `case vm.ArrayVector:` clauses — invalid
+                          ;; Go, and semantically wrong (an older arm could win,
+                          ;; or a stale-arity arm survive the call-site
+                          ;; :param-count filter while the runtime would use the
+                          ;; latest method). Collapse to the LAST arm+decl per
+                          ;; :go-case-type, kept at its last source position so
+                          ;; native dispatch matches runtime last-wins. No
+                          ;; duplicates → identical to source order, no churn.
+                          collapsed (let [last-ix (reduce (fn [m [i x]]
+                                                            (assoc m (:go-case-type (:arm x)) i))
+                                                          {} (map-indexed vector arm+decl))]
+                                      (mapv second
+                                            (filterv (fn [[i x]]
+                                                       (= i (get last-ix (:go-case-type (:arm x)))))
+                                                     (map-indexed vector arm+decl))))
+                          arms  (mapv :arm collapsed)
+                          decls (mapv :decl collapsed)]
+                      (if (seq arms)
+                        {:name  mm-name
+                         ;; :home-ns is the multifn var's namespace, resolved the
+                         ;; SAME way a call site resolves it (both go through the
+                         ;; var → identical ns string), so defmulti-call-stmts can
+                         ;; match same-ns calls robustly regardless of the
+                         ;; ns-name/canonical-name duality (e.g. core vs the
+                         ;; lookup symbol passed to lower-ns-to-go).
+                         :entry {:dispatch-type :type
+                                 :dispatch-arg-index di
+                                 :home-ns (let [v (try (resolve (symbol mm-name)) (catch _e nil))]
+                                            (when v (namespace (symbol v))))
+                                 :arms arms}
+                         :decls decls}
+                        ;; Type-dispatch SHAPE but no method mapped to a Go type →
+                        ;; no native arms. Still register it (tag :type, no :arms) so
+                        ;; it is visible to coverage tooling; the empty :arms means
+                        ;; defmulti-call-stmts trampolines (byte-identical to the
+                        ;; prior omission).
+                        {:name  mm-name
+                         :entry {:dispatch-type :type}
+                         :decls []})))))
+              defmulti-caps)
+            defmulti-registry (into {} (keep (fn [x] (when (:entry x) [(:name x) (:entry x)]))
+                                             defmulti-lowered))
+            defmulti-decls    (vec (mapcat :decls defmulti-lowered))
+            type-decls (into (into protocol-decls deftype-decls) defmulti-decls)
             defn-forms (order-defn-forms defn-forms0)
             ;; Pass 1 discovers lowered single-arity vm.Value-uniform siblings
             ;; (:override-eligible?) — the intra-ns calls slice 1 can lift.
@@ -830,7 +978,9 @@
                             reg (merge native-reg sib-reg)
                             res (binding [lower-go/*lowered-registry* reg
                                           lower-go/*native-imports-used* native-imports
-                                          lower-go/*cross-ns-vars-used* cross]
+                                          lower-go/*cross-ns-vars-used* cross
+                                          lower-go/*defmulti-dispatchers* (when (seq defmulti-registry)
+                                                                            defmulti-registry)]
                                   (lower-defn-forms defn-forms))
                             sib-reg' (select-keys sib-reg (keys (emitted-registry res)))]
                         (if (or (= sib-reg' sib-reg) (>= guard cap))
@@ -849,6 +999,19 @@
                            {:decl (override-init-decl (str ns-name) reg-entries)
                             :imports override-decl-imports}]
                           [])
+            ;; Native-baked multimethods (a :type dispatcher with >=1 arm) must
+            ;; be frozen at ns-load so the generated MultiFnNativeFrozen guard
+            ;; can detect later defmethods. Register them via their own init().
+            native-mm-names (sort (keep (fn [[nm entry]]
+                                          (when (and (= :type (:dispatch-type entry))
+                                                     (seq (:arms entry)))
+                                            nm))
+                                        defmulti-registry))
+            extra-decls (if (seq native-mm-names)
+                          (conj extra-decls
+                                {:decl (native-multifn-init-decl (str ns-name) native-mm-names)
+                                 :imports override-decl-imports})
+                          extra-decls)
             ;; Package-level cached *vm.Var decls + lazy accessors for the
             ;; recorded cross-ns callees (deterministic, sorted by base name).
             cached-var-decls (lower-go/cross-ns-var-decls @cross-ns-vars)
