@@ -1560,3 +1560,54 @@ func TestLowerGoNestedCapturedClosurePrefixesAreLexical(t *testing.T) {
 		t.Fatalf("inner closure prefix %q must lexically extend outer %q (else inner param can shadow captured outer param)\n--- go ---\n%s", inner, outer, rendered)
 	}
 }
+
+// Brick 4 (multi-arity gate) step 2a: a top-level multi-arity defn must lower
+// its arities to DISTINCT Go func names (`<name>_<arity>`), because Go has no
+// function overloading — emitting `func foo` twice is a redeclaration error
+// (the exact reason multi-arity was gated out of Go-lowering). compile-form*
+// binds ir.lower-go/*go-name-suffix* to `_<arity>` per arity so each emits a
+// uniquely-named, independently direct-callable helper.
+func TestLowerGoMultiArityEmitsDistinctPerArityHelperNames(t *testing.T) {
+	ensureLoader()
+
+	// `bar` calls `foo` at a statically-known arity (2) — it must lower to a
+	// STATIC direct call `foo_2(ec, …)`, not a CachedVarFn trampoline. That is
+	// the whole point of opening the multi-arity gate.
+	v := runLispExpr(t, `(do (create-ns 'lgtest)
+	                        (intern (the-ns 'lgtest) 'foo)
+	                        (intern (the-ns 'lgtest) 'bar)
+	                        (ir.passes.pipeline/lower-ns-to-go "lgtest" 'lgtest
+	                          '[(defn foo ([x] x) ([x y] y))
+	                            (defn bar [a b] (foo a b))]))`)
+	src, ok := v.(vm.String)
+	if !ok {
+		t.Fatalf("expected lower-ns-to-go to return rendered Go source string, got %T (%v)", v, v)
+	}
+	rendered := string(src)
+
+	// Step 2a: distinct per-arity helpers, no bare-name redeclaration.
+	if !strings.Contains(rendered, "func foo_1(") || !strings.Contains(rendered, "func foo_2(") {
+		t.Fatalf("expected per-arity helpers `func foo_1(` + `func foo_2(`\n--- go ---\n%s", rendered)
+	}
+	if strings.Contains(rendered, "func foo(") {
+		t.Fatalf("arities collided on the bare name `func foo(` (Go redeclaration)\n--- go ---\n%s", rendered)
+	}
+	// Step 3: the sibling `bar` call resolves to a per-arity STATIC direct call.
+	// bar's params render as arg0/arg1, distinguishing its call site from the
+	// override adapter's `foo_2(ec, args[0], args[1])`.
+	if !strings.Contains(rendered, "foo_2(ec, arg0") {
+		t.Fatalf("expected sibling `(foo a b)` to lower to a direct `foo_2(ec, arg0, …)` call, not a trampoline\n--- go ---\n%s", rendered)
+	}
+	if strings.Contains(rendered, `CachedVarFn(&__v_lgtest_foo`) {
+		t.Fatalf("sibling call to multi-arity `foo` still trampolines via CachedVarFn\n--- go ---\n%s", rendered)
+	}
+	// Step 2b: one multi-arity override adapter registered under the bare name,
+	// dispatching on len(args) (the dynamic/var path). Context-aware via
+	// __gogen_wrap; no MakeNativeMultiArity (can't thread ec at package load).
+	if !strings.Contains(rendered, "RegisterGoOverrides") || !strings.Contains(rendered, "\"foo\"") {
+		t.Fatalf("expected a var-override registration for \"foo\"\n--- go ---\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "len(args)") {
+		t.Fatalf("expected the multi-arity override adapter to switch on len(args)\n--- go ---\n%s", rendered)
+	}
+}
