@@ -3010,12 +3010,39 @@
                  (into [(gogen/param "ec" (gogen/type "*vm.ExecContext"))] params)
                  results body)})))
 
+;; PascalCase munge tokens for the chars that aren't valid in a Go identifier,
+;; so a predicate/bang/etc. name exports as clean PascalCase (vector? ->
+;; VectorQmark, conj! -> ConjBang, map* -> MapStar) instead of an invalid Go
+;; identifier. Capitalized (no surrounding underscores) so they read as
+;; PascalCase word-parts. Distinct from go-name-munge-map (the _QMARK_-style
+;; unexported scheme) — this one is only for EXPORTED names.
+(def ^:private go-export-munge-map
+  {\? "Qmark" \! "Bang" \* "Star" \+ "Plus" \> "Gt" \< "Lt" \= "Eq"
+   \% "Pct" \& "Amp" \| "Bar" \: "Colon" \~ "Tilde" \^ "Caret"
+   \/ "Slash" \' "Quote"})
+
 (defn go-export-name
-  "Convert a symbol/string to an exported Go name (PascalCase).
-   Handles multi-word kebab-case names like do-thing -> DoThing."
+  "Convert a symbol/string to an exported Go name (PascalCase). Multi-word
+   kebab-case names PascalCase (do-thing -> DoThing). A word containing chars
+   illegal in a Go identifier (?!*<>=… — predicates, bang-mutators, etc.) is
+   munged to a valid capitalized form (vector? -> VectorQmark, conj! -> ConjBang)
+   rather than emitting an invalid identifier. Clean alphanumeric words keep the
+   exact prior behavior (capitalize), so already-generated names are unchanged."
   [s]
-  (let [name-str (str s)]
-    (clojure.string/join "" (map clojure.string/capitalize (clojure.string/split name-str #"-")))))
+  (let [name-str (str s)
+        special? (fn [w] (some (fn [ch] (contains? go-export-munge-map ch)) w))
+        cap-word (fn [w]
+                   (if (special? w)
+                     (apply str
+                            (map-indexed
+                              (fn [i ch]
+                                (or (get go-export-munge-map ch)
+                                    (if (zero? i)
+                                      (clojure.string/upper-case (str ch))
+                                      (str ch))))
+                              w))
+                     (clojure.string/capitalize w)))]
+    (clojure.string/join "" (map cap-word (clojure.string/split name-str #"-")))))
 
 (defn lower-method [f recv-type method-name]
   "Lower an already-built+optimized IR fn as a Go receiver method using the
