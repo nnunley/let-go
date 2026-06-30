@@ -13,13 +13,10 @@ import (
 	"github.com/nooga/let-go/pkg/vm"
 )
 
-// EPIC-012 / ITER-0025, T3: a direct-callable lowered fn gets an exported thin
-// wrapper (LG_<go-name>) so another lowered Go package can call it, WITHOUT
-// renaming the unexported fn (intra-package call sites stay byte-stable). The
-// wrapper forwards ec + args positionally to the unexported fn. Emission is
-// gated by *emit-exported-wrappers* (default off, so the committed tree stays
-// byte-identical until the whole-program collector wires real cross-package
-// calls).
+// BRICK 3 / ITER-0037: a public lowered fn is itself the exported callable.
+// Previously wrapped via `LG_<go-name>` forwarding, the fn IS now directly
+// exposed with its own PascalCase exported name (e.g., `Add1`). No wrapper
+// indirection. The *emit-exported-wrappers* binding is now a legacy no-op.
 func TestExportedWrapperEmittedWhenEnabled(t *testing.T) {
 	ensureLoader()
 
@@ -31,18 +28,18 @@ func TestExportedWrapperEmittedWhenEnabled(t *testing.T) {
 		t.Fatalf("expected rendered Go source string, got %T", withFlag)
 	}
 	src := string(s)
-	if !strings.Contains(src, "func LG_add1(") {
-		t.Fatalf("expected exported wrapper `func LG_add1(`\n--- go ---\n%s", src)
+	if !strings.Contains(src, "func Add1(") {
+		t.Fatalf("expected exported PascalCase func `func Add1(`\n--- go ---\n%s", src)
 	}
-	if !strings.Contains(src, "return add1(ec") {
-		t.Fatalf("expected wrapper to forward to the unexported `add1(ec, …)`\n--- go ---\n%s", src)
+	if strings.Contains(src, "LG_add1") {
+		t.Fatalf("exported wrapper LG_ prefix should NOT exist anymore\n--- go ---\n%s", src)
 	}
 }
 
-// EPIC-012 / ITER-0025, SCENARIO-0017 (hermetic core): the whole-program
-// collector resolves a call into another lowered package to a direct
-// `pkg.LG_<go>(ec, …)` call (no cached-var trampoline) and adds the import.
-// aaa/pick is vm.Value-uniform so coercion is trivial; bbb/use-it calls it.
+// BRICK 3 / ITER-0037: the whole-program collector resolves a call into
+// another lowered package to a direct `pkg.Pick(ec, …)` call using the public
+// fn's OWN PascalCase name (no `LG_` wrapper, no cached-var trampoline).
+// aaa/pick is public and vm.Value-uniform so coercion is trivial.
 func TestCrossPackageDirectCallEmitted(t *testing.T) {
 	ensureLoader()
 
@@ -63,8 +60,8 @@ func TestCrossPackageDirectCallEmitted(t *testing.T) {
 		t.Fatalf("expected bbb source string, got %T", v)
 	}
 	src := string(s)
-	if !strings.Contains(src, "aaa.LG_pick(ec,") {
-		t.Fatalf("expected cross-package direct call `aaa.LG_pick(ec, …)`\n--- go ---\n%s", src)
+	if !strings.Contains(src, "aaa.Pick(ec,") {
+		t.Fatalf("expected cross-package direct call `aaa.Pick(ec, …)` using public fn's own name\n--- go ---\n%s", src)
 	}
 	if strings.Contains(src, "CachedVarFn(&__v_aaa_pick") {
 		t.Fatalf("cross-package call must NOT trampoline\n--- go ---\n%s", src)

@@ -2489,7 +2489,7 @@
   "Go package aliases a lowered file may import — the leaf segment of every
    cross-package (:go-pkg) callee in the active *lowered-registry*. A LOCAL Go
    name equal to one of these would SHADOW the imported package: a cross-pkg
-   direct call `graph.LG_sccs_1(ec, graph)` binds the `graph` qualifier to the
+   direct call `graph.Sccs_1(ec, graph)` binds the `graph` qualifier to the
    local `var graph vm.Value`, not the package (Go has no `pkg.pkg` escape). So
    coalesce-map keeps such locals OFF the bare source name and versions them
    (`graph_<nid>`) instead — the callee package stays reachable by its plain
@@ -3092,7 +3092,20 @@
         ;; correct under native lowering (a `def`'d var would not be interned).
         ;; :fn-name stays the bare name (the registry keys [ns name arity] and the
         ;; var-override register the whole multi-arity under it).
-        emit-go-name (let [base (go-name (ir/fn-name f))]
+        ;; Base Go name: PUBLIC fns get an EXPORTED PascalCase name
+        ;; (go-export-name: conj -> Conj, vector? -> VectorQmark) so cross-package
+        ;; direct calls read `core.Conj(ec,…)` — the fn IS its own callable name,
+        ;; no `LG_`-prefixed forwarding wrapper. PRIVATE fns (`defn-`/`^:private`)
+        ;; keep the unexported lowercase go-name (conj -> conj); they are never
+        ;; cross-package referenced, so package-private is correct and a future
+        ;; violation surfaces as a go-build "undefined: pkg.foo" (caught by
+        ;; check-generated), not a silent miscompile. Public/private is carried ON
+        ;; THE FORM (ir/fn-private?), like :multi-arity? — no dynamic var, so the
+        ;; native self-hosted lowering path stays correct.
+        emit-go-name (let [nm   (ir/fn-name f)
+                           base (if (ir/fn-private? f)
+                                  (go-name nm)
+                                  (go-export-name nm))]
                        (if (ir/fn-multi-arity? f)
                          ;; `_<arity>`, plus a `v` marker for a variadic arity so
                          ;; it can't redeclare a same-count FIXED arity — e.g.
@@ -3186,7 +3199,16 @@
                                       (str ch))))
                               w))
                      (clojure.string/capitalize w)))]
-    (clojure.string/join "" (map cap-word (clojure.string/split name-str #"-")))))
+    (let [pascal (clojure.string/join "" (map cap-word (clojure.string/split name-str #"-")))]
+      ;; A non-empty result always starts with an uppercase letter (munge tokens
+      ;; and capitalize both do; a leading `-` only drops an empty first segment),
+      ;; so the ONLY way to get an illegal Go identifier is an all-separator name
+      ;; (e.g. a public fn literally named `-`) collapsing to "". Guard it with the
+      ;; design's LG_ last-resort — `LG_<go-name>` is always exported (leading L)
+      ;; and a valid identifier. Untriggered by the current corpus (verified), so
+      ;; every real name keeps its exact PascalCase; this just replaces a confusing
+      ;; empty-identifier `go build` failure with a defined, legal name.
+      (if (pos? (count pascal)) pascal (str "LG_" (go-name s))))))
 
 (defn lower-method [f recv-type method-name]
   "Lower an already-built+optimized IR fn as a Go receiver method using the

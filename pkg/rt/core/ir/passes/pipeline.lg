@@ -281,6 +281,17 @@
     (second raw-name)
     raw-name))
 
+(defn- private-name?
+  "True when a defn NAME position carries `^:private` — i.e. it reads as the
+   literal form `(with-meta sym {:private true …})`. (`defn-` is detected
+   separately via the form head, since it doesn't wrap the name.) Used to carry
+   :private? onto the ir-fn so emission picks an unexported go-name."
+  [raw-name]
+  (and (seq? raw-name) (= 'with-meta (first raw-name))
+       (>= (count raw-name) 3)
+       (let [m (nth raw-name 2)]
+         (boolean (and (map? m) (get m :private))))))
+
 (defn- try-expand-all
   "expand-all, but returns nil instead of throwing — a form that won't expand
    simply contributes no units."
@@ -443,6 +454,13 @@
     ;; Otherwise, fall through to the existing defn logic
     :else
     (let [name-sym    (unwrap-name (nth form 1))
+          ;; Public/private drives the emitted Go name (public → exported
+          ;; PascalCase, private → unexported lowercase). Carried ON THE FORM
+          ;; (:private?), like :multi-arity?, so the native self-hosted lowering
+          ;; path needs no dynamic var. Private = `defn-` head OR `^:private` on
+          ;; the name (raw forms reach here un-normalized, so both survive).
+          private?    (or (= (first form) 'defn-)
+                          (private-name? (nth form 1)))
           maybe-doc   (nth form 2)
           has-doc?    (string? maybe-doc)
           first-form  (if has-doc? (nth form 3) maybe-doc)
@@ -452,7 +470,8 @@
         (let [args-vec   first-form
               body-forms (map expand-all (drop (if has-doc? 4 3) form))
               expanded   (apply list 'defn name-sym args-vec body-forms)
-              ir-fn      (-> expanded ir.build/build-fn optimize-fn)]
+              ir-fn      (-> expanded ir.build/build-fn optimize-fn)
+              _          (swap! ir-fn assoc :private? private?)]
           (if go-target?
             (lower-go/lower ir-fn :bridge)
             (lower/lower ir-fn)))
@@ -470,7 +489,8 @@
                                              ;; don't redeclare `func <name>` and each is
                                              ;; independently direct-callable. Carried ON THE FORM
                                              ;; (not a dynamic var) so it survives native lowering.
-                                             _          (swap! ir-fn assoc :multi-arity? true)
+                                             _          (swap! ir-fn assoc :multi-arity? true
+                                                          :private? private?)
                                              result     (lower-go/lower ir-fn :bridge)]
                                          (if (= :lowered (:status result))
                                            ;; Keep :fn (the decl) for existing consumers
@@ -1177,21 +1197,13 @@
             ;; Package-level cached *vm.Var decls + lazy accessors for the
             ;; recorded cross-ns callees (deterministic, sorted by base name).
             cached-var-decls (lower-go/cross-ns-var-decls @cross-ns-vars)
-            ;; EPIC-012/ITER-0025: exported wrappers for direct-callable fns so
-            ;; another lowered package can call them. Gated off by default
-            ;; (*emit-exported-wrappers*) → committed tree byte-identical until
-            ;; the whole-program collector wires real cross-package calls.
-            wrapper-results (if *emit-exported-wrappers*
-                              (let [ns-int (lower-go/internal-ns-sym (str ns-name))
-                                    target? (fn [r]
-                                              (and (:direct-callable? r)
-                                                   (or (= :all *wrapper-target-names*)
-                                                       (contains? *wrapper-target-names*
-                                                                  [ns-int (str (:fn-name r))]))))]
-                                (mapv (fn [r] {:decl (exported-wrapper-decl r)
-                                               :imports [vm-import]})
-                                      (filterv target? valid-results)))
-                              [])
+            ;; EPIC-012/ITER-0025 → ITER-0037: cross-package calls now resolve to
+            ;; a public fn's OWN exported PascalCase name (emit-go-name), so the
+            ;; `LG_<go>` forwarding-wrapper indirection is gone — no wrapper decls
+            ;; are emitted. (*emit-exported-wrappers*/*wrapper-target-names* and
+            ;; exported-wrapper-decl are retained only as the legacy manual
+            ;; single-ns path; the whole-program collector no longer needs them.)
+            wrapper-results []
             ;; Native type/struct/method decls lead the file; Go resolves
             ;; package-scope references regardless of declaration order.
             all-results (into (into (into (into type-decls valid-results) extra-decls) cached-var-decls) wrapper-results)
@@ -1212,8 +1224,10 @@
    registry) and return {:exports {<key> <cross-pkg-entry>} :refs #{[ns name]}}.
    :exports are this ns's direct-callable fns re-keyed for cross-package dispatch
    via the canonical registry-entry-from-result, then stamped with :go-pkg =
-   import-path and :go-name = LG_<go> (the exported wrapper). :refs are the
-   cross-ns callees it references (same-ns calls filtered — they need no wrapper)."
+   import-path. The :go-name is the fn's OWN exported PascalCase name (public fns
+   are their own callable name — no `LG_` forwarding wrapper), so a cross-package
+   call resolves to `pkg.Conj(ec,…)`. :refs are the cross-ns callees it references
+   (same-ns calls filtered — those resolve intra-package with no import)."
   (binding [*ns* (the-ns ns-sym)
             ir.passes.typeinfer/*typeinfer-budget-ms* nil]
     (let [cross   (atom {})
@@ -1226,8 +1240,7 @@
                         (if base
                           (into m (map (fn [kv]
                                          [(key kv) (assoc (val kv)
-                                                          :go-pkg  import-path
-                                                          :go-name (str "LG_" (:go-name (val kv))))])
+                                                          :go-pkg  import-path)])
                                        base))
                           m)))
                     {} results)
