@@ -23,6 +23,12 @@ Current scope:
 LG=./lg ./examples/browser-inspector/build.sh
 ```
 
+Build with IR/native lowering enabled in the generated WASM app:
+
+```bash
+LG=./lg LG_WASM_BUILD_TAGS=gogen_ir ./examples/browser-inspector/build.sh
+```
+
 Output:
 
 ```text

@@ -45,6 +45,40 @@
       margin: 14px 0 18px;
       flex-wrap: wrap;
     }
+    .toolbar-group {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .toggles {
+      margin: 0 0 18px;
+      padding: 12px 14px;
+      border: 1px solid #28313a;
+      border-radius: 14px;
+      background: rgba(9, 12, 16, 0.88);
+    }
+    .toggles legend {
+      padding: 0 6px;
+      color: #9eb0bc;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .toggle-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px 14px;
+    }
+    .toggle-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: #d7e3ea;
+      font-size: 13px;
+    }
+    .toggle-option input {
+      accent-color: #fca311;
+    }
     .toolbar button {
       background: #fca311;
       color: #101316;
@@ -81,7 +115,7 @@
     }
     textarea {
       width: 100%;
-      min-height: 520px;
+      min-height: 420px;
       border: 0;
       resize: vertical;
       padding: 16px;
@@ -120,11 +154,84 @@
       color: #eaf0f4;
       font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
     }
+    .artifact .empty-state {
+      color: #6f7e88;
+    }
     .status-ok { color: #7bd389; }
     .status-unavailable { color: #f9c74f; }
     .status-error { color: #ff7b72; }
+    .status-idle { color: #6f7e88; }
     .meta {
       margin-top: 12px;
+      color: #9eb0bc;
+      font-size: 12px;
+    }
+    .cell-list {
+      display: flex;
+      gap: 8px;
+      padding: 12px 12px 0;
+      flex-wrap: wrap;
+    }
+    .cell-tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid #28313a;
+      border-radius: 10px;
+      background: #11161b;
+      color: #d7e3ea;
+      font: 12px/1.3 ui-monospace, "SF Mono", Menlo, monospace;
+      cursor: pointer;
+    }
+    .cell-tab.active {
+      border-color: #fca311;
+      background: rgba(252, 163, 17, 0.14);
+      color: #f6f9fb;
+    }
+    .cell-tab strong {
+      font-size: 12px;
+    }
+    .cell-tab .cell-run-status {
+      color: #9eb0bc;
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    .cell-tab.active .cell-run-status {
+      color: #fca311;
+    }
+    .cell-editor-tools {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-top: 1px solid #1b2229;
+      border-bottom: 1px solid #1b2229;
+      background: rgba(15, 20, 25, 0.9);
+      color: #9eb0bc;
+      font-size: 12px;
+    }
+    .cell-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .cell-actions button {
+      background: #25313b;
+      color: #d7e3ea;
+      border: 0;
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .cell-actions button.danger {
+      background: #4a2326;
+      color: #ffd7d4;
+    }
+    .cell-caption {
+      padding: 12px 14px 0;
       color: #9eb0bc;
       font-size: 12px;
     }
@@ -144,18 +251,55 @@
     <div class="inspector-shell">
       <div class="hero">
         <h1>Let-Go Explorer</h1>
-        <p>Single-workbench preview over <code>LetGoHost.request(...)</code>.</p>
+        <p>Notebook-style preview over <code>LetGoHost.request(...)</code> with one shared evaluation session.</p>
       </div>
 
       <div class="toolbar">
-        <button id="inspect-all-btn">Inspect All</button>
-        <button id="eval-btn" class="secondary">Eval</button>
-        <button id="compile-btn" class="secondary">Compile</button>
+        <div class="toolbar-group">
+          <button id="inspect-all-btn">Inspect Active Cell</button>
+          <button id="eval-btn" class="secondary">Eval Active</button>
+          <button id="compile-btn" class="secondary">Compile Active</button>
+          <button id="disassemble-btn" class="secondary">Disassemble Active</button>
+        </div>
+        <div class="toolbar-group">
+          <button id="add-cell-btn" class="secondary">Add Cell</button>
+          <button id="clear-session-btn" class="secondary">Clear Session</button>
+        </div>
       </div>
+
+      <fieldset class="toggles">
+        <legend>Analysis</legend>
+        <div class="toggle-grid">
+          <label class="toggle-option" for="toggle-bytecode">
+            <input id="toggle-bytecode" type="checkbox" checked>
+            <span>Bytecode</span>
+          </label>
+          <label class="toggle-option" for="toggle-ir">
+            <input id="toggle-ir" type="checkbox">
+            <span>IR</span>
+          </label>
+          <label class="toggle-option" for="toggle-optimized-bytecode">
+            <input id="toggle-optimized-bytecode" type="checkbox">
+            <span>Optimized Bytecode</span>
+          </label>
+          <label class="toggle-option" for="toggle-lowered-go">
+            <input id="toggle-lowered-go" type="checkbox">
+            <span>Lowered Go</span>
+          </label>
+        </div>
+      </fieldset>
 
       <div class="layout">
         <section class="panel">
-          <h2>Forms Input</h2>
+          <h2>Notebook Cells</h2>
+          <div class="cell-list" id="cell-list"></div>
+          <div class="cell-editor-tools">
+            <div id="cell-active-label">Cell 1</div>
+            <div class="cell-actions">
+              <button id="delete-cell-btn" class="danger">Delete Cell</button>
+            </div>
+          </div>
+          <div class="cell-caption" id="cell-caption">Active cell artifacts stay visible until this cell is rerun or the session is cleared.</div>
           <textarea id="code-input">(defn sum3 [x]
   (+ x 1 2))
 
@@ -163,8 +307,64 @@
         </section>
 
         <section class="panel">
-          <h2>Artifacts</h2>
-          <div class="result-grid" id="results"></div>
+          <h2 id="artifact-panel-title">Artifacts</h2>
+          <div class="result-grid">
+            <section class="artifact" id="artifact-result">
+              <header>
+                <strong>Result</strong>
+                <span class="status-idle" data-artifact-status="result">idle</span>
+              </header>
+              <pre data-artifact-body="result" class="empty-state">Run Inspect All to populate this pane.</pre>
+            </section>
+
+            <section class="artifact" id="artifact-stdout">
+              <header>
+                <strong>Stdout</strong>
+                <span class="status-idle" data-artifact-status="stdout">idle</span>
+              </header>
+              <pre data-artifact-body="stdout" class="empty-state">No stdout emitted yet.</pre>
+            </section>
+
+            <section class="artifact" id="artifact-stderr">
+              <header>
+                <strong>Stderr</strong>
+                <span class="status-idle" data-artifact-status="stderr">idle</span>
+              </header>
+              <pre data-artifact-body="stderr" class="empty-state">No stderr emitted yet.</pre>
+            </section>
+
+            <section class="artifact" id="artifact-bytecode">
+              <header>
+                <strong>Bytecode</strong>
+                <span class="status-idle" data-artifact-status="bytecode">idle</span>
+              </header>
+              <pre data-artifact-body="bytecode" class="empty-state">Bytecode disassembly will appear here.</pre>
+            </section>
+
+            <section class="artifact" id="artifact-ir">
+              <header>
+                <strong>IR</strong>
+                <span class="status-idle" data-artifact-status="ir">idle</span>
+              </header>
+              <pre data-artifact-body="ir" class="empty-state">Enable IR analysis to request this pane.</pre>
+            </section>
+
+            <section class="artifact" id="artifact-optimized-bytecode">
+              <header>
+                <strong>Optimized Bytecode</strong>
+                <span class="status-idle" data-artifact-status="optimizedBytecode">idle</span>
+              </header>
+              <pre data-artifact-body="optimizedBytecode" class="empty-state">Enable optimized bytecode analysis to request this pane.</pre>
+            </section>
+
+            <section class="artifact" id="artifact-lowered-go">
+              <header>
+                <strong>Lowered Go</strong>
+                <span class="status-idle" data-artifact-status="loweredGo">idle</span>
+              </header>
+              <pre data-artifact-body="loweredGo" class="empty-state">Enable lowered Go analysis to request this pane.</pre>
+            </section>
+          </div>
         </section>
       </div>
 
@@ -179,80 +379,504 @@ __LG_HOST_SCRIPT__
   <script>
   (() => {
     const codeEl = document.getElementById('code-input');
-    const resultsEl = document.getElementById('results');
     const metaEl = document.getElementById('meta');
-    const session = 'browser-inspector';
+    const cellListEl = document.getElementById('cell-list');
+    const cellActiveLabelEl = document.getElementById('cell-active-label');
+    const cellCaptionEl = document.getElementById('cell-caption');
+    const artifactPanelTitleEl = document.getElementById('artifact-panel-title');
+    const orderedArtifacts = ['result', 'stdout', 'stderr', 'bytecode', 'ir', 'optimizedBytecode', 'loweredGo'];
+    const toggleEls = {
+      bytecode: document.getElementById('toggle-bytecode'),
+      ir: document.getElementById('toggle-ir'),
+      optimizedBytecode: document.getElementById('toggle-optimized-bytecode'),
+      loweredGo: document.getElementById('toggle-lowered-go')
+    };
+    let lastOp = 'eval';
+    let activeRun = 0;
+    let reanalyzeTimer = null;
+    let nextCellID = 1;
+    let activeCellID = null;
+    let session = `browser-inspector-${Date.now()}`;
+    const REANALYZE_DEBOUNCE_MS = 250;
+    const defaultCellSource = `(defn sum3 [x]
+  (+ x 1 2))
 
-    function renderArtifact(name, payload) {
-      const status = payload && payload.status ? payload.status : 'ok';
-      const pretty = JSON.stringify(payload, null, 2);
-      return `
-        <section class="artifact">
-          <header>
-            <strong>${name}</strong>
-            <span class="status-${status}">${status}</span>
-          </header>
-          <pre>${escapeHtml(pretty)}</pre>
-        </section>
-      `;
+(sum3 4)`;
+    const defaultArtifactText = {
+      result: 'Run Inspect Active Cell to populate this pane.',
+      stdout: 'No stdout emitted yet.',
+      stderr: 'No stderr emitted yet.',
+      bytecode: 'Bytecode disassembly will appear here.',
+      ir: 'Enable IR analysis to request this pane.',
+      optimizedBytecode: 'Enable optimized bytecode analysis to request this pane.',
+      loweredGo: 'Enable lowered Go analysis to request this pane.'
+    };
+    const artifactTemplates = {
+      text(name, payload) {
+        if (typeof payload !== 'string') {
+          return null;
+        }
+        return { status: 'ok', text: payload };
+      },
+      bytecode(name, payload) {
+        if (!payload) {
+          return { status: 'idle', text: `${artifactDefs[name].label} is unavailable for this response.` };
+        }
+        const rows = Array.isArray(payload.rows) ? payload.rows : [];
+        const text = rows.length === 0
+          ? '(no bytecode rows)'
+          : rows.map((row) => {
+              const args = Array.isArray(row.args) && row.args.length > 0 ? ` ${row.args.join(', ')}` : '';
+              const resolved = row.resolved === undefined ? '' : ` ; ${JSON.stringify(row.resolved)}`;
+              return `${String(row.offset).padStart(4, ' ')}  ${row.op}${args}${resolved}`;
+            }).join('\n');
+        return { status: payload.status || 'ok', text };
+      },
+      bytecodeRows(name, payload) {
+        if (!Array.isArray(payload)) {
+          return null;
+        }
+        return artifactTemplates.bytecode(name, { rows: payload });
+      },
+      lines(name, payload) {
+        if (!Array.isArray(payload)) {
+          return null;
+        }
+        return {
+          status: 'ok',
+          text: payload.map((item) => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
+        };
+      },
+      json(name, payload) {
+        if (!payload) {
+          return { status: 'idle', text: `${artifactDefs[name].label} is unavailable for this response.` };
+        }
+        return { status: payload.status || 'ok', text: JSON.stringify(payload, null, 2) };
+      }
+    };
+    const artifactDefs = {
+      result: { label: 'Result' },
+      stdout: { label: 'Stdout' },
+      stderr: { label: 'Stderr' },
+      bytecode: { label: 'Bytecode', inspectField: 'bytecode', frameArtifact: 'bytecode', template: 'bytecode' },
+      ir: { label: 'IR', inspectField: 'ir', frameArtifact: 'ir', template: 'text' },
+      optimizedBytecode: {
+        label: 'Optimized Bytecode',
+        inspectField: 'optimized_bytecode',
+        frameArtifact: 'optimized_bytecode',
+        template: 'bytecodeRows'
+      },
+      loweredGo: { label: 'Lowered Go', inspectField: 'lowered_go', frameArtifact: 'lowered_go', template: 'text' }
+    };
+    const artifactByFrameName = Object.fromEntries(
+      Object.entries(artifactDefs)
+        .filter(([, def]) => typeof def.frameArtifact === 'string')
+        .map(([name, def]) => [def.frameArtifact, name])
+    );
+    const artifactSlots = Object.fromEntries(orderedArtifacts.map((name) => [
+      name,
+      {
+        status: document.querySelector(`[data-artifact-status="${name}"]`),
+        body: document.querySelector(`[data-artifact-body="${name}"]`)
+      }
+    ]));
+
+    function blankArtifactState(name) {
+      return { status: 'idle', content: defaultArtifactText[name] || '' };
     }
 
-    function escapeHtml(s) {
-      return String(s)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;');
+    function makeArtifactState() {
+      return Object.fromEntries(orderedArtifacts.map((name) => [name, blankArtifactState(name)]));
+    }
+
+    function createCell(source = '') {
+      const id = nextCellID++;
+      return {
+        id,
+        title: `Cell ${id}`,
+        source,
+        lastOp: 'eval',
+        lastMeta: '',
+        runStatus: 'idle',
+        artifacts: makeArtifactState()
+      };
+    }
+
+    const cells = [createCell(defaultCellSource)];
+    activeCellID = cells[0].id;
+
+    function setArtifactState(name, status, content) {
+      const slot = artifactSlots[name];
+      if (!slot) return;
+      slot.status.className = `status-${status}`;
+      slot.status.textContent = status;
+      slot.body.textContent = content;
+      slot.body.classList.toggle('empty-state', status === 'idle');
+    }
+
+    function appendArtifactText(name, text, status = 'ok') {
+      const slot = artifactSlots[name];
+      if (!slot || text === '') return;
+      slot.status.className = `status-${status}`;
+      slot.status.textContent = status;
+      const prior = slot.body.classList.contains('empty-state') ? '' : slot.body.textContent;
+      slot.body.textContent = prior ? `${prior}${text}` : text;
+      slot.body.classList.remove('empty-state');
+    }
+
+    function appendArtifactSection(name, formIndex, status, content) {
+      const slot = artifactSlots[name];
+      if (!slot) return;
+      slot.status.className = `status-${status}`;
+      slot.status.textContent = status;
+      const prior = slot.body.classList.contains('empty-state') ? '' : slot.body.textContent;
+      const header = formIndex > 1 ? `Form ${formIndex}\n` : '';
+      const section = header ? `${header}${content}` : content;
+      slot.body.textContent = prior ? `${prior}\n\n${section}` : section;
+      slot.body.classList.remove('empty-state');
+    }
+
+    function getCell(id = activeCellID) {
+      return cells.find((cell) => cell.id === id) || null;
+    }
+
+    function getActiveCell() {
+      return getCell(activeCellID);
+    }
+
+    function setCellArtifactState(cell, name, status, content) {
+      cell.artifacts[name] = { status, content };
+      if (cell.id === activeCellID) {
+        setArtifactState(name, status, content);
+      }
+    }
+
+    function appendCellArtifactText(cell, name, text, status = 'ok') {
+      if (!text) return;
+      const priorState = cell.artifacts[name] || blankArtifactState(name);
+      const prior = priorState.status === 'idle' ? '' : priorState.content;
+      setCellArtifactState(cell, name, status, prior ? `${prior}${text}` : text);
+    }
+
+    function appendCellArtifactSection(cell, name, formIndex, status, content) {
+      const priorState = cell.artifacts[name] || blankArtifactState(name);
+      const prior = priorState.status === 'idle' ? '' : priorState.content;
+      const header = formIndex > 1 ? `Form ${formIndex}\n` : '';
+      const section = header ? `${header}${content}` : content;
+      setCellArtifactState(cell, name, status, prior ? `${prior}\n\n${section}` : section);
+    }
+
+    function renderActiveCellArtifacts() {
+      const cell = getActiveCell();
+      if (!cell) return;
+      orderedArtifacts.forEach((name) => {
+        const state = cell.artifacts[name] || blankArtifactState(name);
+        setArtifactState(name, state.status, state.content);
+      });
+      metaEl.textContent = cell.lastMeta || `session=${session} ${cell.title.toLowerCase()} idle`;
+      artifactPanelTitleEl.textContent = `${cell.title} Artifacts`;
+      cellCaptionEl.textContent = `${cell.title} artifacts stay visible until this cell is rerun or the session is cleared.`;
+    }
+
+    function renderCellList() {
+      cellListEl.innerHTML = '';
+      cells.forEach((cell, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `cell-tab${cell.id === activeCellID ? ' active' : ''}`;
+        button.dataset.cellId = String(cell.id);
+        button.innerHTML = `<strong>${index + 1}. ${cell.title}</strong><span class="cell-run-status">${cell.runStatus}</span>`;
+        button.addEventListener('click', () => setActiveCell(cell.id));
+        cellListEl.appendChild(button);
+      });
+    }
+
+    function renderActiveCell() {
+      const cell = getActiveCell();
+      if (!cell) return;
+      codeEl.value = cell.source;
+      cellActiveLabelEl.textContent = `${cell.title} · shared session order ${cells.findIndex((entry) => entry.id === cell.id) + 1}`;
+      renderCellList();
+      renderActiveCellArtifacts();
+      document.getElementById('delete-cell-btn').disabled = cells.length === 1;
+    }
+
+    function setActiveCell(id) {
+      if (!getCell(id)) return;
+      activeCellID = id;
+      renderActiveCell();
+    }
+
+    function addCell() {
+      const cell = createCell('');
+      cells.push(cell);
+      setActiveCell(cell.id);
+    }
+
+    function deleteActiveCell() {
+      if (cells.length === 1) {
+        const onlyCell = getActiveCell();
+        if (!onlyCell) return;
+        onlyCell.source = '';
+        onlyCell.lastMeta = '';
+        onlyCell.runStatus = 'idle';
+        onlyCell.artifacts = makeArtifactState();
+        renderActiveCell();
+        return;
+      }
+      const index = cells.findIndex((cell) => cell.id === activeCellID);
+      if (index === -1) return;
+      cells.splice(index, 1);
+      const next = cells[Math.max(0, index - 1)];
+      activeCellID = next.id;
+      renderActiveCell();
+    }
+
+    function clearSessionState() {
+      session = `browser-inspector-${Date.now()}`;
+      activeRun += 1;
+      cells.forEach((cell) => {
+        cell.lastOp = 'eval';
+        cell.lastMeta = '';
+        cell.runStatus = 'idle';
+        cell.artifacts = makeArtifactState();
+      });
+      renderActiveCell();
+    }
+
+    function artifactKeyToInspectField(name) {
+      return artifactDefs[name] && artifactDefs[name].inspectField ? artifactDefs[name].inspectField : name;
+    }
+
+    function selectedInspectOptions() {
+      return {
+        bytecode: !!toggleEls.bytecode.checked,
+        ir: !!toggleEls.ir.checked,
+        optimized_bytecode: !!toggleEls.optimizedBytecode.checked,
+        lowered_go: !!toggleEls.loweredGo.checked
+      };
+    }
+
+    function requestedArtifactNames(inspect) {
+      return orderedArtifacts.filter((name) => name !== 'result' && !!inspect[artifactKeyToInspectField(name)]);
+    }
+
+    function setPreset(op) {
+      if (op === 'inspect-all') {
+        Object.values(toggleEls).forEach((el) => { el.checked = true; });
+        return;
+      }
+      if (op === 'compile' || op === 'disassemble') {
+        toggleEls.bytecode.checked = true;
+      }
+    }
+
+    function resetCellArtifacts(cell, op, inspect) {
+      const requested = new Set(requestedArtifactNames(inspect));
+      orderedArtifacts.forEach((name) => {
+        const label = artifactDefs[name] ? artifactDefs[name].label : name;
+        if (name === 'result') {
+          setCellArtifactState(cell, name, 'idle', `${label} not requested yet for ${op}.`);
+          return;
+        }
+        if (name === 'stdout' || name === 'stderr') {
+          setCellArtifactState(cell, name, 'idle', `No ${label.toLowerCase()} emitted yet for ${op}.`);
+          return;
+        }
+        if (requested.has(name)) {
+          setCellArtifactState(cell, name, 'idle', `${label} requested for ${op}. Awaiting response frames.`);
+          return;
+        }
+        setCellArtifactState(cell, name, 'idle', `${label} disabled. Enable it in Analysis to request this pane.`);
+      });
+    }
+
+    function formatNamedArtifact(name, payload) {
+      const def = artifactDefs[name];
+      if (!def || !def.template) {
+        return artifactTemplates.json(name, payload);
+      }
+      const template = artifactTemplates[def.template];
+      if (template) {
+        const rendered = template(name, payload);
+        if (rendered) {
+          return rendered;
+        }
+      }
+      {
+        const rendered = artifactTemplates.lines(name, payload);
+        if (rendered) {
+          return rendered;
+        }
+      }
+      return artifactTemplates.json(name, payload);
+    }
+
+    function inspectFor(op) {
+      setPreset(op);
+      return selectedInspectOptions();
+    }
+
+    function renderFrame(cell, frame) {
+      if (!frame || typeof frame !== 'object') return;
+      if (frame.kind === 'progress') {
+        cell.lastMeta = `session=${frame.session || session} op=${frame.op || 'eval'} form=${frame.form_index || '?'} stage=${frame.stage || 'progress'}`;
+        if (cell.id === activeCellID) {
+          metaEl.textContent = cell.lastMeta;
+        }
+        return;
+      }
+      if (frame.kind === 'artifact') {
+        const name = artifactByFrameName[frame.artifact];
+        if (name) {
+          const rendered = formatNamedArtifact(name, frame.content);
+          if (rendered) {
+            appendCellArtifactSection(cell, name, frame.form_index || 0, rendered.status, rendered.text);
+          }
+        }
+        return;
+      }
+      if (frame.kind === 'value') {
+        setCellArtifactState(cell, 'result', 'ok', frame.value === undefined ? 'nil' : String(frame.value));
+        return;
+      }
+      if (frame.kind === 'out') {
+        appendCellArtifactText(cell, 'stdout', frame.text || '', 'ok');
+        return;
+      }
+      if (frame.kind === 'err') {
+        const artifactName = artifactByFrameName[frame.artifact];
+        if (artifactName) {
+          appendCellArtifactSection(cell, artifactName, frame.form_index || 0, 'error', frame.text || `${artifactDefs[artifactName].label} extraction failed.`);
+          return;
+        }
+        appendCellArtifactText(cell, 'stderr', frame.text || 'request failed', 'error');
+        setCellArtifactState(cell, 'result', 'error', frame.text || 'request failed');
+        return;
+      }
+      if (frame.kind === 'status') {
+        const statusText = Array.isArray(frame.status) ? frame.status.join(' ') : 'done';
+        cell.lastMeta = `session=${frame.session || session} op=${frame.op || 'eval'} status=${statusText}`;
+        cell.runStatus = Array.isArray(frame.status) && frame.status.includes('error') ? 'error' : 'ok';
+        renderCellList();
+        if (cell.id === activeCellID) {
+          metaEl.textContent = cell.lastMeta;
+        }
+      }
+    }
+
+    function scheduleReanalysis() {
+      if (reanalyzeTimer !== null) {
+        clearTimeout(reanalyzeTimer);
+      }
+      reanalyzeTimer = setTimeout(() => {
+        reanalyzeTimer = null;
+        send(lastOp);
+      }, REANALYZE_DEBOUNCE_MS);
     }
 
     async function send(op) {
-      metaEl.textContent = `Running ${op}...`;
-      resultsEl.innerHTML = '';
+      const cell = getActiveCell();
+      if (!cell) return;
+      lastOp = op;
+      cell.lastOp = op;
+      cell.source = codeEl.value;
+      cell.runStatus = 'running';
+      renderCellList();
+      const runID = ++activeRun;
+      cell.lastMeta = `Running ${op} for ${cell.title}...`;
+      metaEl.textContent = cell.lastMeta;
+      const inspect = inspectFor(op);
+      const requested = new Set(requestedArtifactNames(inspect));
+      const received = new Set();
+      resetCellArtifacts(cell, op, inspect);
       try {
         const resp = await window.LetGoHost.request({
           id: `${op}-${Date.now()}`,
           session,
-          op,
-          code: codeEl.value
+          op: 'eval',
+          inspect,
+          code: cell.source
+        }, (frame) => {
+          if (runID !== activeRun) return;
+          if (frame && (frame.kind === 'artifact' || frame.kind === 'err')) {
+            const name = artifactByFrameName[frame.artifact];
+            if (name) {
+              received.add(name);
+            }
+          }
+          renderFrame(cell, frame);
         });
-        metaEl.textContent = `session=${resp.session || session} op=${resp.op} ok=${resp.ok}`;
-        if (!resp.ok) {
-          resultsEl.innerHTML = renderArtifact('error', {
-            status: 'error',
-            error: resp.error,
-            warnings: resp.warnings || []
-          });
-          return;
-        }
-        const artifacts = resp.artifacts || {};
-        const sections = [];
-        sections.push(renderArtifact('response', {
-          status: 'ok',
-          value: resp.value,
-          warnings: resp.warnings || [],
-          metrics: resp.metrics || null
-        }));
-        Object.entries(artifacts).forEach(([name, payload]) => {
-          if (name === 'namespace') return;
-          sections.push(renderArtifact(name, payload));
+        if (runID !== activeRun) return;
+        const frames = Array.isArray(resp && resp.frames) ? resp.frames : [];
+        frames.forEach((frame) => {
+          if (!frame || typeof frame !== 'object') return;
+          if (frame.kind === 'artifact' || frame.kind === 'err') {
+            const name = artifactByFrameName[frame.artifact];
+            if (name && !received.has(name)) {
+              received.add(name);
+              renderFrame(cell, frame);
+            }
+            return;
+          }
+          renderFrame(cell, frame);
         });
-        if (artifacts.namespace) {
-          metaEl.textContent += ` ns=${artifacts.namespace}`;
+        const finalStatus = frames.filter((frame) => frame && frame.kind === 'status').at(-1);
+        if (!finalStatus) {
+          cell.lastMeta = 'request finished without status frame';
+          cell.runStatus = 'ok';
+          if (cell.id === activeCellID) {
+            metaEl.textContent = cell.lastMeta;
+          }
+        } else if (Array.isArray(finalStatus.status) && finalStatus.status.includes('error')) {
+          cell.lastMeta = `session=${finalStatus.session || session} op=${finalStatus.op || 'eval'} status=${finalStatus.status.join(' ')}`;
+          cell.runStatus = 'error';
+          if (cell.id === activeCellID) {
+            metaEl.textContent = cell.lastMeta;
+          }
         }
-        resultsEl.innerHTML = sections.join('');
+        requested.forEach((name) => {
+          if (!received.has(name)) {
+            const label = artifactDefs[name] ? artifactDefs[name].label : name;
+            setCellArtifactState(cell, name, 'unavailable', `${label} was requested, but the runtime did not emit that artifact.`);
+          }
+        });
+        if (!frames.some((frame) => frame && frame.kind === 'value')) {
+          setCellArtifactState(cell, 'result', 'idle', 'No value frame emitted.');
+        }
+        renderCellList();
       } catch (err) {
-        metaEl.textContent = 'request failed';
-        resultsEl.innerHTML = renderArtifact('error', {
-          status: 'error',
-          message: err && err.message ? err.message : String(err)
-        });
+        if (runID !== activeRun) return;
+        cell.lastMeta = 'request failed';
+        cell.runStatus = 'error';
+        metaEl.textContent = cell.lastMeta;
+        setCellArtifactState(cell, 'result', 'error', err && err.message ? err.message : String(err));
+        renderCellList();
       }
     }
 
     document.getElementById('inspect-all-btn').addEventListener('click', () => send('inspect-all'));
     document.getElementById('eval-btn').addEventListener('click', () => send('eval'));
     document.getElementById('compile-btn').addEventListener('click', () => send('compile'));
+    document.getElementById('disassemble-btn').addEventListener('click', () => send('disassemble'));
+    document.getElementById('add-cell-btn').addEventListener('click', addCell);
+    document.getElementById('delete-cell-btn').addEventListener('click', deleteActiveCell);
+    document.getElementById('clear-session-btn').addEventListener('click', clearSessionState);
+    toggleEls.bytecode.addEventListener('change', () => send(lastOp));
+    toggleEls.ir.addEventListener('change', () => send(lastOp));
+    toggleEls.optimizedBytecode.addEventListener('change', () => send(lastOp));
+    toggleEls.loweredGo.addEventListener('change', () => send(lastOp));
+    codeEl.addEventListener('input', () => {
+      const cell = getActiveCell();
+      if (!cell) return;
+      cell.source = codeEl.value;
+      cell.runStatus = 'edited';
+      renderCellList();
+      scheduleReanalysis();
+    });
 
-    send('inspect-all');
+    renderActiveCell();
+    send('eval');
   })();
   </script>
 </body>

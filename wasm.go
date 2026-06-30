@@ -10,11 +10,13 @@ import (
 	"compress/gzip"
 	"encoding/base64"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/nooga/let-go/pkg/bytecode"
@@ -95,6 +97,7 @@ func buildWasm(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, ou
 	}
 	goEnv := wasmBuildEnv(tmpDir)
 	goTool := goToolPath()
+	buildTags := strings.TrimSpace(os.Getenv("LG_WASM_BUILD_TAGS"))
 
 	// 3. Write generated source files
 	if err := os.WriteFile(filepath.Join(tmpDir, "program.lgb"), lgbBuf.Bytes(), 0644); err != nil {
@@ -102,6 +105,15 @@ func buildWasm(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, ou
 	}
 	if err := os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte(wasmassets.RenderMain(storeID, hostEval)), 0644); err != nil {
 		return err
+	}
+	if hasBuildTag(buildTags, "gogen_ir") {
+		srcDir, err := findLetGoModuleDir()
+		if err != nil {
+			return fmt.Errorf("gogen_ir wasm build requires local let-go source for wireup: %w", err)
+		}
+		if err := writeWasmGogenIRWireup(tmpDir, srcDir); err != nil {
+			return err
+		}
 	}
 
 	// 4. Write go.mod
@@ -124,7 +136,7 @@ func buildWasm(ctx *compiler.Context, nsRes *resolver.NSResolver, src string, ou
 	// network-only packages that the wasm build itself does not need.
 	fmt.Println("building wasm...")
 	wasmPath := filepath.Join(tmpDir, "app.wasm")
-	build := exec.Command(goTool, "build", "-o", wasmPath, ".")
+	build := exec.Command(goTool, wasmGoBuildArgs(wasmPath, buildTags)...)
 	build.Dir = tmpDir
 	build.Env = append(goEnv, "GOOS=js", "GOARCH=wasm")
 	build.Stderr = os.Stderr
@@ -205,6 +217,15 @@ func wasmBuildEnv(tmpDir string) []string {
 	)
 }
 
+func wasmGoBuildArgs(wasmPath string, buildTags string) []string {
+	args := []string{"build"}
+	if buildTags != "" {
+		args = append(args, "-tags", buildTags)
+	}
+	args = append(args, "-o", wasmPath, ".")
+	return args
+}
+
 func goToolPath() string {
 	if goroot := runtime.GOROOT(); goroot != "" {
 		if path := filepath.Join(goroot, "bin", "go"); fileExists(path) {
@@ -212,6 +233,77 @@ func goToolPath() string {
 		}
 	}
 	return "go"
+}
+
+func hasBuildTag(rawTags, tag string) bool {
+	for _, field := range strings.FieldsFunc(rawTags, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n'
+	}) {
+		if field == tag {
+			return true
+		}
+	}
+	return false
+}
+
+func writeWasmGogenIRWireup(tmpDir, srcDir string) error {
+	pkgs, err := listGogenIRPackages(srcDir)
+	if err != nil {
+		return err
+	}
+	var b strings.Builder
+	b.WriteString("// Code generated for wasm gogen_ir wireup. DO NOT EDIT.\n\n")
+	b.WriteString("//go:build gogen_ir\n\n")
+	b.WriteString("package main\n")
+	if len(pkgs) > 0 {
+		b.WriteString("\nimport (\n")
+		for _, pkg := range pkgs {
+			fmt.Fprintf(&b, "\t_ %q\n", "github.com/nooga/let-go/pkg/rt/core_go_lowered/"+pkg)
+		}
+		b.WriteString(")\n")
+	}
+	return os.WriteFile(filepath.Join(tmpDir, "main_gogen_ir.go"), []byte(b.String()), 0644)
+}
+
+func listGogenIRPackages(srcDir string) ([]string, error) {
+	root := filepath.Join(srcDir, "pkg", "rt", "core_go_lowered")
+	var pkgs []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if path == root {
+			return nil
+		}
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		hasGo := false
+		for _, entry := range entries {
+			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".go") {
+				hasGo = true
+				break
+			}
+		}
+		if !hasGo {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		pkgs = append(pkgs, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(pkgs)
+	return pkgs, nil
 }
 
 func fileExists(path string) bool {

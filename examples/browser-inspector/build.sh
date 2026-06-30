@@ -4,14 +4,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT_DIR="$ROOT/examples/browser-inspector/dist"
 OUT_HTML="$OUT_DIR/index.html"
-LG="${LG:-$ROOT/lg}"
+LG_WASM_BUILD_TAGS="${LG_WASM_BUILD_TAGS:-}"
 
 mkdir -p "$OUT_DIR"
 if [ -d "$OUT_HTML" ]; then
   rm -rf "$OUT_HTML"
 fi
 
-"$LG" -w "$OUT_DIR" -w-shell none -w-host-eval "$ROOT/examples/browser-inspector/main.lg"
+if [ -n "${LG:-}" ]; then
+  env LG_WASM_BUILD_TAGS="$LG_WASM_BUILD_TAGS" \
+    "$LG" -w "$OUT_DIR" -w-shell none -w-host-eval "$ROOT/examples/browser-inspector/main.lg"
+else
+  env LG_WASM_BUILD_TAGS="$LG_WASM_BUILD_TAGS" \
+    go run ./ -w "$OUT_DIR" -w-shell none -w-host-eval "$ROOT/examples/browser-inspector/main.lg"
+fi
 
 python3 - "$OUT_HTML" "$ROOT/examples/browser-inspector/shell.html" <<'PY'
 from pathlib import Path
