@@ -23,6 +23,7 @@ import (
 	"github.com/nooga/let-go/pkg/nrepl"
 	"github.com/nooga/let-go/pkg/resolver"
 	"github.com/nooga/let-go/pkg/rt"
+	wasm "github.com/nooga/let-go/pkg/rt/wasm"
 	"github.com/nooga/let-go/pkg/vm"
 
 	_ "github.com/nooga/let-go/pkg/rt/corefns"
@@ -329,7 +330,7 @@ func init() {
 	flag.StringVar(&bundleOutput, "b", "", "bundle .lg file into a standalone executable (specify output path)")
 	flag.StringVar(&bundleBase, "bundle-base", "", "path to target-platform lg binary for cross-OS bundling (defaults to current executable)")
 	flag.StringVar(&wasmOutput, "w", "", "build .lg file into a WASM web app (specify output directory)")
-	flag.StringVar(&wasmShell, "w-shell", "xterm", "shell for -w: 'xterm' (default) or 'none' (emit core only; client supplies its own shell via window.LetGoHost)")
+	flag.StringVar(&wasmShell, "w-shell", "xterm", "shell for -w: 'xterm' (default), 'none' (emit core only; client supplies its own shell via window.LetGoHost), or a path to a custom HTML template containing __LG_HOST_JS_BODY_PLACEHOLDER__")
 	flag.StringVar(&wasmPayload, "w-wasm", "inline", "wasm delivery for -w: 'inline' (default; gzip-base64 baked into index.html) or 'external' (emit a separate main.wasm the loader fetches + streams)")
 	flag.BoolVar(&wasmHostEval, "w-host-eval", false, "for -w: expose LetGoHost.eval(code) to call into the loaded image and keep it live (park after the program's main returns); works in both boot modes. Pair with -w-shell none")
 	flag.StringVar(&storageID, "storage-id", "", "logical storage store id for the storage namespace (default: script name, or current directory for main.lg)")
@@ -450,6 +451,28 @@ func initCompiler(debug bool) *compiler.Context {
 func emitRuntimeStats() {
 	if os.Getenv("LG_LOOKUP_STATS") != "" {
 		fmt.Fprint(os.Stderr, vm.SnapshotLookupStats().Summary())
+	}
+}
+
+// resolveShell interprets -w-shell: "xterm"/"none" pick the built-in shell;
+// any other value is a custom HTML template path, which must exist and contain
+// exactly one wasm.HostBodyMarker. Returns the custom template path ("" for
+// built-in) and whether the built-in xterm shell is selected.
+func resolveShell(wShell string) (customTemplate string, xtermShell bool, err error) {
+	switch wShell {
+	case "xterm":
+		return "", true, nil
+	case "none":
+		return "", false, nil
+	default:
+		data, rerr := os.ReadFile(wShell)
+		if rerr != nil {
+			return "", false, fmt.Errorf("-w-shell %q is not 'xterm'/'none' and can't be read as a template: %w", wShell, rerr)
+		}
+		if strings.Count(string(data), wasm.HostBodyMarker) != 1 {
+			return "", false, fmt.Errorf("-w-shell template %q must contain exactly one %s marker", wShell, wasm.HostBodyMarker)
+		}
+		return wShell, false, nil
 	}
 }
 
@@ -601,15 +624,16 @@ func runMain() int {
 			fmt.Fprintln(os.Stderr, "error: -w requires exactly one input file")
 			return 1
 		}
-		if wasmShell != "xterm" && wasmShell != "none" {
-			fmt.Fprintf(os.Stderr, "error: -w-shell must be 'xterm' or 'none', got %q\n", wasmShell)
+		customShellTemplate, xtermShell, shellErr := resolveShell(wasmShell)
+		if shellErr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", shellErr)
 			return 1
 		}
 		if wasmPayload != "inline" && wasmPayload != "external" {
 			fmt.Fprintf(os.Stderr, "error: -w-wasm must be 'inline' or 'external', got %q\n", wasmPayload)
 			return 1
 		}
-		if err := buildWasm(context, nsResolver, files[0], wasmOutput, wasmShell == "xterm", wasmPayload == "external", wasmHostEval, storageIDForScript(files[0])); err != nil {
+		if err := buildWasm(context, nsResolver, files[0], wasmOutput, xtermShell, wasmPayload == "external", wasmHostEval, storageIDForScript(files[0]), customShellTemplate); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return 1
 		}
