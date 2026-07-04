@@ -497,7 +497,7 @@
                                              ;; (not a dynamic var) so it survives native lowering.
                                              _          (swap! ir-fn assoc :multi-arity? true
                                                           :private? private?)
-                                             result     (lower-go/lower ir-fn :bridge)]
+                                             result     ((lowerings :go) ir-fn)]
                                          (if (= :lowered (:status result))
                                            ;; Keep :fn (the decl) for existing consumers
                                            ;; (lower-defn-forms flatten, lower-template-closure-expr)
@@ -516,10 +516,8 @@
                                     (let [args-vec   (first arity-form)
                                           body-forms (map expand-all (rest arity-form))
                                           expanded   (apply list 'defn name-sym args-vec body-forms)
-                                          chunk      (-> expanded
-                                                         ir.build/build-fn
-                                                         optimize-fn
-                                                         lower/lower)]
+                                          ir-fn      (-> expanded ir.build/build-fn optimize-fn)
+                                          chunk      ((lowerings :bytecode) ir-fn)]
                                       (chunk->fn (count args-vec) false chunk)))
                                   arities)]
               (make-multi-arity (apply list fn-vals)))))))))
