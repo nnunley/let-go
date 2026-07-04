@@ -418,6 +418,13 @@
   {:bytecode (fn [ir-fn] (lower/lower ir-fn))
    :go       (fn [ir-fn] (lower-go/lower ir-fn :bridge))})
 
+;; Composite: run every registered lowering strategy against ONE shared
+;; interim IR. The emitter (Spec 2) uses this so the IR pane and both lowering
+;; panes are projections of the same IR (no second build/optimize, no
+;; gensym-nondeterminism divergence).
+(defn lower-fn-all [ir-fn]
+  (into {} (map (fn [[k s]] [k (s ir-fn)]) lowerings)))
+
 (defn- compile-form* [form]
   "Drives (defn NAME [args] body...) through expand → build → optimize → lower.
    Body forms are macroexpanded; defn and the args vector are passed through

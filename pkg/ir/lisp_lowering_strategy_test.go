@@ -41,3 +41,24 @@ func TestMultiArityLowersViaRegistry(t *testing.T) {
 		t.Fatalf("go multi-arity kind = %v, want :multi-fn-template", goKind)
 	}
 }
+
+// The composite must produce, for each target, the SAME native value the
+// single-target strategy produces from the same interim IR — proving one
+// build+optimize can feed all lowerings consistently.
+func TestLowerFnAllMatchesPerTarget(t *testing.T) {
+	ensureLoader()
+	// Build+optimize ONCE, then compare composite[:go] status vs the direct
+	// :go strategy status; both must be :lowered from the same ir-fn.
+	got := runLispExpr(t, `
+      (let [ir-fn (-> (quote (defn add [x y] (+ x y)))
+                      ir.build/build-fn
+                      ir.passes.pipeline/optimize-fn)
+            all   (ir.passes.pipeline/lower-fn-all ir-fn)
+            direct ((ir.passes.pipeline/lowerings :go) ir-fn)]
+        (pr-str [(:status (:go all)) (= (:status (:go all)) (:status direct))
+                 (contains? all :bytecode)]))`)
+	s, ok := got.(vm.String)
+	if !ok || !strings.Contains(string(s), ":lowered true true") {
+		t.Fatalf("lower-fn-all = %v, want [:lowered true true]", got)
+	}
+}
