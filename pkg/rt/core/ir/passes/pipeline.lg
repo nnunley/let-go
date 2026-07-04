@@ -410,6 +410,14 @@
 ;; When set to :go, compile-form* routes through ir.lower-go instead of ir.lower.
 ;; Set this before calling compile-form to generate Go-lowered output.
 
+;; Lowering strategy registry — one entry per backend. A strategy takes the
+;; optimized interim IR (`ir-fn`) and returns the backend's NATIVE lowered
+;; value: :bytecode -> a CodeChunk; :go -> {:status :lowered :decl …}. This is
+;; the single seam compile-form* dispatches through and the composite fans out.
+(def lowerings
+  {:bytecode (fn [ir-fn] (lower/lower ir-fn))
+   :go       (fn [ir-fn] (lower-go/lower ir-fn :bridge))})
+
 (defn- compile-form* [form]
   "Drives (defn NAME [args] body...) through expand → build → optimize → lower.
    Body forms are macroexpanded; defn and the args vector are passed through
@@ -472,9 +480,7 @@
               expanded   (apply list 'defn name-sym args-vec body-forms)
               ir-fn      (-> expanded ir.build/build-fn optimize-fn)
               _          (swap! ir-fn assoc :private? private?)]
-          (if go-target?
-            (lower-go/lower ir-fn :bridge)
-            (lower/lower ir-fn)))
+          ((lowerings *target*) ir-fn))
         ;; Multi-arity: build each arity separately, combine
         (let [arities   (drop (if has-doc? 3 2) form)]
           (if go-target?
