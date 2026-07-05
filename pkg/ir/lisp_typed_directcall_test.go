@@ -6,38 +6,47 @@
 
 package ir_test
 
-// Emission half of typed direct calls: a lowered sibling with a TYPED signature
-// (here a bool result) is now recorded in the direct-call registry with its real
-// specs (override-coercible?, not just override-uniform-value?), so a caller
-// emits a direct typed call (boxing the typed result at the site) instead of the
-// rt.CachedVarFn / InvokeValue trampoline. Previously such fns were excluded.
+// A small typed-bool sibling is now INLINED into its caller (EPIC-013 combinator
+// inlining), superseding the earlier typed-direct-call path: the caller carries
+// callee's body (rt.EqValue) directly, with no call or trampoline to callee.
+// Direct-call for inline-INELIGIBLE callees is still covered by
+// TestLowerNsSeedsNativeRegistry (native_direct_call_test) and the crosspkg tests.
 
 import (
 	"regexp"
 	"testing"
 )
 
-func TestLowerNsTypedResultSiblingDirectCall(t *testing.T) {
+func TestLowerNsInlinesTypedSibling(t *testing.T) {
 	ensureLoader()
-	// callee returns a bool ((= x 1) → :bool); caller calls it intra-ns.
+	// callee returns a bool ((= x 1) → :bool); it is small + non-recursive, so
+	// the intra-ns call in caller is inlined.
 	v := runLispExpr(t,
 		`(do (create-ns (quote typedres))
 		     (intern (quote typedres) (quote callee))
 		     (intern (quote typedres) (quote caller))
-		     (ir.passes.pipeline/lower-ns-to-go "typedres" (quote typedres)
-		       [(quote (defn callee [x] (= x 1)))
-		        (quote (defn caller [y] (callee y)))]))`)
+		     (binding [ir.passes.inline/*enable-inline* true]
+		       (ir.passes.pipeline/lower-ns-to-go "typedres" (quote typedres)
+		         [(quote (defn callee [x] (= x 1)))
+		          (quote (defn caller [y] (callee y)))])))`)
 	src := v.String()
 
-	// callee lowers with a typed bool result (= is total → no error result).
+	// callee still lowers as its own bool-returning fn.
 	if !regexp.MustCompile(`func callee\(ec \*vm\.ExecContext, [a-z0-9_]+ vm\.Value\) bool`).MatchString(src) {
 		t.Fatalf("expected callee to lower with a bool result:\n%s", src)
 	}
-	// caller emits a DIRECT call to callee, boxing the typed bool result.
-	if !regexp.MustCompile(`vm\.Boolean\(callee\(ec,`).MatchString(src) {
-		t.Fatalf("expected caller to emit a direct vm.Boolean(callee(ec, ...)) call:\n%s", src)
+	// caller lowers with a bool result and carries the INLINED body.
+	if !regexp.MustCompile(`func caller\(ec \*vm\.ExecContext, [a-z0-9_]+ vm\.Value\) bool`).MatchString(src) {
+		t.Fatalf("expected caller to lower with a bool result:\n%s", src)
+	}
+	if !regexp.MustCompile(`func caller\(ec[^}]*rt\.EqValue`).MatchString(src) {
+		t.Fatalf("expected caller to carry callee's inlined body (rt.EqValue):\n%s", src)
+	}
+	// No call or trampoline to callee: `callee(` appears only in its own definition.
+	if n := len(regexp.MustCompile(`callee\(`).FindAllString(src, -1)); n != 1 {
+		t.Fatalf("expected callee( once (its definition only), got %d — caller did not inline:\n%s", n, src)
 	}
 	if regexp.MustCompile(`InvokeValue\([^\n]*"callee"|CachedVarFn\([^\n]*"callee"`).MatchString(src) {
-		t.Fatalf("caller must NOT trampoline to callee:\n%s", src)
+		t.Fatalf("caller must NOT trampoline to callee after inlining:\n%s", src)
 	}
 }
