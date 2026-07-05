@@ -204,6 +204,7 @@ func (r *NSResolver) Load(name string) *vm.Namespace {
 				delete(r.cloading, name)
 				// gogen_ir: drain Go-native overrides (no-op untagged).
 				rt.ApplyGoOverrides(lns)
+				rt.ApplyGoVarInits(lns, vm.RootExecContext)
 				return lns
 			}
 		}
@@ -253,6 +254,7 @@ func (r *NSResolver) loadEmbedded(name string) *vm.Namespace {
 	ns := r.loadSource("<embedded:"+name+">", stdstrings.NewReader(src), false)
 	// gogen_ir: drain Go-native overrides for this namespace (no-op untagged).
 	rt.ApplyGoOverrides(ns)
+	rt.ApplyGoVarInits(ns, vm.RootExecContext)
 	return ns
 }
 
@@ -276,6 +278,7 @@ func (r *NSResolver) execPrecompiled(name string, chunk *vm.CodeChunk) *vm.Names
 	// gogen_ir: drain Go-native overrides registered by the lowered
 	// package for this namespace (no-op on untagged builds).
 	rt.ApplyGoOverrides(nns)
+	rt.ApplyGoVarInits(nns, vm.RootExecContext)
 	return nns
 }
 

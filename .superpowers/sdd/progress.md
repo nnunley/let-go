@@ -5,7 +5,7 @@ Base: uqxtovvv (#394 tip, commit 4876013) — each task `jj new` off previous.
 VCS: jj (colocated). Acceptance: capability (InvokeValueEC→0, LookupVar→0,
 check-generated + go test green, harness runs); perf observation-only.
 
-- Task A1: pending
+- Task A1: complete (change nozrowpn, review clean)
 - Task A2: pending
 - Task B1: pending
 - Task C1: pending
