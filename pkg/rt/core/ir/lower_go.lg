@@ -1748,6 +1748,51 @@
          (keyword? (ir/aux callee f))
          (or (= 1 arg-count) (= 2 arg-count)))))
 
+;; Closure-call devirtualization. When on, a :call whose callee lowered to a
+;; materialized `rt.BoxNativeFn(<func-lit>)` literal is emitted as a DIRECT call
+;; to that func literal instead of the rt.InvokeValueEC trampoline — removing the
+;; boxing + reflective dispatch. Bound true by lower-ns-to-go when *enable-inline*
+;; is on (the combinator-inlining effort's payoff). Unbound => off (core unchanged).
+(def ^:dynamic *devirt-closures* false)
+
+(defn- boxnativefn-inner
+  "If `expr` is a gogen `rt.BoxNativeFn(X)` call, return X (the func literal);
+   else nil. Pattern-matches the emitted AST via the reflective gogen accessors.
+   MUST stay in sync with lower-template-closure-expr — the emitter that produces
+   the `rt.BoxNativeFn(<func-lit>)` this recognizes. If that emission changes
+   (constructor, package, or wrapping), update this matcher too, or devirt
+   silently stops firing."
+  [expr]
+  (when (and expr (= "CallExpr" (gogen/node-kind expr)))
+    (let [fnx (gogen/call-fn expr)]
+      (when (= "SelectorExpr" (gogen/node-kind fnx))
+        (let [recv (gogen/sel-x fnx)]
+          (when (and (= "BoxNativeFn" (gogen/sel-name fnx))
+                     (= "Ident" (gogen/node-kind recv))
+                     (= "rt" (gogen/ident-name recv)))
+            (let [args (gogen/call-args expr)]
+              (when (= 1 (count args))
+                (first args)))))))))
+
+(defn- devirt-closure-call-stmts
+  "If the callee (first refs) lowered to an `rt.BoxNativeFn(<func-lit>)` literal,
+   emit a direct call `<func-lit>(args)` assigned to target — stripping the box
+   and the rt.InvokeValueEC trampoline. Returns the stmt vector, or nil to fall
+   through to the normal path. Return arity comes from the func literal's result
+   count (1 => vm.Value; 2 => (vm.Value, error) with an error check)."
+  [f closed-exprs target refs]
+  (when *devirt-closures*
+    (let [callee (box-as-value f closed-exprs (first refs))]
+      (when-let [inner (boxnativefn-inner callee)]
+        (let [arg-exprs (mapv (fn [rid] (box-as-value f closed-exprs rid)) (rest refs))]
+          (when (every? identity arg-exprs)
+            (let [direct (gogen/call inner arg-exprs)]
+              (if (> (gogen/func-lit-num-results inner) 1)
+                ;; (vm.Value, error): assign + error check
+                (emit-call-stmts f target direct)
+                ;; single vm.Value result: plain assignment
+                [(gogen/assign "=" target direct)]))))))))
+
 (defn- trampoline-call-stmts [f closed-exprs nid target refs]
   "Emit the runtime-dispatch trampoline for a :call, assigning the result to
    `target`. This is the always-correct fallback path: a cross-ns cached-var
@@ -1801,16 +1846,16 @@
               [(gogen/multi-assign "=" [target (gogen/ident "_")] [invoke])]
               (emit-call-stmts f target invoke))))))))
 
-;; Multimethod dispatcher registry, bound during the :go pass in lower-ns-to-go.
-;; Shape: {multifn-name-str {:dispatch-type :type
-;;                           :dispatch-arg-index N
-;;                           :arms [{:go-case-type "vm.ArrayVector"
-;;                                   :go-fn-name "_mm_<gomulti>_0"
-;;                                   :param-count K} ...]}}
-;; Only entries whose dispatch fn is a recognized (fn [x] (type x)) shape AND
-;; that have >=1 method whose dispatch-val maps confidently to a Go type are
-;; present (as :type). Everything else stays on the runtime vm.MultiFn path —
-;; defmulti-call-stmts returns nil for it. Unbound => off.
+  ;; Multimethod dispatcher registry, bound during the :go pass in lower-ns-to-go.
+  ;; Shape: {multifn-name-str {:dispatch-type :type
+  ;;                           :dispatch-arg-index N
+  ;;                           :arms [{:go-case-type "vm.ArrayVector"
+  ;;                                   :go-fn-name "_mm_<gomulti>_0"
+  ;;                                   :param-count K} ...]}}
+  ;; Only entries whose dispatch fn is a recognized (fn [x] (type x)) shape AND
+  ;; that have >=1 method whose dispatch-val maps confidently to a Go type are
+  ;; present (as :type). Everything else stays on the runtime vm.MultiFn path —
+  ;; defmulti-call-stmts returns nil for it. Unbound => off.
 (def ^:dynamic *defmulti-dispatchers* nil)
 
 (defn- defmulti-call-stmts [f closed-exprs nid]
@@ -1938,9 +1983,9 @@
                       (gogen/ident "_"))
           entry     (lookup-direct-callable f (first refs) arg-count)
           direct    (when entry (emit-typed-direct-call f closed-exprs nid target refs entry))]
-      (if direct
-        direct
-        (trampoline-call-stmts f closed-exprs nid target refs)))))
+      (or direct
+          (devirt-closure-call-stmts f closed-exprs target refs)
+          (trampoline-call-stmts f closed-exprs nid target refs)))))
 
 (defn- try-assign-stmts [f closed-exprs nid]
   "Lower a :try op (guarded region) to straight-line Go.
@@ -2207,13 +2252,13 @@
                   (let [sig (get *protocol-method-sigs* (go-export-name vname))]
                     (and sig (not (:needs-error? sig))))))))))
 
-;; Force the (vm.Value, error) result shape regardless of body contents. Bound
-;; true while lowering a protocol-method body (lower-method) so EVERY method
-;; presents the uniform IFn ABI — `Method(ec, …) (vm.Value, error)` — even when
-;; its body is pure. A uniform ABI is required because the devirtualized direct
-;; call recv.Method(…), the generated protocol interface, and the IFn dispatch
-;; path must all agree on one signature across every impl. Inner fn-lits rebind
-;; this to nil (lower-fn-lit) so nested closures keep their body-derived shape.
+  ;; Force the (vm.Value, error) result shape regardless of body contents. Bound
+  ;; true while lowering a protocol-method body (lower-method) so EVERY method
+  ;; presents the uniform IFn ABI — `Method(ec, …) (vm.Value, error)` — even when
+  ;; its body is pure. A uniform ABI is required because the devirtualized direct
+  ;; call recv.Method(…), the generated protocol interface, and the IFn dispatch
+  ;; path must all agree on one signature across every impl. Inner fn-lits rebind
+  ;; this to nil (lower-fn-lit) so nested closures keep their body-derived shape.
 (def ^:dynamic *force-needs-error* nil)
 
 ;; Public (was defn-): ir.passes.pipeline/protocol-method-sigs calls this to

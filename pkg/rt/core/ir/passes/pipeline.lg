@@ -907,6 +907,7 @@
                                                    (binding [*ns* (the-ns ns-name)]
                                                      (build-inline-registry ns-name defn-forms0))
                                                    {})
+              lower-go/*devirt-closures* ir.passes.inline/*enable-inline*
               ir.passes.typeinfer/*typeinfer-budget-ms* nil
               ir.passes.typeinfer/*deftype-ctor-types* (when (seq ctor-types) ctor-types)
               lower-go/*deftype-ctors* (when (seq ctors) ctors)

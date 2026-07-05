@@ -303,6 +303,96 @@ func cIdentName(v vm.Value) (vm.Value, error) {
 	return vm.String(id.Name), nil
 }
 
+// --- reflective introspection accessors ------------------------------
+// These let passes pattern-match emitted go/ast without a per-type switch,
+// e.g. to recognize an `rt.BoxNativeFn(<func-lit>)` callee and devirtualize it.
+
+// node-kind: the concrete go/ast type name of a boxed node ("CallExpr",
+// "FuncLit", "Ident", "SelectorExpr", …), or "nil". Pure reflection.
+func cNodeKind(v vm.Value) (vm.Value, error) {
+	n, err := unboxNode(v)
+	if err != nil {
+		return vm.NIL, fmt.Errorf("gogen/node-kind: %v", err)
+	}
+	if n == nil {
+		return vm.String("nil"), nil
+	}
+	t := reflect.TypeOf(n)
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	return vm.String(t.Name()), nil
+}
+
+// nodeAs unboxes v and asserts it to the concrete go/ast type T, wrapping any
+// failure with the gogen/<fn> prefix. Shared preamble for the typed accessors.
+func nodeAs[T ast.Node](v vm.Value, fn string) (T, error) {
+	var zero T
+	n, err := unboxNode(v)
+	if err != nil {
+		return zero, fmt.Errorf("gogen/%s: %v", fn, err)
+	}
+	t, ok := n.(T)
+	if !ok {
+		return zero, fmt.Errorf("gogen/%s: not a %T: got %T", fn, zero, n)
+	}
+	return t, nil
+}
+
+// call-fn: the callee expression of a *ast.CallExpr.
+func cCallFn(v vm.Value) (vm.Value, error) {
+	c, err := nodeAs[*ast.CallExpr](v, "call-fn")
+	if err != nil {
+		return vm.NIL, err
+	}
+	return box(c.Fun), nil
+}
+
+// call-args: the argument expressions of a *ast.CallExpr, as a vector.
+func cCallArgs(v vm.Value) (vm.Value, error) {
+	c, err := nodeAs[*ast.CallExpr](v, "call-args")
+	if err != nil {
+		return vm.NIL, err
+	}
+	out := make([]vm.Value, len(c.Args))
+	for i, a := range c.Args {
+		out[i] = box(a)
+	}
+	return vm.NewArrayVector(out), nil
+}
+
+// sel-x: the receiver expression of a *ast.SelectorExpr (the `x` in `x.Sel`).
+func cSelX(v vm.Value) (vm.Value, error) {
+	s, err := nodeAs[*ast.SelectorExpr](v, "sel-x")
+	if err != nil {
+		return vm.NIL, err
+	}
+	return box(s.X), nil
+}
+
+// sel-name: the selected identifier of a *ast.SelectorExpr (the `Sel` in `x.Sel`).
+func cSelName(v vm.Value) (vm.Value, error) {
+	s, err := nodeAs[*ast.SelectorExpr](v, "sel-name")
+	if err != nil {
+		return vm.NIL, err
+	}
+	return vm.String(s.Sel.Name), nil
+}
+
+// func-lit-num-results: the number of result values of a *ast.FuncLit
+// (0 for none, 1 for `T`, 2 for `(T, error)`), used to pick the call-site
+// assignment arity when devirtualizing.
+func cFuncLitNumResults(v vm.Value) (vm.Value, error) {
+	fl, err := nodeAs[*ast.FuncLit](v, "func-lit-num-results")
+	if err != nil {
+		return vm.NIL, err
+	}
+	if fl.Type == nil || fl.Type.Results == nil {
+		return vm.Int(0), nil
+	}
+	return vm.Int(int64(len(fl.Type.Results.List))), nil
+}
+
 // type-expr: (gogen/type "spec") -> parsed type expression
 // Uses go/parser so the full Go type grammar is supported.
 //
@@ -1833,6 +1923,12 @@ func installGogenNS() {
 		mk(wrap1Named("ident", cIdent)),
 		mk(wrap1Named("ident?", cIdentP)),
 		mk(wrap1Named("ident-name", cIdentName)),
+		mk(wrap1Named("node-kind", cNodeKind)),
+		mk(wrap1Named("call-fn", cCallFn)),
+		mk(wrap1Named("call-args", cCallArgs)),
+		mk(wrap1Named("sel-x", cSelX)),
+		mk(wrap1Named("sel-name", cSelName)),
+		mk(wrap1Named("func-lit-num-results", cFuncLitNumResults)),
 		mk(wrap1Named("type", cType)),
 		mk(wrap1Named("int-lit", cIntLit)),
 		mk(wrap1Named("float-lit", cFloatLit)),

@@ -225,3 +225,41 @@ func TestDevirtualizesMultiBlockClosureCall(t *testing.T) {
 		t.Fatalf("multi-block capturing closure call should be devirtualized (no InvokeValueEC/BoxNativeFn):\n%s", src)
 	}
 }
+
+// TestDevirtualizesNestedCapturedClosureCall proves interprocedural devirt: a
+// closure (wrap's body) calls a captured closure h; when wrap is inlined into
+// mk2, h becomes a materialized closure literal at the call site inside mk2's
+// returned closure. The lower-time closure devirt strips rt.BoxNativeFn and
+// calls the func literal directly (no InvokeValueEC). The pegbench shape.
+func TestDevirtualizesNestedCapturedClosureCall(t *testing.T) {
+	ensureLoader()
+	// Intern the defns first (mirrors the AOT flow) so build-inline-registry can
+	// resolve `wrap` and inline it into mk2 — exposing the captured closure.
+	v := runLispExpr(t,
+		`(do (create-ns (quote nest2))
+		     (binding [*ns* (the-ns (quote nest2))]
+		       (eval (quote (defn wrap [h] (fn [x] (h x)))))
+		       (eval (quote (defn mk2 [k] (wrap (fn [y] (+ y k)))))))
+		     (binding [ir.passes.inline/*enable-inline* true]
+		       (ir.passes.pipeline/lower-ns-to-go "nest2" (quote nest2)
+		         [(quote (defn wrap [h] (fn [x] (h x))))
+		          (quote (defn mk2 [k] (wrap (fn [y] (+ y k)))))])))`)
+	src := v.String()
+	// Isolate mk2 (wrap's own callee is a param `h` — genuinely not devirtable,
+	// so it legitimately keeps its InvokeValueEC; mk2 is where h is a known
+	// closure literal after inlining).
+	i := strings.Index(src, "func mk2(")
+	if i < 0 {
+		t.Fatalf("mk2 did not lower:\n%s", src)
+	}
+	rest := src[i:]
+	if j := strings.Index(rest[1:], "\nfunc "); j >= 0 {
+		rest = rest[:j+1]
+	}
+	if strings.Contains(rest, "InvokeValueEC") {
+		t.Fatalf("mk2's nested captured-closure call should be devirtualized (no InvokeValueEC):\n%s", rest)
+	}
+	if !strings.Contains(rest, "}(c") {
+		t.Fatalf("expected a direct IIFE call in mk2 (closure body called directly):\n%s", rest)
+	}
+}
