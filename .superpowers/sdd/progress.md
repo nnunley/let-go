@@ -10,3 +10,6 @@ check-generated + go test green, harness runs); perf observation-only.
 - Task B1: complete (change yrnzumyt, review clean)
 - Task C1: acceptance PASSED (change wwtwllls; InvokeValueEC=0, LookupVar=0, RegisterGoVarInits=1, CachedVarDeref=440) — grammar lowered native. BLOCKED on pre-existing gogen bug: user fn `len` shadows Go builtin. Fix in progress (reserve Go predeclared idents).
 - Task C2: pending
+
+## Follow-up (planned, after hardening agent lands)
+- Replace hardcoded go-predeclared-identifiers + keyword list in lower_go.lg with a gogen/reserved-ident? builtin sourced from go/token.IsKeyword + go/types.Universe (authoritative, version-tracking). Keep only ec/callErr as lowering-internal reserved.

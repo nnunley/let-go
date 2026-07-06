@@ -1224,9 +1224,11 @@
             all-results (into (into (into (into (into type-decls valid-results) extra-decls) cached-var-decls) wrapper-results) var-init-decls)
             ;; Carry the accumulated native-module imports (corefns, …) into the
             ;; file's import block via a decl-less import-only result.
+            ;; Each import is aliased via lower-go/pkg-alias-from to avoid
+            ;; collisions with local variable names that user munging might produce.
             native-import-results (if (seq @native-imports)
                                     [{:decl nil
-                                      :imports (mapv (fn [p] {:path p}) (sort @native-imports))}]
+                                      :imports (mapv (fn [p] {:path p :alias (lower-go/pkg-alias-from p)}) (sort @native-imports))}]
                                     [])
             all-results (into all-results native-import-results)
             file-ast (lower-go/file pkg-name all-results)]
