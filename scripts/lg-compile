@@ -26,6 +26,7 @@
 (require 'ir.lower-go)
 (require 'clojure.string)
 (require 'gogen)
+(require 'ir.passes.inline)
 
 ;; Evaluating a file's (ns ..) form switches the GLOBAL current ns; capture this
 ;; script's ns so we can restore it after loading (else later top-level defs in
@@ -151,7 +152,8 @@
                 (when (definitional? f) (eval f))))
       ;; --- whole-program cross-package lowering (collect-all then emit-all) ---
       gospecs (mapv (fn [s] [(:pkg s) (:nsn s) (:lf s) (:go-pkg s)]) specs)
-      results (binding [ir.passes.pipeline/*target* :go]
+      results (binding [ir.passes.pipeline/*target* :go
+                        ir.passes.inline/*enable-inline* (= "1" (System/getenv "LG_ENABLE_INLINE"))]
                 (ir.passes.pipeline/lower-all-ns-to-go gospecs))]
   ;; --- write each emitted package to disk ---
   (doseq [pair (map-indexed vector specs)]

@@ -8,5 +8,5 @@ check-generated + go test green, harness runs); perf observation-only.
 - Task A1: complete (change nozrowpn, review clean)
 - Task A2: complete (change ymlyuyyu, review clean; 5 test assertions updated for SetVarRoot/ApplyVarMetaV)
 - Task B1: complete (change yrnzumyt, review clean)
-- Task C1: pending
+- Task C1: acceptance PASSED (change wwtwllls; InvokeValueEC=0, LookupVar=0, RegisterGoVarInits=1, CachedVarDeref=440) — grammar lowered native. BLOCKED on pre-existing gogen bug: user fn `len` shadows Go builtin. Fix in progress (reserve Go predeclared idents).
 - Task C2: pending

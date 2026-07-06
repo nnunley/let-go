@@ -382,6 +382,19 @@
     ;; otherwise redeclare them in the same block.
     "ec" "callErr"})
 
+;; Go PREDECLARED identifiers (spec: builtin funcs, predeclared types,
+;; constants, nil). Not keywords, so a user fn may munge to one of these — but
+;; a package-level `func len(...)` shadows the builtin `len` the generated
+;; arity-check wrappers call, breaking compilation. go-name suffixes `_` to any
+;; fn name colliding with these, exactly as it does for keywords.
+(def ^:private go-predeclared-identifiers
+  #{"append" "cap" "clear" "close" "complex" "copy" "delete" "imag" "len"
+    "make" "max" "min" "new" "panic" "print" "println" "real" "recover"
+    "bool" "byte" "comparable" "complex64" "complex128" "error" "float32"
+    "float64" "int" "int8" "int16" "int32" "int64" "rune" "string" "uint"
+    "uint8" "uint16" "uint32" "uint64" "uintptr" "any"
+    "true" "false" "iota" "nil"})
+
 ;; Munge one char to a Go-identifier-safe token using `m`, with a catch-all so
 ;; nothing unmapped ever leaks through: explicit map entry wins; otherwise
 ;; ASCII alphanumerics and '_' pass through; any other char becomes _U<hex>_
@@ -398,7 +411,8 @@
 
 (defn- go-name [s]
   (let [munged (apply str (map (fn [ch] (munge-char go-name-munge-map ch)) s))]
-    (if (contains? go-reserved-words munged)
+    (if (or (contains? go-reserved-words munged)
+            (contains? go-predeclared-identifiers munged))
       (str munged "_")
       munged)))
 
