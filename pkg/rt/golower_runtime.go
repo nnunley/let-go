@@ -26,6 +26,25 @@ func InternVar(nsName, symName string) *vm.Var {
 	return out
 }
 
+// SetVarRoot sets the root of a var whose handle is typed vm.Value (the
+// lowered :def path holds the InternVar result as vm.Value so a (def …) whose
+// value is used downstream — e.g. returned from a var-initializer — keeps a
+// vm.Value type). SetRoot is a *vm.Var method, so it can't be called on the
+// interface directly; this casts. A non-Var handle is a no-op.
+func SetVarRoot(v vm.Value, root vm.Value) {
+	if vr, ok := v.(*vm.Var); ok {
+		vr.SetRoot(root)
+	}
+}
+
+// ApplyVarMetaV is ApplyVarMeta for a var handle typed vm.Value (see
+// SetVarRoot). A non-Var handle is a no-op.
+func ApplyVarMetaV(v vm.Value, meta vm.Value) {
+	if vr, ok := v.(*vm.Var); ok {
+		ApplyVarMeta(vr, meta)
+	}
+}
+
 // ApplyVarMeta applies def metadata to v exactly as the bytecode defCompiler
 // does: it sets the var's meta map, then mirrors the :dynamic / :private flags
 // onto the Var. Shared by build-time def lowering (the apply-def-meta! builtin)
@@ -101,6 +120,19 @@ func MultiFnNativeFrozen(ptr **vm.Var, nsName, symName string) bool {
 	}
 	mm, ok := (*ptr).Deref().(*vm.MultiFn)
 	return ok && mm.IsNativeFrozen()
+}
+
+// CachedVarDeref is the value-position analogue of CachedVarFn: it memoizes the
+// *Var resolution into ptr (lazy, first use) and returns ec.Deref of it, so a
+// :load-var used as a value — e.g. a parser-combinator rule referencing a
+// sibling rule's var — pays the ns+symbol hash lookup once instead of on every
+// access, while ec.Deref still honors any active dynamic binding. Equivalent to
+// ec.Deref(rt.LookupVar(ns, name)) with the lookup cached.
+func CachedVarDeref(ec *vm.ExecContext, ptr **vm.Var, nsName, symName string) vm.Value {
+	if *ptr == nil {
+		*ptr = LookupVar(nsName, symName)
+	}
+	return ec.Deref(*ptr)
 }
 
 // InvokeValue applies a runtime callable using let-go's dynamic invocation path.

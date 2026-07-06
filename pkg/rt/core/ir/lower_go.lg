@@ -280,6 +280,7 @@
     :else nil))
 
 (declare go-name)
+(declare record-cross-ns-var!)
 
 (defn- source-name-of [f nid]
   "Pick a user-visible source name from the inst's attached source-infos,
@@ -369,17 +370,12 @@
    \\  "_BSLASH_"
    \?  "_QMARK_"})
 
-(def ^:private go-reserved-words
-  #{"break" "default" "func" "interface" "select" "case" "defer" "go"
-    "map" "struct" "chan" "else" "goto" "package" "switch" "const"
-    "fallthrough" "if" "range" "type" "continue" "for" "import"
-    "return" "var"
-    ;; Not Go keywords, but fixed Go identifiers this lowering itself emits
-    ;; into every generated function's own scope (the *vm.ExecContext param,
-    ;; and the shared `error` local) — a Lisp local literally named `ec` or
-    ;; `callErr` (e.g. a legmacs `end-column` destructured as `ec`) would
-    ;; otherwise redeclare them in the same block.
-    "ec" "callErr"})
+;; Identifiers the LOWERING ITSELF emits into every generated function's scope
+;; (the *vm.ExecContext param `ec`, the shared `error` local `callErr`) — a Lisp
+;; local munging to one of these would redeclare it. Go keywords + predeclared
+;; identifiers are handled authoritatively by gogen/reserved-ident? (sourced
+;; from go/token + go/types.Universe), so they are NOT listed here.
+(def ^:private go-lowering-reserved #{"ec" "callErr"})
 
 ;; Munge one char to a Go-identifier-safe token using `m`, with a catch-all so
 ;; nothing unmapped ever leaks through: explicit map entry wins; otherwise
@@ -397,7 +393,8 @@
 
 (defn- go-name [s]
   (let [munged (apply str (map (fn [ch] (munge-char go-name-munge-map ch)) s))]
-    (if (contains? go-reserved-words munged)
+    (if (or (contains? go-lowering-reserved munged)
+            (gogen/reserved-ident? munged))
       (str munged "_")
       munged)))
 
@@ -673,20 +670,32 @@
           (lower-template-closure-expr (:template info) capture-exprs nid))))))
 
 (defn- load-var-deref-expr [aux]
-  "The inline `ec.Deref(rt.LookupVar(ns, name))` expression for a :load-var.
-   Resolves the var against the running ExecContext so an active dynamic
-   binding (e.g. inside a future or with-scope) is honoured, and derefs to the
-   value-typed root. This is the RHS of the var's one-time snapshot local;
-   :load-var is materialised (see local-carrying-op?), not re-emitted at uses."
-  (let [sym (symbol aux)
-        sns (namespace sym)
-        sn  (name sym)]
-    (gogen/call
-      (gogen/field-sel (gogen/ident "ec") "Deref")
-      [(gogen/call
-         (gogen/field-sel (gogen/ident "rt") "LookupVar")
-         [(gogen/string-lit (if (nil? sns) "core" sns))
-          (gogen/string-lit sn)])])))
+  "The `ec.Deref(<var>)` expression for a :load-var, honouring any active
+   dynamic binding and derefing to the value-typed root. When a recording
+   context is bound (*cross-ns-vars-used*), the var is memoized into a
+   package-level *vm.Var cell and read via rt.CachedVarDeref(ec, &cell, …) so
+   each reference pays the ns+symbol lookup ONCE rather than on every access —
+   the hot path for a parser-combinator rule referencing sibling rules. With no
+   recording context (e.g. an isolated unit test) it falls back to the inline
+   ec.Deref(rt.LookupVar(…))."
+  (let [sym    (symbol aux)
+        sns    (namespace sym)
+        sn     (name sym)
+        ns-str (if (nil? sns) "core" sns)
+        base   (record-cross-ns-var! ns-str sn)]
+    (if base
+      (gogen/call
+        (gogen/field-sel (gogen/ident "rt") "CachedVarDeref")
+        [(gogen/ident "ec")
+         (gogen/unary "&" (gogen/ident base))
+         (gogen/string-lit ns-str)
+         (gogen/string-lit sn)])
+      (gogen/call
+        (gogen/field-sel (gogen/ident "ec") "Deref")
+        [(gogen/call
+           (gogen/field-sel (gogen/ident "rt") "LookupVar")
+           [(gogen/string-lit ns-str)
+            (gogen/string-lit sn)])]))))
 
 (defn- value-expr [f closed-exprs nid]
   (let [op  (ir/op nid f)
@@ -1326,12 +1335,26 @@
   ;; clojure.string→string, …) otherwise never match and emit no wrappers.
   (or (get alias->internal-ns ns-str) (symbol ns-str)))
 
-(defn- pkg-alias-from [pkg-path]
-  ;; last path segment of a Go import path; "github.com/.../corefns" -> "corefns"
-  (loop [i (dec (count pkg-path))]
-    (cond (< i 0) pkg-path
-          (= (nth pkg-path i) \/) (subs pkg-path (inc i))
-          :else (recur (dec i)))))
+(defn pkg-alias-from [pkg-path]
+  ;; Collision-proof Go import alias derived from import path.
+  ;; The alias MUST NOT collide with local variable names that munging could
+  ;; produce. User munging (go-name) converts special chars to tokens like
+  ;; _SLASH_ or _UXXXX_, but never produces double underscores at the start.
+  ;; Therefore, we prefix with __pkg_ (distinctive, unproduce-able by munging)
+  ;; and include the last 2 path segments (not just the leaf), e.g.:
+  ;;
+  ;;   "github.com/.../yamlstar/parser" -> "__pkg_yamlstar_parser"
+  ;;   "github.com/.../yamlstar/parser/core" -> "__pkg_parser_core"
+  ;;   "github.com/.../corefns" -> "__pkg_corefns"
+  ;;
+  ;; This ensures extremely low collision probability: a user would need to
+  ;; deliberately name a local __pkg_<segments> with knowledge of the exact
+  ;; package structure, which is vanishingly unlikely in practice.
+  (let [segments (clojure.string/split pkg-path #"/")
+        ;; Take the last 2 segments, or all if fewer than 2
+        trailing (vec (drop (max 0 (- (count segments) 2)) segments))
+        suffix (clojure.string/join "_" trailing)]
+    (str "__pkg_" suffix)))
 
 (defn registry-key [ns-sym name-str arity] [ns-sym name-str arity])
 
@@ -2122,10 +2145,14 @@
             stmts      (cond-> []
                          need-local (conj (gogen/assign "=" (value-ident f nid) intern))
                          meta-x     (conj (gogen/expr-stmt
-                                            (gogen/call (gogen/field-sel (gogen/ident "rt") "ApplyVarMeta")
+                                            (gogen/call (gogen/field-sel (gogen/ident "rt") "ApplyVarMetaV")
                                                         [target meta-x])))
+                         ;; SetRoot is a *vm.Var method; target is typed vm.Value
+                         ;; (so the :def result stays a vm.Value downstream), so go
+                         ;; through rt.SetVarRoot which casts.
                          has-val    (conj (gogen/expr-stmt
-                                            (gogen/call (gogen/field-sel target "SetRoot") [valx]))))]
+                                            (gogen/call (gogen/field-sel (gogen/ident "rt") "SetVarRoot")
+                                                        [target valx]))))]
         (if (seq stmts)
           stmts
           ;; 1-arg (def x), not live, no meta: bare side-effecting intern.

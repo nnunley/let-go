@@ -26,6 +26,7 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"reflect"
 	"strconv"
 	"strings"
@@ -322,6 +323,23 @@ func cNodeKind(v vm.Value) (vm.Value, error) {
 		t = t.Elem()
 	}
 	return vm.String(t.Name()), nil
+}
+
+// reserved-ident?: reports whether n is a Go keyword or predeclared identifier
+// (builtin func / type / constant), sourced authoritatively from go/token +
+// go/types.Universe so it tracks the toolchain's Go version (e.g. min/max/clear
+// became predeclared in 1.21) instead of a hand-maintained list. The lowerer's
+// go-name uses it to `_`-suffix a user fn whose munged name would shadow one.
+func cReservedIdent(v vm.Value) (vm.Value, error) {
+	s, ok := v.(vm.String)
+	if !ok {
+		return vm.NIL, fmt.Errorf("gogen/reserved-ident?: expected String, got %s", v.Type().Name())
+	}
+	n := string(s)
+	if token.IsKeyword(n) || types.Universe.Lookup(n) != nil {
+		return vm.TRUE, nil
+	}
+	return vm.FALSE, nil
 }
 
 // nodeAs unboxes v and asserts it to the concrete go/ast type T, wrapping any
@@ -1924,6 +1942,7 @@ func installGogenNS() {
 		mk(wrap1Named("ident?", cIdentP)),
 		mk(wrap1Named("ident-name", cIdentName)),
 		mk(wrap1Named("node-kind", cNodeKind)),
+		mk(wrap1Named("reserved-ident?", cReservedIdent)),
 		mk(wrap1Named("call-fn", cCallFn)),
 		mk(wrap1Named("call-args", cCallArgs)),
 		mk(wrap1Named("sel-x", cSelX)),

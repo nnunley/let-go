@@ -778,8 +778,8 @@ func TestLowerGoBridgeLowersDefWithValue(t *testing.T) {
 	if !strings.Contains(rendered, `rt.InternVar("`) || !strings.Contains(rendered, `"dvar")`) {
 		t.Fatalf("expected def to intern via rt.InternVar(ns, \"dvar\")\n--- go ---\n%s", rendered)
 	}
-	if !strings.Contains(rendered, ".SetRoot(vm.Int(1))") {
-		t.Fatalf("expected def value to set the var root\n--- go ---\n%s", rendered)
+	if !strings.Contains(rendered, "rt.SetVarRoot(") {
+		t.Fatalf("expected def value to set the var root via rt.SetVarRoot\n--- go ---\n%s", rendered)
 	}
 }
 
@@ -798,8 +798,8 @@ func TestLowerGoBridgeLowersDefNoValue(t *testing.T) {
 	if !strings.Contains(rendered, `rt.InternVar("`) {
 		t.Fatalf("expected (def x) to intern via rt.InternVar\n--- go ---\n%s", rendered)
 	}
-	if strings.Contains(rendered, ".SetRoot(") {
-		t.Fatalf("expected no-value def to leave root unaffected (no SetRoot)\n--- go ---\n%s", rendered)
+	if strings.Contains(rendered, "rt.SetVarRoot(") {
+		t.Fatalf("expected no-value def to leave root unaffected (no SetVarRoot)\n--- go ---\n%s", rendered)
 	}
 }
 
@@ -815,14 +815,14 @@ func TestLowerGoBridgeDefEmitsDynamicMeta(t *testing.T) {
 	result := lowerGo(t, fn, ":bridge")
 
 	rendered := bindAndRenderGoDecl(t, result)
-	if !strings.Contains(rendered, "rt.ApplyVarMeta(") {
-		t.Fatalf("expected rt.ApplyVarMeta for ^:dynamic def\n--- go ---\n%s", rendered)
+	if !strings.Contains(rendered, "rt.ApplyVarMetaV(") {
+		t.Fatalf("expected rt.ApplyVarMetaV for ^:dynamic def\n--- go ---\n%s", rendered)
 	}
 	if !strings.Contains(rendered, `vm.Keyword("dynamic")`) {
 		t.Fatalf("expected emitted meta to carry :dynamic\n--- go ---\n%s", rendered)
 	}
-	if !strings.Contains(rendered, ".SetRoot(vm.Int(1))") {
-		t.Fatalf("expected def value to still set the var root\n--- go ---\n%s", rendered)
+	if !strings.Contains(rendered, "rt.SetVarRoot(") {
+		t.Fatalf("expected def value to still set the var root via rt.SetVarRoot\n--- go ---\n%s", rendered)
 	}
 }
 
@@ -836,28 +836,28 @@ func TestLowerGoBridgeDefEmitsDocstringMeta(t *testing.T) {
 	result := lowerGo(t, fn, ":bridge")
 
 	rendered := bindAndRenderGoDecl(t, result)
-	if !strings.Contains(rendered, "rt.ApplyVarMeta(") ||
+	if !strings.Contains(rendered, "rt.ApplyVarMetaV(") ||
 		!strings.Contains(rendered, `vm.Keyword("doc")`) ||
 		!strings.Contains(rendered, `vm.String("the doc")`) {
 		t.Fatalf("expected docstring to lower into :doc meta\n--- go ---\n%s", rendered)
 	}
-	if !strings.Contains(rendered, ".SetRoot(vm.Int(1))") {
-		t.Fatalf("expected def value to still set the var root\n--- go ---\n%s", rendered)
+	if !strings.Contains(rendered, "rt.SetVarRoot(") {
+		t.Fatalf("expected def value to still set the var root via rt.SetVarRoot\n--- go ---\n%s", rendered)
 	}
 }
 
 func TestLowerGoBridgeDefNoMetaOmitsApplyVarMeta(t *testing.T) {
 	ensureLoader()
 
-	// A plain (def x v) carries no metadata, so no rt.ApplyVarMeta call should
-	// be emitted — only intern + SetRoot.
+	// A plain (def x v) carries no metadata, so no rt.ApplyVarMetaV call should
+	// be emitted — only intern + SetVarRoot.
 	fn := buildLispIR(t, `(defn d [] (def plainmetav 1))`)
 	optimizeLispIR(t, fn)
 	result := lowerGo(t, fn, ":bridge")
 
 	rendered := bindAndRenderGoDecl(t, result)
-	if strings.Contains(rendered, "rt.ApplyVarMeta(") {
-		t.Fatalf("plain def must not emit rt.ApplyVarMeta\n--- go ---\n%s", rendered)
+	if strings.Contains(rendered, "rt.ApplyVarMetaV(") {
+		t.Fatalf("plain def must not emit rt.ApplyVarMetaV\n--- go ---\n%s", rendered)
 	}
 }
 
@@ -1558,5 +1558,51 @@ func TestLowerGoNestedCapturedClosurePrefixesAreLexical(t *testing.T) {
 	outer, inner := ms[0][1], ms[1][1]
 	if inner == outer || !strings.HasPrefix(inner, outer) {
 		t.Fatalf("inner closure prefix %q must lexically extend outer %q (else inner param can shadow captured outer param)\n--- go ---\n%s", inner, outer, rendered)
+	}
+}
+
+// A valued top-level (def RULE (combinator ...)) in a lowered ns emits a
+// __init_RULE fn + a RegisterGoVarInits init(), and its body's call to a
+// sibling combinator devirtualizes to a direct Go call (no InvokeValueEC).
+func TestLowerNsToGoLowersTopLevelDefClosure(t *testing.T) {
+	ensureLoader()
+	v := runLispExpr(t,
+		`(do (create-ns (quote deftest))
+		     (intern (quote deftest) (quote chr))
+		     (intern (quote deftest) (quote TOP))
+		     (ir.passes.pipeline/lower-ns-to-go "deftest" (quote deftest)
+		       [(quote (defn chr [c] (fn [s pos] pos)))
+		        (quote (def TOP (chr "a")))]))`)
+	got := string(v.(vm.String))
+	if !strings.Contains(got, "func __init_TOP") {
+		t.Fatalf("expected __init_TOP fn in:\n%s", got)
+	}
+	if !strings.Contains(got, "RegisterGoVarInits") {
+		t.Fatalf("expected RegisterGoVarInits init() in:\n%s", got)
+	}
+	// The def body's (chr "a") must lower to a direct chr(...) call, not the
+	// dynamic trampoline.
+	if !strings.Contains(got, "chr(") {
+		t.Fatalf("expected direct chr(...) call in def-init body:\n%s", got)
+	}
+	if regexp.MustCompile(`InvokeValueEC\([^\n]*LookupVar\([^\n]*"chr"`).MatchString(got) {
+		t.Fatalf("def-init body must NOT dynamically dispatch chr:\n%s", got)
+	}
+}
+
+// A value-position :load-var (a def-closure body reading a sibling rule's var)
+// lowers to rt.CachedVarDeref (memoized *vm.Var), not a per-access LookupVar.
+func TestLowerNsToGoCachesValuePositionVarDeref(t *testing.T) {
+	ensureLoader()
+	v := runLispExpr(t,
+		`(do (create-ns (quote derefcache))
+		     (intern (quote derefcache) (quote sibling))
+		     (intern (quote derefcache) (quote RULE))
+		     (ir.passes.pipeline/lower-ns-to-go "derefcache" (quote derefcache)
+		       [(quote (defn sibling [s pos] pos))
+		        (quote (def RULE (fn [s pos] (sibling s pos))))]))`)
+	got := string(v.(vm.String))
+	if !strings.Contains(got, "CachedVarDeref") && !strings.Contains(got, "sibling(") {
+		t.Fatalf("expected sibling ref to be a direct call or CachedVarDeref, got:\n%s", got)
 	}
 }
