@@ -615,10 +615,16 @@ func NewArrayMap(kvs []Value) *PersistentMap {
 	if len(kvs)%2 != 0 {
 		return EmptyPersistentMap
 	}
-	m := &PersistentMap{order: make([]Value, 0, len(kvs)/2)}
+	// Build on a transient to avoid a HAMT-node clone per pair (every map
+	// literal flows through here). Orderless by design: Clojure map order is an
+	// emergent array-map implementation detail (dropped past 8 entries), not a
+	// guarantee — let-go treats maps as unordered (cf. Go/Abseil map-iteration
+	// randomization). Order-dependent suite tests get :lg reader-cond branches.
+	t := NewTransientMap(EmptyPersistentMap)
 	for i := 0; i < len(kvs); i += 2 {
-		m = m.Assoc(kvs[i], kvs[i+1]).(*PersistentMap)
+		t, _ = t.Assoc(kvs[i], kvs[i+1])
 	}
+	m, _ := t.Persistent()
 	return m
 }
 

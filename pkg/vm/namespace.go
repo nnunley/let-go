@@ -270,15 +270,15 @@ func (n *Namespace) LookupOrAdd(symbol Symbol) Value {
 
 func (n *Namespace) Lookup(symbol Symbol) Value {
 	noteLookup(n.name, string(symbol))
-	sns, sym := symbol.Namespaced()
-	if sns == NIL {
-		if v := n.localVar(sym.(Symbol)); v != nil {
+	sns, sym, hasNS := symbol.NamespacedRaw()
+	if !hasNS {
+		if v := n.localVar(sym); v != nil {
 			return v
 		}
 		// Unqualified miss: search refers. Snapshot first so we follow each
 		// refer's target via its own lock, never holding n's lock across.
 		for _, ref := range n.refersSnapshot() {
-			if v := ref.ns.localVar(sym.(Symbol)); v != nil {
+			if v := ref.ns.localVar(sym); v != nil {
 				if v.isPrivate {
 					return NIL
 				}
@@ -288,16 +288,16 @@ func (n *Namespace) Lookup(symbol Symbol) Value {
 		return NIL
 	}
 	// Alias-qualified resolution via aliases
-	if target, ok := n.aliasFor(sns.(Symbol)); ok {
-		v := target.localVar(sym.(Symbol))
+	if target, ok := n.aliasFor(sns); ok {
+		v := target.localVar(sym)
 		if v == nil && nsLookup != nil {
 			// Alias may point to a placeholder namespace created before source
 			// load completed. Re-resolve by name so runtime loader can
 			// materialize the namespace on demand, then retry the symbol lookup.
 			if loaded := nsLookup(target.Name()); loaded != nil {
 				target = loaded
-				n.cacheAlias(sns.(Symbol), loaded)
-				v = target.localVar(sym.(Symbol))
+				n.cacheAlias(sns, loaded)
+				v = target.localVar(sym)
 			}
 		}
 		if v == nil || v.isPrivate {
@@ -307,8 +307,8 @@ func (n *Namespace) Lookup(symbol Symbol) Value {
 	}
 	// Fallback: direct namespace lookup from global registry
 	if nsLookup != nil {
-		if target := nsLookup(string(sns.(Symbol))); target != nil {
-			v := target.localVar(sym.(Symbol))
+		if target := nsLookup(string(sns)); target != nil {
+			v := target.localVar(sym)
 			// A private var is visible to a fully-qualified reference only from
 			// within its own namespace — `my.ns/-priv` is legal inside my.ns
 			// (e.g. a macro that expands to a qualified call to a private helper
@@ -319,8 +319,8 @@ func (n *Namespace) Lookup(symbol Symbol) Value {
 		}
 	}
 	// Fallback via refers
-	if refer, ok := n.referFor(sns.(Symbol)); ok {
-		v := refer.ns.localVar(sym.(Symbol))
+	if refer, ok := n.referFor(sns); ok {
+		v := refer.ns.localVar(sym)
 		if v == nil || v.isPrivate {
 			return NIL
 		}
@@ -328,7 +328,7 @@ func (n *Namespace) Lookup(symbol Symbol) Value {
 			if refer.only == nil {
 				return NIL
 			}
-			if _, ok := refer.only[sym.(Symbol)]; !ok {
+			if _, ok := refer.only[sym]; !ok {
 				return NIL
 			}
 		}
