@@ -1589,3 +1589,20 @@ func TestLowerNsToGoLowersTopLevelDefClosure(t *testing.T) {
 		t.Fatalf("def-init body must NOT dynamically dispatch chr:\n%s", got)
 	}
 }
+
+// A value-position :load-var (a def-closure body reading a sibling rule's var)
+// lowers to rt.CachedVarDeref (memoized *vm.Var), not a per-access LookupVar.
+func TestLowerNsToGoCachesValuePositionVarDeref(t *testing.T) {
+	ensureLoader()
+	v := runLispExpr(t,
+		`(do (create-ns (quote derefcache))
+		     (intern (quote derefcache) (quote sibling))
+		     (intern (quote derefcache) (quote RULE))
+		     (ir.passes.pipeline/lower-ns-to-go "derefcache" (quote derefcache)
+		       [(quote (defn sibling [s pos] pos))
+		        (quote (def RULE (fn [s pos] (sibling s pos))))]))`)
+	got := string(v.(vm.String))
+	if !strings.Contains(got, "CachedVarDeref") && !strings.Contains(got, "sibling(") {
+		t.Fatalf("expected sibling ref to be a direct call or CachedVarDeref, got:\n%s", got)
+	}
+}
