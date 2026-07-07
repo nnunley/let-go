@@ -336,6 +336,24 @@
   (let [v (System/getenv "LG_STRESS_BASELINE")]
     (if (and v (not= v "")) v nil)))
 
+;; LG_STRESS_REBASELINE=1 flips the gate into WRITER mode: instead of
+;; comparing against the committed baseline it rewrites it from this run's
+;; census (counts + failure buckets + capture date), preserving the
+;; existing :how/:note prose. `make ir-stress-rebaseline` is the entry
+;; point — the baseline is tool-maintained, never hand-edited.
+(def rebaseline?
+  (= (System/getenv "LG_STRESS_REBASELINE") "1"))
+
+(defn- render-baseline [entry]
+  ;; Stable, diff-friendly EDN layout (round-trips via read-string).
+  (str "{:failed " (:failed entry)
+       "\n :total " (:total entry)
+       "\n :passed " (:passed entry)
+       "\n :captured " (pr-str (:captured entry))
+       "\n :how " (pr-str (:how entry))
+       "\n :note\n " (pr-str (:note entry))
+       "\n :buckets\n " (pr-str (:buckets entry)) "}\n"))
+
 (def log-entries (atom []))
 
 ;; --- per-pass cost aggregation (LG_STRESS_TOPK) ---------------------------
@@ -776,7 +794,27 @@
         ;; --- ITER-0021 coverage-ratchet gate (reuses THIS fallback census;
         ;; no separate fallback detector). Active only when LG_STRESS_BASELINE
         ;; is set; fails the run if failures grew vs the committed baseline. ---
-        (when gate-baseline-path
+        (when (and gate-baseline-path rebaseline?)
+          (let [failed (- total oks)
+                prev   (try (read-string (slurp gate-baseline-path)) (catch e nil))
+                entry  {:failed failed
+                        :total total
+                        :passed oks
+                        ;; Injected by the Makefile (date +%F): a `(. (now) …)`
+                        ;; method invoke here would itself fail to lower and
+                        ;; show up as a corpus failure (this script is corpus).
+                        :captured (or (System/getenv "LG_STRESS_DATE")
+                                      (:captured prev)
+                                      "unknown")
+                        :how (or (:how prev)
+                                 "LG_STRESS_PASSES=1 make ir-stress (corpus = every shipped/test/example .lg)")
+                        :note (or (:note prev) "")
+                        :buckets all-errs}]
+            (spit gate-baseline-path (render-baseline entry))
+            (println (str "\n=== Coverage ratchet REBASELINED (" gate-baseline-path ") ==="))
+            (println (str "wrote :failed " failed " :total " total " :passed " oks))))
+
+        (when (and gate-baseline-path (not rebaseline?))
           (let [failed      (- total oks)
                 baseline    (try (read-string (slurp gate-baseline-path)) (catch e nil))
                 base-failed (or (:failed baseline) 0)
