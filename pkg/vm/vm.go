@@ -38,9 +38,6 @@ const (
 	OP_RECUR    // loop recurse RECUR (offset int32, argc int32)
 	OP_RECUR_FN // function recurse REF (argc int32)
 
-	OP_TRACE_ENABLE  // enable tracing
-	OP_TRACE_DISABLE // disable tracing
-
 	OP_MAKE_MULTI_ARITY // make multi-arity function (n int32)
 	OP_TAIL_CALL        // like OP_INVOKE but re-uses the frame
 
@@ -86,8 +83,6 @@ func OpcodeToString(op int32) string {
 		"PUSH_CLOSEDOVER",
 		"RECUR",
 		"RECUR_FN",
-		"TRACE_ENABLE",
-		"TRACE_DISABLE",
 		"MAKE_MULTI_ARITY",
 		"TAIL_CALL",
 		"TRY_PUSH",
@@ -525,6 +520,14 @@ func (f *Frame) RunProtected() (result Value, err error) {
 }
 
 func (f *Frame) Run() (Value, error) {
+	// Dynamically-scoped tracing (*lg-trace*). Coarse gate first: TraceArmed is
+	// false until *lg-trace* is first set truthy, so the precise per-frame Deref
+	// only runs once tracing has been used. When *lg-trace* resolves truthy in
+	// this frame's context, trace this frame — and, because the binding
+	// propagates down the shared stack, every frame it calls.
+	if TraceArmed.Load() && TraceVar != nil && IsTruthy(f.ec.deref(TraceVar)) {
+		f.debug = true
+	}
 	if f.debug {
 		fmt.Print("run", f.args, "\n")
 		f.code.Debug()
@@ -548,16 +551,6 @@ func (f *Frame) Run() (Value, error) {
 		switch inst & 0xff {
 		case OP_NOOP:
 			f.ip++
-
-		case OP_TRACE_ENABLE:
-			fmt.Print("# tracing frame, args: ", f.args, "\n")
-			f.code.Debug()
-			f.debug = true
-			f.ip += 1
-
-		case OP_TRACE_DISABLE:
-			f.debug = false
-			f.ip += 1
 
 		case OP_LOAD_CONST:
 			idx := f.code.code[f.ip+1]
@@ -849,6 +842,9 @@ func (f *Frame) Run() (Value, error) {
 			if !f.ec.setBinding(varrd, val) {
 				varrd.SetRoot(val)
 			}
+			// Arm frame tracing when *lg-trace* is set truthy (pointer-compared;
+			// no-op for every other var).
+			armTraceIfTruthy(varrd, val)
 			err = f.push(varr)
 			if err != nil {
 				return NIL, NewExecutionError("SET_VAR push var failed").Wrap(err)

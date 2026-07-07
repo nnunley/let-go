@@ -141,6 +141,9 @@ func (ec *ExecContext) deref(v *Var) Value {
 func (ec *ExecContext) pushBinding(v *Var, val Value) {
 	v.isDynamic.Store(true)
 	ec.orRoot().bindings.push(v, val)
+	// Arm frame tracing when *lg-trace* is bound truthy — e.g.
+	// (binding [*lg-trace* true] ...). Pointer-compared; no-op otherwise.
+	armTraceIfTruthy(v, val)
 }
 
 func (ec *ExecContext) popBinding(v *Var) {

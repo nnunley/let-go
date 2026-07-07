@@ -808,23 +808,8 @@ func compilerInit() {
 		"let*":  letCompiler,
 		"loop*": loopCompiler,
 		"recur": recurCompiler,
-		"trace": traceCompiler,
 		"try":   tryCompiler,
 	}
-}
-
-func traceCompiler(c *Context, form vm.Value) error {
-	args := form.(*vm.List).Next()
-	c.emit(vm.OP_TRACE_ENABLE)
-	for args != nil {
-		err := c.compileForm(args.First())
-		if err != nil {
-			return NewCompileError("compiling trace arguments").Wrap(err)
-		}
-		args = args.Next()
-	}
-	c.emit(vm.OP_TRACE_DISABLE)
-	return nil
 }
 
 func tryCompiler(c *Context, form vm.Value) error {

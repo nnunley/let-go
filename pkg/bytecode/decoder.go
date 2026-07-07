@@ -52,13 +52,24 @@ func DecodeToExecUnitWithParent(r io.Reader, resolve VarResolver, parent *vm.Con
 	}
 	d.flags = flags
 
-	if version == 1 {
-		return d.decodeToExecUnitV1(parent)
+	var unit *ExecUnit
+	switch version {
+	case 1:
+		unit, err = d.decodeToExecUnitV1(parent)
+	case 2, 3:
+		// v3 shares v2's wire format; only opcode numbering differs, and that
+		// lives in the chunk code arrays remapped below for v1/v2.
+		unit, err = d.decodeToExecUnitV2(parent)
+	default:
+		return nil, fmt.Errorf("unsupported LGB version %d", version)
 	}
-	if version == 2 {
-		return d.decodeToExecUnitV2(parent)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("unsupported LGB version %d", version)
+	if version < 3 {
+		remapLegacyChunks(d.chunks)
+	}
+	return unit, nil
 }
 
 // decodeToExecUnitV1 is the frozen v1 decode path. Do not modify.
@@ -224,13 +235,26 @@ func DecodeWithResolver(r io.Reader, resolve VarResolver) (*Module, error) {
 		return nil, err
 	}
 	d.flags = flags
-	if version == 1 {
-		return d.readModuleV1()
+	var mod *Module
+	switch version {
+	case 1:
+		mod, err = d.readModuleV1()
+	case 2, 3:
+		// v3 shares v2's wire format; opcode renumbering is remapped below.
+		mod, err = d.readModuleV2()
+	default:
+		return nil, fmt.Errorf("unsupported LGB version %d", version)
 	}
-	if version == 2 {
-		return d.readModuleV2()
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("unsupported LGB version %d", version)
+	// readModuleV2 stamps Version: 2 internally; v3 shares that reader, so record
+	// the true wire version here.
+	mod.Version = version
+	if version < 3 {
+		remapLegacyChunks(d.chunks)
+	}
+	return mod, nil
 }
 
 type decoder struct {

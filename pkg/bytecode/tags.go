@@ -4,7 +4,13 @@ package bytecode
 var Magic = [4]byte{'L', 'G', 'B', 0x01}
 
 // FormatVersion is the current serialization format version.
-const FormatVersion uint16 = 2
+//
+// v3 (2026-07): retired OP_TRACE_ENABLE/OP_TRACE_DISABLE, renumbering every
+// opcode >= 20 down by 2. The wire format is otherwise byte-identical to v2 —
+// only the opcode numbers packed into chunk code arrays changed. The decoder
+// still loads v1/v2 bundles by remapping their opcode words on read (see
+// opcode_migration.go).
+const FormatVersion uint16 = 3
 
 // Module flags.
 const (
