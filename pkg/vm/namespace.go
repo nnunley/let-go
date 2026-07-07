@@ -68,6 +68,32 @@ func SetCoreNamespace(ns *Namespace) {
 	coreNamespacePtr = ns
 }
 
+// lgBaselineNamespaces are the lg-specific extra namespaces (let-go.core,
+// let-go.types, …) auto-refer'd alongside clojure.core. Like clojure.core each
+// is a lowest-priority resolution baseline: an explicit refer shadows it. Set by
+// rt init via AddBaselineNamespace.
+var lgBaselineNamespaces []*Namespace
+
+// AddBaselineNamespace registers ns as an auto-refer'd resolution baseline.
+func AddBaselineNamespace(ns *Namespace) {
+	lgBaselineNamespaces = append(lgBaselineNamespaces, ns)
+}
+
+// isBaselineNS reports whether ns is an auto-refer'd resolution baseline
+// (clojure.core or an lg-baseline like let-go.core/types) — deferred behind
+// explicit refers in Lookup.
+func isBaselineNS(ns *Namespace) bool {
+	if coreNamespacePtr != nil && ns == coreNamespacePtr {
+		return true
+	}
+	for _, b := range lgBaselineNamespaces {
+		if ns == b {
+			return true
+		}
+	}
+	return false
+}
+
 // --- brief single-op locked accessors -------------------------------------
 // Each takes its own lock for exactly one map op and returns a copy/pointer,
 // never a live map reference, so callers never iterate an unguarded map.
@@ -284,29 +310,30 @@ func (n *Namespace) Lookup(symbol Symbol) Value {
 		// treat the core refer as a lowest-priority baseline: return the first
 		// matching explicit refer, honoring :all / :only, and only fall back to
 		// core if no explicit refer provides the symbol.
-		var coreHit *Var
+		var baselineHit *Var
 		for _, ref := range n.refersSnapshot() {
 			v := ref.ns.localVar(sym.(Symbol))
 			if v == nil || v.isPrivate {
 				continue
 			}
-			isCore := coreNamespacePtr != nil && ref.ns == coreNamespacePtr
-			// The clojure.core refer is always the full auto-refer :all
-			// baseline: an explicit (:require [clojure.core :refer [...]]) is
-			// additive, never restrictive (core is trimmed via :refer-clojure
-			// :exclude, not here). For every OTHER refer, honor :refer [syms] —
-			// an :only refer contributes a symbol only when it is listed.
-			if !isCore && !ref.all && (ref.only == nil || !ref.only[sym.(Symbol)]) {
+			isBaseline := isBaselineNS(ref.ns)
+			// The clojure.core / let-go.core refers are always the full
+			// auto-refer :all baseline: an explicit (:require [clojure.core
+			// :refer [...]]) is additive, never restrictive (core is trimmed via
+			// :refer-clojure :exclude, not here). For every OTHER refer, honor
+			// :refer [syms] — an :only refer contributes a symbol only when
+			// it is listed.
+			if !isBaseline && !ref.all && (ref.only == nil || !ref.only[sym.(Symbol)]) {
 				continue
 			}
-			if isCore {
-				coreHit = v
+			if isBaseline {
+				baselineHit = v
 				continue
 			}
 			return v
 		}
-		if coreHit != nil {
-			return coreHit
+		if baselineHit != nil {
+			return baselineHit
 		}
 		return NIL
 	}
