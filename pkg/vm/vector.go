@@ -169,6 +169,16 @@ func (l ArrayVector) Seq() Seq {
 	return &ArrayVectorSeq{vec: l, i: 0}
 }
 
+// SeqFrom returns a seq over v starting at index i, or nil when i is past
+// the end. This lets callers step into a vector (e.g. next/rest fast
+// paths) with a single allocation instead of Seq()+Next().
+func (l ArrayVector) SeqFrom(i int) Seq {
+	if i >= len(l) {
+		return nil
+	}
+	return &ArrayVectorSeq{vec: l, i: i}
+}
+
 // ArrayVectorSeq is a lightweight seq view over an ArrayVector.
 // The embedded chunk lets ChunkedFirst return a pointer into this
 // already-heap-allocated seq node instead of allocating a fresh *ArrayChunk

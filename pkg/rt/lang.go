@@ -402,6 +402,19 @@ func AllNSes() map[string]*vm.Namespace {
 	return result
 }
 
+// RemoveNS drops a namespace from the registry so a subsequent require/def
+// materializes a FRESH Namespace (and fresh Vars). Test-isolation helper:
+// vars are interned process-globally, so anything attached to them (e.g.
+// watches added by a test) survives re-running a suite in the same process
+// unless its namespaces are removed between runs.
+func RemoveNS(name string) {
+	canonical := resolveNSAlias(name)
+	nsMu.Lock()
+	delete(nsRegistry, canonical)
+	delete(nsNeedsLoad, canonical)
+	nsMu.Unlock()
+}
+
 func FuzzyNamespacedSymbolLookup(currentNS *vm.Namespace, s vm.Symbol) []vm.Symbol {
 	sns := s.Namespace()
 	var ns *vm.Namespace
@@ -2751,6 +2764,13 @@ func installLangNS() {
 		if vs[0] == vm.NIL {
 			return vm.NIL, nil
 		}
+		// ArrayVector fast path: index the flat slice directly, no seq alloc.
+		if av, ok := vs[0].(vm.ArrayVector); ok {
+			if len(av) == 0 {
+				return vm.NIL, nil
+			}
+			return av[0], nil
+		}
 		if seq, ok := vs[0].(vm.Seq); ok {
 			return seq.First(), nil
 		}
@@ -2770,6 +2790,13 @@ func installLangNS() {
 		}
 		if vs[0] == vm.NIL {
 			return vm.NIL, nil
+		}
+		// ArrayVector fast path: index the flat slice directly, no seq alloc.
+		if av, ok := vs[0].(vm.ArrayVector); ok {
+			if len(av) < 2 {
+				return vm.NIL, nil
+			}
+			return av[1], nil
 		}
 		seq, err := seqOf(vs[0])
 		if err != nil {
@@ -2792,6 +2819,14 @@ func installLangNS() {
 		if vs[0] == vm.NIL {
 			return vm.NIL, nil
 		}
+		// ArrayVector fast path: step in with one alloc instead of Seq()+Next().
+		if av, ok := vs[0].(vm.ArrayVector); ok {
+			n := av.SeqFrom(1)
+			if n == nil {
+				return vm.NIL, nil
+			}
+			return n, nil
+		}
 		seq, err := seqOf(vs[0])
 		if err != nil {
 			return vm.NIL, fmt.Errorf("next expected Seq")
@@ -2812,6 +2847,14 @@ func installLangNS() {
 		}
 		if vs[0] == vm.NIL {
 			return vm.EmptyList, nil
+		}
+		// ArrayVector fast path: step in with one alloc instead of Seq()+More().
+		if av, ok := vs[0].(vm.ArrayVector); ok {
+			n := av.SeqFrom(1)
+			if n == nil {
+				return vm.EmptyList, nil
+			}
+			return n, nil
 		}
 		s, err := seqOf(vs[0])
 		if err != nil {
@@ -3121,6 +3164,32 @@ func installLangNS() {
 				}
 			}
 		}
+		// ArrayVector fast path: flat slice with O(1) indexing — reduce by
+		// direct index with zero seq/chunk allocation instead of via seqOf.
+		if av, ok := vs[sidx].(vm.ArrayVector); ok {
+			var acc vm.Value
+			i := 0
+			if len(vs) == 3 {
+				acc = vs[1]
+			} else {
+				acc = av[0]
+				i = 1
+			}
+			fargs := []vm.Value{nil, nil}
+			for ; i < len(av); i++ {
+				fargs[0] = acc
+				fargs[1] = av[i]
+				res, err := ec.Invoke(mfn, fargs)
+				if err != nil {
+					return vm.NIL, err
+				}
+				if r, ok := res.(*vm.Reduced); ok {
+					return r.Deref(), nil
+				}
+				acc = res
+			}
+			return acc, nil
+		}
 		seq, err := seqOf(vs[sidx])
 		if err != nil {
 			return vm.NIL, fmt.Errorf("reduce expected Seq")
@@ -3145,6 +3214,10 @@ func installLangNS() {
 			acc = seq.First()
 			seq = seq.Next()
 		}
+		// Reused two-arg buffer (same pattern as `some`'s fargs): avoids a
+		// fresh []vm.Value per element — the single largest allocation site
+		// in seq-based reduce.
+		fargs := []vm.Value{nil, nil}
 		for seq != nil {
 			// Chunked fast path: when the source exposes a chunk, walk via
 			// Nth in a tight inner loop and advance one chunk at a time. This
@@ -3154,7 +3227,9 @@ func installLangNS() {
 				c := cs.ChunkedFirst()
 				n := c.ChunkCount()
 				for i := 0; i < n; i++ {
-					acc, err = ec.Invoke(mfn, []vm.Value{acc, c.Nth(i)})
+					fargs[0] = acc
+					fargs[1] = c.Nth(i)
+					acc, err = ec.Invoke(mfn, fargs)
 					if err != nil {
 						return vm.NIL, err
 					}
@@ -3165,7 +3240,9 @@ func installLangNS() {
 				seq = cs.ChunkedNext()
 				continue
 			}
-			acc, err = ec.Invoke(mfn, []vm.Value{acc, seq.First()})
+			fargs[0] = acc
+			fargs[1] = seq.First()
+			acc, err = ec.Invoke(mfn, fargs)
 			if err != nil {
 				return vm.NIL, err
 			}
@@ -3453,9 +3530,23 @@ func installLangNS() {
 	})
 
 	concat, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		var ret []vm.Value
+		// Pre-size for the ArrayVector args (flat slices with known length)
+		// so their direct appends below don't regrow ret.
+		presize := 0
+		for i := range vs {
+			if av, ok := vs[i].(vm.ArrayVector); ok {
+				presize += len(av)
+			}
+		}
+		ret := make([]vm.Value, 0, presize)
 		for i := range vs {
 			if vs[i] == vm.NIL {
+				continue
+			}
+			// ArrayVector fast path: bulk-append the flat slice — no seq,
+			// no chunk, no per-element successor allocation.
+			if av, ok := vs[i].(vm.ArrayVector); ok {
+				ret = append(ret, av...)
 				continue
 			}
 			vseq, err := seqOf(vs[i])
