@@ -1,6 +1,6 @@
 {:failed 11
- :total 2366
- :passed 2355
+ :total 2367
+ :passed 2356
  :captured "2026-07-06"
  :how "LG_STRESS_PASSES=1 make ir-stress (corpus = every shipped/test/example .lg)"
  :note
