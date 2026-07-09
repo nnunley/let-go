@@ -42,6 +42,7 @@ var PersistentMapType *thePersistentMapType = &thePersistentMapType{}
 // hmapNode is the internal node interface for the HAMT.
 type hmapNode interface {
 	find(shift uint, hash uint32, key Value) (Value, bool)
+	findKeyword(shift uint, hash uint32, k Keyword) (Value, bool)
 	assoc(shift uint, hash uint32, key Value, val Value, addedLeaf *bool) hmapNode
 	dissoc(shift uint, hash uint32, key Value) hmapNode
 	nodeSeq() []MapEntry
@@ -157,6 +158,25 @@ func (n *hmapBitmapNode) find(shift uint, hash uint32, key Value) (Value, bool) 
 	return nil, false
 }
 
+func (n *hmapBitmapNode) findKeyword(shift uint, hash uint32, k Keyword) (Value, bool) {
+	bit := hmapBitpos(hash, shift)
+	if n.bitmap&bit == 0 {
+		return nil, false
+	}
+	idx := hmapIndex(n.bitmap, bit)
+	keyOrNil := n.array[2*idx]
+	valOrNode := n.array[2*idx+1]
+	if keyOrNil == nil {
+		return valOrNode.(hmapNode).findKeyword(shift+hmapShift, hash, k)
+	}
+	// Box-free compare: a keyword only ever equals a keyword with the same
+	// string; non-keyword stored keys (incl. hash collisions) never match.
+	if sk, ok := keyOrNil.(Keyword); ok && sk == k {
+		return valOrNode.(Value), true
+	}
+	return nil, false
+}
+
 func (n *hmapBitmapNode) assoc(shift uint, hash uint32, key Value, val Value, addedLeaf *bool) hmapNode {
 	bit := hmapBitpos(hash, shift)
 	idx := hmapIndex(n.bitmap, bit)
@@ -262,6 +282,9 @@ func (n *hmapBitmapNode) nodeSeq() []MapEntry {
 			entries = append(entries, valOrNode.(hmapNode).nodeSeq()...)
 		}
 	}
+	if allocAttrEnabled {
+		recordAllocAttr(akMapNodeSeq, len(entries)*32+24)
+	}
 	return entries
 }
 
@@ -284,6 +307,9 @@ func (n *hmapBitmapNode) each(fn func(key, val Value) bool) bool {
 }
 
 func (n *hmapBitmapNode) cloneAndSet(i int, val any) *hmapBitmapNode {
+	if allocAttrEnabled {
+		recordAllocAttr(akMapCloneAndSet, len(n.array)*16+48)
+	}
 	newArray := make([]any, len(n.array))
 	copy(newArray, n.array)
 	newArray[i] = val
@@ -291,6 +317,9 @@ func (n *hmapBitmapNode) cloneAndSet(i int, val any) *hmapBitmapNode {
 }
 
 func (n *hmapBitmapNode) cloneAndSet2(i int, a any, j int, b any) *hmapBitmapNode {
+	if allocAttrEnabled {
+		recordAllocAttr(akMapCloneAndSet, len(n.array)*16+48)
+	}
 	newArray := make([]any, len(n.array))
 	copy(newArray, n.array)
 	newArray[i] = a
@@ -447,6 +476,16 @@ func (n *hmapCollisionNode) find(shift uint, hash uint32, key Value) (Value, boo
 	return n.array[idx+1].(Value), true
 }
 
+func (n *hmapCollisionNode) findKeyword(shift uint, hash uint32, k Keyword) (Value, bool) {
+	// same linear scan as find(), comparing keys typed:
+	for i := 0; i < len(n.array); i += 2 {
+		if sk, ok := n.array[i].(Keyword); ok && sk == k {
+			return n.array[i+1].(Value), true
+		}
+	}
+	return nil, false
+}
+
 func (n *hmapCollisionNode) assoc(shift uint, hash uint32, key Value, val Value, addedLeaf *bool) hmapNode {
 	if hash == n.hash {
 		// Same hash bucket
@@ -585,10 +624,16 @@ func NewArrayMap(kvs []Value) *PersistentMap {
 	if len(kvs)%2 != 0 {
 		return EmptyPersistentMap
 	}
-	m := &PersistentMap{order: make([]Value, 0, len(kvs)/2)}
+	// Build on a transient to avoid a HAMT-node clone per pair (every map
+	// literal flows through here). Orderless by design: Clojure map order is an
+	// emergent array-map implementation detail (dropped past 8 entries), not a
+	// guarantee — let-go treats maps as unordered (cf. Go/Abseil map-iteration
+	// randomization). Order-dependent suite tests get :lg reader-cond branches.
+	t := NewTransientMap(EmptyPersistentMap)
 	for i := 0; i < len(kvs); i += 2 {
-		m = m.Assoc(kvs[i], kvs[i+1]).(*PersistentMap)
+		t, _ = t.Assoc(kvs[i], kvs[i+1])
 	}
+	m, _ := t.Persistent()
 	return m
 }
 
@@ -758,6 +803,21 @@ func (m *PersistentMap) ValueAtOr(key Value, dflt Value) Value {
 	return val
 }
 
+func (m *PersistentMap) ValueAtKeyword(k Keyword) Value {
+	return m.ValueAtKeywordOr(k, NIL)
+}
+
+func (m *PersistentMap) ValueAtKeywordOr(k Keyword, dflt Value) Value {
+	if m.root == nil {
+		return dflt
+	}
+	val, ok := m.root.findKeyword(0, k.Hash(), k)
+	if !ok {
+		return dflt
+	}
+	return val
+}
+
 // --- Keyed interface ---
 
 func (m *PersistentMap) Contains(key Value) Boolean {
@@ -811,6 +871,9 @@ func (m *PersistentMap) entries() []Value {
 		return result
 	}
 	mes := m.root.nodeSeq()
+	if allocAttrEnabled {
+		recordAllocAttr(akMapEntries, len(mes)*16+24)
+	}
 	result := make([]Value, len(mes))
 	for i, e := range mes {
 		result[i] = e

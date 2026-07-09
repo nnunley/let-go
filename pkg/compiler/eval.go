@@ -6,7 +6,6 @@
 package compiler
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -107,10 +106,41 @@ func evalInit() {
 	if err != nil {
 		panic("core.lg compilation failed: " + err.Error())
 	}
+	// Bundle-path parity (purify-clojure-core ②): the lg baseline namespaces
+	// (let-go.core, …) are auto-refer'd into every namespace but never explicitly
+	// required, so the on-demand loader never runs their bodies. Without this,
+	// their .lg-defined lg-isms (str-join, spy, range?, …) stay unbound and
+	// unqualified use fails to resolve under -tags bootstrap — even though it
+	// works on the bundle path (see loadPrecompiledBundle's eager chunk-run).
+	// Compile their embedded source eagerly, right after core. Go-only baselines
+	// (let-go.types, whose predicates are Def'd in Go) have no source and are
+	// skipped, keeping unqualified imports working without code changes.
+	for _, name := range rt.LgBaselineNSNames() {
+		src, ok := rt.EmbeddedSource(name)
+		if !ok {
+			continue
+		}
+		bc := NewCompiler(consts, rt.NS(name))
+		bc.SetSource("<embedded:" + name + ">")
+		if _, _, berr := bc.CompileMultiple(strings.NewReader(src)); berr != nil {
+			panic(name + " compilation failed: " + berr.Error())
+		}
+	}
 	postCoreInit()
 }
 
 func loadPrecompiledBundle() error {
+	// Namespaces that exist BEFORE decode are native-backed (installers run
+	// at package init). If the bundle also carries a chunk for one of them
+	// — a HYBRID namespace like async (native fns + lg-source macros) —
+	// lazy loading is broken for it: qualified symbol resolution finds the
+	// already-registered ns and its decoded nil stubs without ever
+	// triggering the loader. Those chunks must run eagerly (below).
+	preexisting := map[string]bool{}
+	for name := range rt.AllNSes() {
+		preexisting[name] = true
+	}
+
 	resolve := func(nsName, name string) *vm.Var {
 		// Use DefNSBare to create minimal namespaces without triggering
 		// the loader. This ensures vars have a home namespace but the
@@ -139,7 +169,9 @@ func loadPrecompiledBundle() error {
 		bytecode.SetDecodeStatsEnabled(true)
 		defer bytecode.SetDecodeStatsEnabled(false)
 	}
-	unit, err := bytecode.DecodeToExecUnit(bytes.NewReader(rt.CoreCompiledLGB), resolve)
+	// Bytes entry: the embedded core is already a []byte, so decode keeps it
+	// resident and defers per-chunk source-map materialization off the hot path.
+	unit, err := bytecode.DecodeToExecUnitBytes(rt.CoreCompiledLGB, resolve)
 	if err != nil {
 		return err
 	}
@@ -166,10 +198,49 @@ func loadPrecompiledBundle() error {
 	// the loader even though the namespace already exists in the registry.
 	if unit.NSChunks != nil {
 		precompiledNS = unit.NSChunks
+		// The lg baseline namespaces (let-go.core, let-go.types) hold lg-specific
+		// extras and are auto-refer'd into every namespace (RegisterNS) but never
+		// explicitly required. On-demand loading only fires through
+		// LookupOrRegisterNS (qualified refs / require), which refer-resolution
+		// bypasses — so their .lg chunks would never run and the .lg-defined vars
+		// would stay unbound stubs. Run them eagerly right after core, whose
+		// definitions they depend on. (purify-clojure-core ②)
+		baselineNS := map[string]bool{}
+		for _, name := range rt.LgBaselineNSNames() {
+			baselineNS[name] = true
+			if ch := precompiledNS[name]; ch != nil {
+				lf := vm.NewFrame(ch, nil)
+				_, lerr := lf.RunProtected()
+				vm.ReleaseFrame(lf)
+				if lerr != nil {
+					return lerr
+				}
+			}
+		}
 		for name := range precompiledNS {
-			if name != "core" {
+			if name != "core" && !baselineNS[name] {
 				rt.MarkNSNeedsLoad(name)
 			}
+		}
+		// Eagerly execute chunks of hybrid namespaces (native + bundled lg
+		// source): their vars are reachable via qualified symbols without a
+		// (require ...), so lazy loading would leave the bundle-defined
+		// vars as nil stubs. The loader isn't configured yet at this point
+		// (api.NewContext sets it later), so run the chunk directly, the
+		// same way the core main chunk runs above. Note: a hybrid chunk
+		// that :requires another lazy bundled ns would load it too early
+		// here — fine for today's hybrids (async: macros over core only).
+		for name, ch := range precompiledNS {
+			if name == "core" || !preexisting[name] || ch == nil {
+				continue
+			}
+			f := vm.NewFrame(ch, nil)
+			_, err := f.RunProtected()
+			vm.ReleaseFrame(f)
+			if err != nil {
+				return err
+			}
+			rt.ClearNSNeedsLoad(name)
 		}
 	}
 

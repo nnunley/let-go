@@ -822,8 +822,10 @@ func TestFullModuleRoundtrip(t *testing.T) {
 }
 
 func TestV2Roundtrip(t *testing.T) {
-	// Explicit v2 marker: verify the encoder writes version 2 and the decoder
-	// correctly reads it back on a module containing common scalar types.
+	// Current-format round-trip: verify the encoder writes the live
+	// FormatVersion and the decoder reads it back on a module containing common
+	// scalar types. (Cross-version loading of older bundles is covered by the
+	// opcode-migration tests.)
 	consts := vm.NewConsts()
 	chunk := vm.NewCodeChunk(consts)
 	chunk.Append(vm.OP_LOAD_CONST, 0, vm.OP_RETURN)
@@ -847,8 +849,8 @@ func TestV2Roundtrip(t *testing.T) {
 		b.AddConst(v)
 	}
 	m := b.Build()
-	if m.Version != 2 {
-		t.Fatalf("expected version 2, got %d", m.Version)
+	if m.Version != FormatVersion {
+		t.Fatalf("expected version %d, got %d", FormatVersion, m.Version)
 	}
 
 	var buf bytes.Buffer
@@ -859,8 +861,8 @@ func TestV2Roundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if decoded.Version != 2 {
-		t.Fatalf("decoded version: got %d, want 2", decoded.Version)
+	if decoded.Version != FormatVersion {
+		t.Fatalf("decoded version: got %d, want %d", decoded.Version, FormatVersion)
 	}
 	if len(decoded.Consts) != len(allConsts) {
 		t.Fatalf("const count: got %d, want %d", len(decoded.Consts), len(allConsts))

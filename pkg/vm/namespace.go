@@ -68,6 +68,32 @@ func SetCoreNamespace(ns *Namespace) {
 	coreNamespacePtr = ns
 }
 
+// lgBaselineNamespaces are the lg-specific extra namespaces (let-go.core,
+// let-go.types, …) auto-refer'd alongside clojure.core. Like clojure.core each
+// is a lowest-priority resolution baseline: an explicit refer shadows it. Set by
+// rt init via AddBaselineNamespace.
+var lgBaselineNamespaces []*Namespace
+
+// AddBaselineNamespace registers ns as an auto-refer'd resolution baseline.
+func AddBaselineNamespace(ns *Namespace) {
+	lgBaselineNamespaces = append(lgBaselineNamespaces, ns)
+}
+
+// isBaselineNS reports whether ns is an auto-refer'd resolution baseline
+// (clojure.core or an lg-baseline like let-go.core/types) — deferred behind
+// explicit refers in Lookup.
+func isBaselineNS(ns *Namespace) bool {
+	if coreNamespacePtr != nil && ns == coreNamespacePtr {
+		return true
+	}
+	for _, b := range lgBaselineNamespaces {
+		if ns == b {
+			return true
+		}
+	}
+	return false
+}
+
 // --- brief single-op locked accessors -------------------------------------
 // Each takes its own lock for exactly one map op and returns a copy/pointer,
 // never a live map reference, so callers never iterate an unguarded map.
@@ -270,34 +296,58 @@ func (n *Namespace) LookupOrAdd(symbol Symbol) Value {
 
 func (n *Namespace) Lookup(symbol Symbol) Value {
 	noteLookup(n.name, string(symbol))
-	sns, sym := symbol.Namespaced()
-	if sns == NIL {
-		if v := n.localVar(sym.(Symbol)); v != nil {
+	sns, sym, hasNS := symbol.NamespacedRaw()
+	if !hasNS {
+		if v := n.localVar(sym); v != nil {
 			return v
 		}
 		// Unqualified miss: search refers. Snapshot first so we follow each
 		// refer's target via its own lock, never holding n's lock across.
+		//
+		// Precedence (Clojure semantics): an explicit refer — (:require [lib
+		// :refer :all]) or :refer [syms], and (use lib) — SHADOWS the
+		// clojure.core auto-refer that RegisterNS installs into every ns. So we
+		// treat the core refer as a lowest-priority baseline: return the first
+		// matching explicit refer, honoring :all / :only, and only fall back to
+		// core if no explicit refer provides the symbol.
+		var baselineHit *Var
 		for _, ref := range n.refersSnapshot() {
-			if v := ref.ns.localVar(sym.(Symbol)); v != nil {
-				if v.isPrivate {
-					return NIL
-				}
-				return v
+			v := ref.ns.localVar(sym)
+			if v == nil || v.isPrivate {
+				continue
 			}
+			isBaseline := isBaselineNS(ref.ns)
+			// The clojure.core / let-go.core refers are always the full
+			// auto-refer :all baseline: an explicit (:require [clojure.core
+			// :refer [...]]) is additive, never restrictive (core is trimmed via
+			// :refer-clojure :exclude, not here). For every OTHER refer, honor
+			// :refer [syms] — an :only refer contributes a symbol only when
+			// it is listed.
+			if !isBaseline && !ref.all && (ref.only == nil || !ref.only[sym]) {
+				continue
+			}
+			if isBaseline {
+				baselineHit = v
+				continue
+			}
+			return v
+		}
+		if baselineHit != nil {
+			return baselineHit
 		}
 		return NIL
 	}
 	// Alias-qualified resolution via aliases
-	if target, ok := n.aliasFor(sns.(Symbol)); ok {
-		v := target.localVar(sym.(Symbol))
+	if target, ok := n.aliasFor(sns); ok {
+		v := target.localVar(sym)
 		if v == nil && nsLookup != nil {
 			// Alias may point to a placeholder namespace created before source
 			// load completed. Re-resolve by name so runtime loader can
 			// materialize the namespace on demand, then retry the symbol lookup.
 			if loaded := nsLookup(target.Name()); loaded != nil {
 				target = loaded
-				n.cacheAlias(sns.(Symbol), loaded)
-				v = target.localVar(sym.(Symbol))
+				n.cacheAlias(sns, loaded)
+				v = target.localVar(sym)
 			}
 		}
 		if v == nil || v.isPrivate {
@@ -307,8 +357,8 @@ func (n *Namespace) Lookup(symbol Symbol) Value {
 	}
 	// Fallback: direct namespace lookup from global registry
 	if nsLookup != nil {
-		if target := nsLookup(string(sns.(Symbol))); target != nil {
-			v := target.localVar(sym.(Symbol))
+		if target := nsLookup(string(sns)); target != nil {
+			v := target.localVar(sym)
 			// A private var is visible to a fully-qualified reference only from
 			// within its own namespace — `my.ns/-priv` is legal inside my.ns
 			// (e.g. a macro that expands to a qualified call to a private helper
@@ -319,8 +369,8 @@ func (n *Namespace) Lookup(symbol Symbol) Value {
 		}
 	}
 	// Fallback via refers
-	if refer, ok := n.referFor(sns.(Symbol)); ok {
-		v := refer.ns.localVar(sym.(Symbol))
+	if refer, ok := n.referFor(sns); ok {
+		v := refer.ns.localVar(sym)
 		if v == nil || v.isPrivate {
 			return NIL
 		}
@@ -328,7 +378,7 @@ func (n *Namespace) Lookup(symbol Symbol) Value {
 			if refer.only == nil {
 				return NIL
 			}
-			if _, ok := refer.only[sym.(Symbol)]; !ok {
+			if _, ok := refer.only[sym]; !ok {
 				return NIL
 			}
 		}

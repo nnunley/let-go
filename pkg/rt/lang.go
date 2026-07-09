@@ -402,6 +402,19 @@ func AllNSes() map[string]*vm.Namespace {
 	return result
 }
 
+// RemoveNS drops a namespace from the registry so a subsequent require/def
+// materializes a FRESH Namespace (and fresh Vars). Test-isolation helper:
+// vars are interned process-globally, so anything attached to them (e.g.
+// watches added by a test) survives re-running a suite in the same process
+// unless its namespaces are removed between runs.
+func RemoveNS(name string) {
+	canonical := resolveNSAlias(name)
+	nsMu.Lock()
+	delete(nsRegistry, canonical)
+	delete(nsNeedsLoad, canonical)
+	nsMu.Unlock()
+}
+
 func FuzzyNamespacedSymbolLookup(currentNS *vm.Namespace, s vm.Symbol) []vm.Symbol {
 	sns := s.Namespace()
 	var ns *vm.Namespace
@@ -452,6 +465,11 @@ func RegisterNS(namespace *vm.Namespace) *vm.Namespace {
 	if CoreNS != nil && namespace != CoreNS {
 		namespace.Refer(CoreNS, "", true)
 	}
+	// Auto-refer the lg baseline namespaces (let-go.core/types) alongside
+	// clojure.core so unqualified lg-isms keep resolving. They are lowest-priority
+	// baselines: an explicit (:require [lib :refer :all]) shadows them (see
+	// Namespace.Lookup). Never refer'd into core or into themselves.
+	referBaselines(namespace)
 
 	nsMu.Lock()
 	nsRegistry[resolveNSAlias(namespace.Name())] = namespace
@@ -470,6 +488,15 @@ func MarkNSNeedsLoad(name string) {
 	nsMu.Lock()
 	defer nsMu.Unlock()
 	nsNeedsLoad[name] = true
+}
+
+// ClearNSNeedsLoad removes the needs-load flag — used after a namespace's
+// precompiled chunk has been executed eagerly (hybrid native+bundled
+// namespaces; see compiler.loadPrecompiledBundle).
+func ClearNSNeedsLoad(name string) {
+	nsMu.Lock()
+	defer nsMu.Unlock()
+	delete(nsNeedsLoad, name)
 }
 
 // LookupNS returns a namespace if it exists, nil otherwise. Does not create.
@@ -503,6 +530,9 @@ func DefNSBare(name string) *vm.Namespace {
 	if CoreNS != nil {
 		ns.Refer(CoreNS, "", true)
 	}
+	// Auto-refer the lg baseline namespaces (let-go.core/types); a freshly-created
+	// user ns is never a baseline. (purify-clojure-core ②)
+	referBaselines(ns)
 
 	nsMu.Lock()
 	nsRegistry[name] = ns
@@ -565,6 +595,9 @@ func LookupOrRegisterNS(name string) *vm.Namespace {
 	if CoreNS != nil {
 		ns.Refer(CoreNS, "", true)
 	}
+	// Auto-refer the lg baseline namespaces (let-go.core/types); a freshly-created
+	// user ns is never a baseline. (purify-clojure-core ②)
+	referBaselines(ns)
 
 	nsMu.Lock()
 	nsRegistry[name] = ns
@@ -586,6 +619,9 @@ func LookupOrRegisterNSNoLoad(name string) *vm.Namespace {
 	if CoreNS != nil {
 		ns.Refer(CoreNS, "", true)
 	}
+	// Auto-refer the lg baseline namespaces (let-go.core/types); a freshly-created
+	// user ns is never a baseline. (purify-clojure-core ②)
+	referBaselines(ns)
 
 	nsMu.Lock()
 	nsRegistry[name] = ns
@@ -599,7 +635,52 @@ var CoreSrc string
 
 const NameCoreNS = "core"
 
+// NameLetGoCoreNS is the home for lg-specific extras that are not part of the
+// portable Clojure surface (clojure ∪ bb) — e.g. gt/lt/ge/le. It is auto-refer'd
+// alongside clojure.core so unqualified use keeps resolving, while clojure.core
+// itself stays a faithful Clojure surface. See openspec/changes/purify-clojure-core.
+const NameLetGoCoreNS = "let-go.core"
+
+// NameLetGoTypesNS is a focused namespace for lg-specific type predicates
+// (array?, bigint?, range?, …) that are not part of the portable Clojure surface
+// but should stay visible. Auto-refer'd as a baseline like let-go.core.
+const NameLetGoTypesNS = "let-go.types"
+
 var CoreNS *vm.Namespace
+
+// lgBaselineNSs holds the lg-specific extra namespaces (let-go.core, let-go.types)
+// auto-refer'd alongside clojure.core once created. Registered as resolution
+// baselines with the vm so an explicit :refer shadows them.
+var lgBaselineNSs []*vm.Namespace
+
+// registerBaselineNS registers ns as an lg auto-refer'd resolution baseline.
+func registerBaselineNS(ns *vm.Namespace) {
+	lgBaselineNSs = append(lgBaselineNSs, ns)
+	vm.AddBaselineNamespace(ns)
+}
+
+// LgBaselineNSNames lists the lg baseline namespace names (auto-refer'd extras).
+// The boot loader runs their bundle chunks eagerly — they are never explicitly
+// required, so on-demand loading would never fire.
+func LgBaselineNSNames() []string {
+	return []string{NameLetGoCoreNS, NameLetGoTypesNS}
+}
+
+// referBaselines auto-refers every lg baseline namespace (let-go.core,
+// let-go.types, …) into ns, so unqualified lg-isms resolve. clojure.core is
+// deliberately excluded — it must not depend on the extras namespaces. Baselines
+// are lowest-priority in Namespace.Lookup, so an explicit :refer shadows them.
+func referBaselines(ns *vm.Namespace) {
+	if ns == CoreNS {
+		return
+	}
+	for _, b := range lgBaselineNSs {
+		if ns != b {
+			ns.Refer(b, "", true)
+		}
+	}
+}
+
 var CurrentNS *vm.Var
 
 // gensymID backs gensym. Atomic so concurrent gensym calls (e.g. lowering
@@ -2751,6 +2832,13 @@ func installLangNS() {
 		if vs[0] == vm.NIL {
 			return vm.NIL, nil
 		}
+		// ArrayVector fast path: index the flat slice directly, no seq alloc.
+		if av, ok := vs[0].(vm.ArrayVector); ok {
+			if len(av) == 0 {
+				return vm.NIL, nil
+			}
+			return av[0], nil
+		}
 		if seq, ok := vs[0].(vm.Seq); ok {
 			return seq.First(), nil
 		}
@@ -2770,6 +2858,13 @@ func installLangNS() {
 		}
 		if vs[0] == vm.NIL {
 			return vm.NIL, nil
+		}
+		// ArrayVector fast path: index the flat slice directly, no seq alloc.
+		if av, ok := vs[0].(vm.ArrayVector); ok {
+			if len(av) < 2 {
+				return vm.NIL, nil
+			}
+			return av[1], nil
 		}
 		seq, err := seqOf(vs[0])
 		if err != nil {
@@ -2792,6 +2887,14 @@ func installLangNS() {
 		if vs[0] == vm.NIL {
 			return vm.NIL, nil
 		}
+		// ArrayVector fast path: step in with one alloc instead of Seq()+Next().
+		if av, ok := vs[0].(vm.ArrayVector); ok {
+			n := av.SeqFrom(1)
+			if n == nil {
+				return vm.NIL, nil
+			}
+			return n, nil
+		}
 		seq, err := seqOf(vs[0])
 		if err != nil {
 			return vm.NIL, fmt.Errorf("next expected Seq")
@@ -2812,6 +2915,14 @@ func installLangNS() {
 		}
 		if vs[0] == vm.NIL {
 			return vm.EmptyList, nil
+		}
+		// ArrayVector fast path: step in with one alloc instead of Seq()+More().
+		if av, ok := vs[0].(vm.ArrayVector); ok {
+			n := av.SeqFrom(1)
+			if n == nil {
+				return vm.EmptyList, nil
+			}
+			return n, nil
 		}
 		s, err := seqOf(vs[0])
 		if err != nil {
@@ -3121,6 +3232,61 @@ func installLangNS() {
 				}
 			}
 		}
+		// ArrayVector fast path: flat slice with O(1) indexing — reduce by
+		// direct index with zero seq/chunk allocation instead of via seqOf.
+		if av, ok := vs[sidx].(vm.ArrayVector); ok {
+			var acc vm.Value
+			i := 0
+			if len(vs) == 3 {
+				acc = vs[1]
+			} else {
+				acc = av[0]
+				i = 1
+			}
+			fargs := []vm.Value{nil, nil}
+			for ; i < len(av); i++ {
+				fargs[0] = acc
+				fargs[1] = av[i]
+				res, err := ec.Invoke(mfn, fargs)
+				if err != nil {
+					return vm.NIL, err
+				}
+				if r, ok := res.(*vm.Reduced); ok {
+					return r.Deref(), nil
+				}
+				acc = res
+			}
+			return acc, nil
+		}
+		// Range fast path: a range is (start, end, step) arithmetic — reduce
+		// by direct iteration with zero seq/chunk allocation. Mirrors the
+		// ArrayVector fast path above.
+		if rng, ok := vs[sidx].(*vm.Range); ok {
+			start, end, step := rng.Bounds()
+			var acc vm.Value
+			i := start
+			if len(vs) == 3 {
+				acc = vs[1]
+			} else {
+				acc = vm.Int(i)
+				i += step
+			}
+			fargs := []vm.Value{nil, nil}
+			for (step > 0 && i < end) || (step < 0 && i > end) {
+				fargs[0] = acc
+				fargs[1] = vm.Int(i)
+				res, err := ec.Invoke(mfn, fargs)
+				if err != nil {
+					return vm.NIL, err
+				}
+				if r, ok := res.(*vm.Reduced); ok {
+					return r.Deref(), nil
+				}
+				acc = res
+				i += step
+			}
+			return acc, nil
+		}
 		seq, err := seqOf(vs[sidx])
 		if err != nil {
 			return vm.NIL, fmt.Errorf("reduce expected Seq")
@@ -3145,6 +3311,10 @@ func installLangNS() {
 			acc = seq.First()
 			seq = seq.Next()
 		}
+		// Reused two-arg buffer (same pattern as `some`'s fargs): avoids a
+		// fresh []vm.Value per element — the single largest allocation site
+		// in seq-based reduce.
+		fargs := []vm.Value{nil, nil}
 		for seq != nil {
 			// Chunked fast path: when the source exposes a chunk, walk via
 			// Nth in a tight inner loop and advance one chunk at a time. This
@@ -3154,7 +3324,9 @@ func installLangNS() {
 				c := cs.ChunkedFirst()
 				n := c.ChunkCount()
 				for i := 0; i < n; i++ {
-					acc, err = ec.Invoke(mfn, []vm.Value{acc, c.Nth(i)})
+					fargs[0] = acc
+					fargs[1] = c.Nth(i)
+					acc, err = ec.Invoke(mfn, fargs)
 					if err != nil {
 						return vm.NIL, err
 					}
@@ -3165,7 +3337,9 @@ func installLangNS() {
 				seq = cs.ChunkedNext()
 				continue
 			}
-			acc, err = ec.Invoke(mfn, []vm.Value{acc, seq.First()})
+			fargs[0] = acc
+			fargs[1] = seq.First()
+			acc, err = ec.Invoke(mfn, fargs)
 			if err != nil {
 				return vm.NIL, err
 			}
@@ -3453,9 +3627,23 @@ func installLangNS() {
 	})
 
 	concat, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
-		var ret []vm.Value
+		// Pre-size for the ArrayVector args (flat slices with known length)
+		// so their direct appends below don't regrow ret.
+		presize := 0
+		for i := range vs {
+			if av, ok := vs[i].(vm.ArrayVector); ok {
+				presize += len(av)
+			}
+		}
+		ret := make([]vm.Value, 0, presize)
 		for i := range vs {
 			if vs[i] == vm.NIL {
+				continue
+			}
+			// ArrayVector fast path: bulk-append the flat slice — no seq,
+			// no chunk, no per-element successor allocation.
+			if av, ok := vs[i].(vm.ArrayVector); ok {
+				ret = append(ret, av...)
 				continue
 			}
 			vseq, err := seqOf(vs[i])
@@ -3753,16 +3941,20 @@ func installLangNS() {
 		if !ok {
 			return vm.NIL, fmt.Errorf(">! expected Chan")
 		}
-		// Select on the registry context so a put parked on a full/unread
+		// putWithPolicy (async.go) honors dropping/sliding buffers, returns
+		// false on a closed channel (core.async parity — no panic), and
+		// selects on the registry context so a put parked on a full/unread
 		// channel — e.g. inside a (go ...) block — is released by a
 		// CancelAll/Drain on shutdown instead of leaking the goroutine.
 		// Cancellation returns nil (the put did not complete).
-		select {
-		case ch <- vs[1]:
-			return vm.TRUE, nil
-		case <-ec.Context().Done():
+		accepted, cancelled := putWithPolicy(ec.Context(), ch, vs[1])
+		if cancelled {
 			return vm.NIL, nil
 		}
+		if accepted {
+			return vm.TRUE, nil
+		}
+		return vm.FALSE, nil
 	})
 
 	changet := vm.NewCtxNativeFn("<!", func(ec *vm.ExecContext, vs []vm.Value) (vm.Value, error) {
@@ -6345,10 +6537,69 @@ func installLangNS() {
 			return vm.NIL, nil
 		}
 		quoteSym := vm.Symbol("quote")
-		inNsSym := vm.Symbol("in-ns")
-		quoted := vm.EmptyList.Cons(nameSym).Cons(quoteSym)
-		form := vm.EmptyList.Cons(quoted).Cons(inNsSym)
-		return form, nil
+		listOf := func(elems ...vm.Value) vm.Value {
+			var s vm.Seq = vm.EmptyList
+			for i := len(elems) - 1; i >= 0; i-- {
+				s = s.Cons(elems[i])
+			}
+			return s
+		}
+		quoteOf := func(v vm.Value) vm.Value { return listOf(quoteSym, v) }
+
+		// Expand to (do (in-ns 'name) <require/refer/alias forms…>). This is the
+		// BOOTSTRAP ns macro — the full ns macro in core.lg supersedes it once
+		// defined. Historically it only emitted (in-ns …) and silently dropped
+		// :require, so a namespace loaded before core.lg's macro (i.e. core
+		// itself) could not import dependencies. It now honors :require so
+		// clojure.core can pull in its lg-specific primitives (let-go.types).
+		// Other clauses (docstring, :refer-clojure, :gen-class) are ignored here;
+		// the full macro handles them for everything loaded after core.
+		forms := []vm.Value{
+			vm.Symbol("do"),
+			listOf(vm.Symbol("in-ns"), quoteOf(nameSym)),
+		}
+		for _, body := range vs[1:] {
+			clause, err := vm.SeqToSlice(body)
+			if err != nil || len(clause) == 0 || clause[0] != vm.Keyword("require") {
+				continue
+			}
+			for _, spec := range clause[1:] {
+				if lib, ok := spec.(vm.Symbol); ok {
+					forms = append(forms, listOf(vm.Symbol("require"), quoteOf(lib)))
+					continue
+				}
+				arr, ok := spec.(vm.ArrayVector)
+				if !ok || len(arr) == 0 {
+					continue
+				}
+				lib, ok := arr[0].(vm.Symbol)
+				if !ok {
+					continue
+				}
+				forms = append(forms, listOf(vm.Symbol("require"), quoteOf(lib)))
+				for i := 1; i+1 < len(arr); i += 2 {
+					opt, _ := arr[i].(vm.Keyword)
+					val := arr[i+1]
+					switch opt {
+					case vm.Keyword("as"):
+						if a, ok := val.(vm.Symbol); ok {
+							forms = append(forms, listOf(vm.Symbol("alias"), quoteOf(a), quoteOf(lib)))
+						}
+					case vm.Keyword("refer"):
+						if val == vm.Keyword("all") {
+							forms = append(forms, listOf(vm.Symbol("use"), quoteOf(lib)))
+						} else if syms, ok := val.(vm.ArrayVector); ok {
+							quoted := make(vm.ArrayVector, len(syms))
+							for j := range syms {
+								quoted[j] = quoteOf(syms[j])
+							}
+							forms = append(forms, listOf(vm.Symbol("refer-list"), quoteOf(lib), quoted))
+						}
+					}
+				}
+			}
+		}
+		return listOf(forms...), nil
 	})
 	// Mark as macro
 	_ = ns.Def("ns", nsMacro)
@@ -6377,10 +6628,13 @@ func installLangNS() {
 
 	ns.Def("=", equals)
 	ns.Def("not=", notEq)
-	ns.Def("gt", gt)
-	ns.Def("lt", lt)
-	ns.Def("ge", ge)
-	ns.Def("le", le)
+	// The comparison binops are the real Clojure names and stay in clojure.core.
+	// They ARE the primitives (previously core.lg aliased `(def > gt)`); their
+	// lg-ism spellings gt/lt/ge/le move to let-go.core below. (purify-clojure-core ②)
+	ns.Def(">", gt)
+	ns.Def("<", lt)
+	ns.Def(">=", ge)
+	ns.Def("<=", le)
 	ns.Def("mod", mod)
 	ns.Def("abs", abs)
 
@@ -6471,13 +6725,11 @@ func installLangNS() {
 	ns.Def("swap-vals!", swapVals)
 	ns.Def("reset-vals!", resetVals)
 
-	ns.Def("now", now)
-
+	// now/lines are lg-isms → let-go.core (see the lgCore block below).
 	ns.Def("slurp", slurp)
 	ns.Def("spit", spit)
-	ns.Def("lines", lines)
 
-	ns.Def("parse-int", parseInt)
+	// parse-int is an lg-ism → let-go.core; parse-long is the Clojure name.
 	ns.Def("parse-long", parseInt)
 	ns.Def("max", max)
 	ns.Def("min", min)
@@ -6513,7 +6765,7 @@ func installLangNS() {
 	ns.Def("str", str)
 	ns.Def("split", split)
 	ns.Def("str-replace", strReplace)
-	ns.Def("str-replace-first", strReplaceFirst)
+	// str-replace-first is an lg-ism → let-go.core (lgCore block below).
 	ns.Def("re-pattern", regex)
 	// namespace utilities
 	ns.Def("refer-list", referList)
@@ -6674,8 +6926,7 @@ func installLangNS() {
 	})
 
 	ns.Def("bigint", bigintf)
-	ns.Def("bigint?", isBigInt)
-	ns.Def("big-int?", isBigInt)
+	// bigint?/big-int? are lg-isms → let-go.types (lgTypes block below).
 
 	// ratio? — test if value is Ratio
 	isRatio, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
@@ -7474,7 +7725,7 @@ func installLangNS() {
 		}
 		return vm.String(base64.StdEncoding.EncodeToString(data)), nil
 	})
-	ns.Def("base64-encode", b64encodef)
+	// base64-* are lg-isms → let-go.core (lgCore block below).
 
 	// base64-decode — (base64-decode s) → byte-array of the decoded bytes.
 	b64decodef, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
@@ -7491,7 +7742,7 @@ func installLangNS() {
 		}
 		return vm.NewByteArrayFrom(data), nil
 	})
-	ns.Def("base64-decode", b64decodef)
+	// base64-decode → let-go.core.
 
 	// base64url-encode — (base64url-encode x) → URL-safe base64 String, no
 	// padding (RFC 4648 §5, the "base64url"/JWT alphabet). Unlike base64-encode,
@@ -7507,7 +7758,7 @@ func installLangNS() {
 		}
 		return vm.String(base64.RawURLEncoding.EncodeToString(data)), nil
 	})
-	ns.Def("base64url-encode", b64urlencodef)
+	// base64url-encode → let-go.core.
 
 	// base64url-decode — (base64url-decode s) → byte-array. Inverse of
 	// base64url-encode; decodes the URL-safe, unpadded alphabet only.
@@ -7525,7 +7776,7 @@ func installLangNS() {
 		}
 		return vm.NewByteArrayFrom(data), nil
 	})
-	ns.Def("base64url-decode", b64urldecodef)
+	// base64url-decode → let-go.core.
 
 	// ints — coerce seq to int-array
 	intsf, _ := vm.NativeFnType.Wrap(func(vs []vm.Value) (vm.Value, error) {
@@ -7560,7 +7811,7 @@ func installLangNS() {
 		_, ok := vs[0].(*vm.TypedArray)
 		return vm.Boolean(ok), nil
 	})
-	ns.Def("array?", isArrayf)
+	// array? is an lg-ism → let-go.types (lgTypes block below).
 
 	// bytes?: true iff the value is a byte-kind TypedArray (backing []byte).
 	// array? doesn't distinguish element kind, and a TypedArray's Kind() is
@@ -7986,6 +8237,44 @@ func installLangNS() {
 
 	RegisterNS(ns)
 	installClojureCompatAliases(ns)
+
+	// let-go.core: home for lg-specific extras that are not part of the portable
+	// Clojure surface (clojure ∪ bb). Auto-refer'd alongside clojure.core by
+	// RegisterNS, so unqualified use keeps resolving while clojure.core stays a
+	// faithful Clojure surface. (purify-clojure-core ②)
+	lgCore := vm.NewNamespace(NameLetGoCoreNS)
+	// Comparison-helper aliases (Clojure uses > < >= <=):
+	lgCore.Def("gt", gt)
+	lgCore.Def("lt", lt)
+	lgCore.Def("ge", ge)
+	lgCore.Def("le", le)
+	// Misc lg-specific extras (not in clojure ∪ bb):
+	lgCore.Def("now", now)
+	lgCore.Def("parse-int", parseInt)
+	lgCore.Def("lines", lines)
+	lgCore.Def("str-replace-first", strReplaceFirst)
+	lgCore.Def("base64-encode", b64encodef)
+	lgCore.Def("base64-decode", b64decodef)
+	lgCore.Def("base64url-encode", b64urlencodef)
+	lgCore.Def("base64url-decode", b64urldecodef)
+
+	// let-go.types: focused home for lg-specific type predicates (visible, but
+	// not part of the portable Clojure surface). The .lg-defined ones (range?)
+	// live in pkg/rt/core/let-go/types.lg. (purify-clojure-core ②)
+	lgTypes := vm.NewNamespace(NameLetGoTypesNS)
+	lgTypes.Def("array?", isArrayf)
+	lgTypes.Def("bigint?", isBigInt)
+	lgTypes.Def("big-int?", isBigInt)
+
+	// Register both as auto-refer'd resolution baselines BEFORE RegisterNS so the
+	// cross-refers (each baseline refers its siblings) resolve.
+	registerBaselineNS(lgCore)
+	registerBaselineNS(lgTypes)
+	RegisterNS(lgCore)  // refers CoreNS + sibling baselines into lgCore
+	RegisterNS(lgTypes) // refers CoreNS + sibling baselines into lgTypes
+
+	_ = lgTypes // core imports let-go.types via core.lg's (ns core (:require …))
+	// form, now that the bootstrap ns macro honors :require.
 }
 
 // runeIndex returns the index of needle in runes, or -1 if not found.

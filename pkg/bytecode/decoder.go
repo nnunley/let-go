@@ -44,6 +44,30 @@ func DecodeToExecUnitWithParent(r io.Reader, resolve VarResolver, parent *vm.Con
 		resolve: resolve,
 		stats:   decoderStats(),
 	}
+	return d.decodeExec(parent)
+}
+
+// DecodeToExecUnitBytes is like DecodeToExecUnit but decodes from an in-memory
+// buffer. The buffer stays resident, so per-chunk source maps are captured
+// zero-copy and decoded lazily (on first error/stack-trace lookup) instead of
+// eagerly at load — removing the dominant startup heap churn. Prefer this for the
+// embedded core bundle, which is already a []byte.
+func DecodeToExecUnitBytes(data []byte, resolve VarResolver) (*ExecUnit, error) {
+	return DecodeToExecUnitBytesWithParent(data, resolve, nil)
+}
+
+// DecodeToExecUnitBytesWithParent is DecodeToExecUnitBytes with an optional
+// parent const pool (see DecodeToExecUnitWithParent).
+func DecodeToExecUnitBytesWithParent(data []byte, resolve VarResolver, parent *vm.Consts) (*ExecUnit, error) {
+	d := &decoder{
+		r:       NewReaderBytes(data),
+		resolve: resolve,
+		stats:   decoderStats(),
+	}
+	return d.decodeExec(parent)
+}
+
+func (d *decoder) decodeExec(parent *vm.Consts) (*ExecUnit, error) {
 	defer recordDecodeStats(d.stats)
 
 	version, flags, err := d.readHeader()
@@ -52,13 +76,24 @@ func DecodeToExecUnitWithParent(r io.Reader, resolve VarResolver, parent *vm.Con
 	}
 	d.flags = flags
 
-	if version == 1 {
-		return d.decodeToExecUnitV1(parent)
+	var unit *ExecUnit
+	switch version {
+	case 1:
+		unit, err = d.decodeToExecUnitV1(parent)
+	case 2, 3:
+		// v3 shares v2's wire format; only opcode numbering differs, and that
+		// lives in the chunk code arrays remapped below for v1/v2.
+		unit, err = d.decodeToExecUnitV2(parent)
+	default:
+		return nil, fmt.Errorf("unsupported LGB version %d", version)
 	}
-	if version == 2 {
-		return d.decodeToExecUnitV2(parent)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("unsupported LGB version %d", version)
+	if version < 3 {
+		remapLegacyChunks(d.chunks)
+	}
+	return unit, nil
 }
 
 // decodeToExecUnitV1 is the frozen v1 decode path. Do not modify.
@@ -224,13 +259,26 @@ func DecodeWithResolver(r io.Reader, resolve VarResolver) (*Module, error) {
 		return nil, err
 	}
 	d.flags = flags
-	if version == 1 {
-		return d.readModuleV1()
+	var mod *Module
+	switch version {
+	case 1:
+		mod, err = d.readModuleV1()
+	case 2, 3:
+		// v3 shares v2's wire format; opcode renumbering is remapped below.
+		mod, err = d.readModuleV2()
+	default:
+		return nil, fmt.Errorf("unsupported LGB version %d", version)
 	}
-	if version == 2 {
-		return d.readModuleV2()
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("unsupported LGB version %d", version)
+	// readModuleV2 stamps Version: 2 internally; v3 shares that reader, so record
+	// the true wire version here.
+	mod.Version = version
+	if version < 3 {
+		remapLegacyChunks(d.chunks)
+	}
+	return mod, nil
 }
 
 type decoder struct {
@@ -464,40 +512,61 @@ func (d *decoder) readLiveChunks(sharedConsts *vm.Consts) error {
 			return fmt.Errorf("reading source_map count: %w", err)
 		}
 		if smCount > 0 {
-			chunk.ReserveSourceMap(int(smCount))
-		}
-		for j := 0; j < int(smCount); j++ {
-			startIP, err := d.r.ReadVarint()
-			if err != nil {
-				return err
+			if d.r.HasBackingData() {
+				// Deferred path: capture the source-map section's raw bytes
+				// (zero-copy — the backing buffer stays resident) and decode them
+				// on first Lookup. Skips per-chunk entries allocation at load.
+				// Each entry is 6 varints: startIP, file(string ref), line, col,
+				// eline, ecol.
+				start := d.r.Offset()
+				for j := 0; j < int(smCount); j++ {
+					for k := 0; k < 6; k++ {
+						if _, err := d.r.ReadVarint(); err != nil {
+							return fmt.Errorf("skipping source_map entry: %w", err)
+						}
+					}
+				}
+				// Closure-free lazy map: allocates only the SourceMap struct at
+				// load (raw is a zero-copy slice of the resident bundle, strings
+				// is shared) — decoding is deferred to first Lookup.
+				raw := d.r.Slice(start, d.r.Offset())
+				chunk.SetSourceMap(vm.NewLazySourceMapRaw(raw, d.strings, int(smCount)))
+			} else {
+				chunk.ReserveSourceMap(int(smCount))
+				for j := 0; j < int(smCount); j++ {
+					startIP, err := d.r.ReadVarint()
+					if err != nil {
+						return err
+					}
+					file, err := d.readStringRef()
+					if err != nil {
+						return err
+					}
+					line, err := d.r.ReadVarint()
+					if err != nil {
+						return err
+					}
+					col, err := d.r.ReadVarint()
+					if err != nil {
+						return err
+					}
+					eline, err := d.r.ReadVarint()
+					if err != nil {
+						return err
+					}
+					ecol, err := d.r.ReadVarint()
+					if err != nil {
+						return err
+					}
+					chunk.AddSourceInfoAt(int(startIP), vm.SourceInfo{
+						File:      file,
+						Line:      int(line),
+						Column:    int(col),
+						EndLine:   int(eline),
+						EndColumn: int(ecol),
+					})
+				}
 			}
-			file, err := d.readStringRef()
-			if err != nil {
-				return err
-			}
-			line, err := d.r.ReadVarint()
-			if err != nil {
-				return err
-			}
-			col, err := d.r.ReadVarint()
-			if err != nil {
-				return err
-			}
-			eline, err := d.r.ReadVarint()
-			if err != nil {
-				return err
-			}
-			ecol, err := d.r.ReadVarint()
-			if err != nil {
-				return err
-			}
-			chunk.AddSourceInfoAt(int(startIP), vm.SourceInfo{
-				File:      file,
-				Line:      int(line),
-				Column:    int(col),
-				EndLine:   int(eline),
-				EndColumn: int(ecol),
-			})
 		}
 		d.chunks[i] = chunk
 	}
