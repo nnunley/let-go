@@ -1,0 +1,261 @@
+(ns let-go.peg.stream-spike)
+
+;; Standalone spike: a PEG in the OMeta/maru shape — matchers run over an
+;; abstract STREAM protocol, polymorphic over element type, with stream
+;; adaptors. No Go primitives, no terminput. Proves the properties the whole
+;; grammar-engine design rests on:
+;;
+;;   * immutable lazy stream nodes  → ordered-choice backtracking is just
+;;     holding an older node; no mutate/restore (unlike test/peg.lg's :pos).
+;;   * element-type polymorphism    → ONE grammar matches text (chars), raw
+;;     binary (bytes), and structure (nested seqs), swapping only primitives.
+;;   * stream adaptors              → a token grammar over a byte stream *is*
+;;     a stream of events (bytes ⇒ events); layer again for events ⇒ actions.
+;;   * live streams                 → a not-yet-available tail is :pending,
+;;     distinct from :end; the same rule re-run after input arrives resumes.
+;;
+;; STREAM protocol (OMeta OMInputStream / maru parser-stream):
+;;   a stream is {:front (fn [] -> [:elem x s'] | :end | :pending)}
+;;   forcing the front tells you which of the three you got; s' is the next
+;;   immutable node. Nodes are values — keep one to backtrack to it.
+;;
+;; MATCHER contract:  (m s) -> [:ok value s'] | :fail | :pending
+;;   ordered choice tries each alt against the SAME s (backtrack = free).
+;;   :pending propagates (ordered semantics: more input may let an earlier,
+;;   higher-priority alt win, so we must suspend, not commit to a later one).
+
+(defn sfront [s] ((:front s)))
+(defn ok? [r] (and (vector? r) (= (first r) :ok)))
+
+;; --- stream constructors (adaptors over different substrates) ---------------
+
+;; text: over a string, elements are chars
+(defn s-str [str- i]
+  {:front (fn [] (if (< i (count str-)) [:elem (get str- i) (s-str str- (inc i))] :end))})
+
+;; binary / structural: over a vector, elements are whatever it holds
+;; (bytes as ints, or nested seqs for structural matching)
+(defn s-vec [v i]
+  {:front (fn [] (if (< i (count v)) [:elem (nth v i) (s-vec v (inc i))] :end))})
+
+;; live / UNBUFFERED: a node pulls at most ONE element from `source` on force,
+;; and memoizes its own front — nothing is pre-accumulated, so there is no
+;; flush/block wait, and delivered elements are retained only as long as some
+;; backtrack point still holds the node (unheld nodes GC — the window
+;; self-trims). This is the raw-mode VMIN=1 discipline: read one, deliver now.
+;;   source: (fn [] -> [:elem x] | :end | :pending)
+;; :pending is NOT memoized, so a later re-force (after input arrives) pulls
+;; again and resumes; a blocking source simply never returns :pending.
+(defn s-pull [source]
+  (let [memo (atom nil)]
+    {:front (fn []
+              (or @memo
+                  (let [r (source)]
+                    (cond
+                      (= r :pending) :pending
+                      (= r :end)     (reset! memo :end)
+                      :else          (let [[_ x] r]
+                                       (reset! memo [:elem x (s-pull source)]))))))}))
+
+;; test harness: `q` is the source's not-yet-delivered input (the tty's input
+;; queue), NOT a parser buffer — each pull delivers one element immediately.
+(defn live []
+  (let [q (atom []) closed (atom false)]
+    {:q q :closed closed
+     :s (s-pull (fn []
+                  (cond
+                    (seq @q) (let [x (first @q)] (swap! q rest) [:elem x])
+                    @closed  :end
+                    :else    :pending)))}))
+(defn feed! [lv xs] (swap! (:q lv) (fn [cur] (into (vec cur) xs))) lv)
+(defn close! [lv] (reset! (:closed lv) true) lv)
+
+;; --- primitive matchers -----------------------------------------------------
+
+;; one element satisfying pred
+(defn p-sat [pred]
+  (fn [s]
+    (let [f (sfront s)]
+      (cond
+        (= f :pending) :pending
+        (= f :end)     :fail
+        :else          (let [[_ x s'] f] (if (pred x) [:ok x s'] :fail))))))
+
+;; --- combinators (each threads the immutable stream; :pending propagates) ---
+
+;; ordered sequence — value is the vector of child values
+(defn p-cat [ms]
+  (fn [s]
+    (loop [ms ms s s acc []]
+      (if (empty? ms)
+        [:ok acc s]
+        (let [r ((first ms) s)]
+          (cond
+            (= r :pending) :pending
+            (= r :fail)    :fail
+            :else          (let [[_ v s'] r] (recur (rest ms) s' (conj acc v)))))))))
+
+;; ordered choice — first alt to match wins; all share the same node s
+(defn p-alt [ms]
+  (fn [s]
+    (loop [ms ms]
+      (if (empty? ms)
+        :fail
+        (let [r ((first ms) s)]
+          (cond
+            (ok? r)        r
+            (= r :pending) :pending
+            :else          (recur (rest ms))))))))
+
+;; zero or more (greedy) — value is a vector; trailing :pending suspends
+(defn p-many [m]
+  (fn [s]
+    (loop [s s acc []]
+      (let [r (m s)]
+        (cond
+          (ok? r)        (let [[_ v s'] r] (recur s' (conj acc v)))
+          (= r :pending) :pending
+          :else          [:ok acc s])))))
+
+;; one or more
+(defn p-some [m]
+  (fn [s]
+    (let [r ((p-many m) s)]
+      (if (ok? r) (let [[_ v _] r] (if (empty? v) :fail r)) r))))
+
+;; semantic action — fires IMMEDIATELY on match; value becomes (f child-values)
+(defn p-act [m f]
+  (fn [s] (let [r (m s)] (if (ok? r) (let [[_ v s'] r] [:ok (f v) s']) r))))
+
+;; STRUCTURAL match (OMeta's [ ... ]): the current element must itself be a
+;; seq; open a sub-stream over it, run inner, require it to consume fully.
+(defn p-list [inner]
+  (fn [s]
+    (let [f (sfront s)]
+      (cond
+        (= f :pending) :pending
+        (= f :end)     :fail
+        :else (let [[_ x s'] f]
+                (if (sequential? x)
+                  (let [r (inner (s-vec (vec x) 0))]
+                    (if (ok? r)
+                      (let [[_ v sub] r]
+                        (if (= (sfront sub) :end) [:ok v s'] :fail))
+                      r))
+                  :fail))))))
+
+;; STREAM ADAPTOR: a stream whose each element is the next token `m` yields
+;; over the underlying stream — this is bytes ⇒ events as a stream.
+(defn s-tokens [under m]
+  {:front (fn []
+            (let [f (sfront under)]
+              (cond
+                (= f :pending) :pending
+                (= f :end)     :end
+                :else (let [r (m under)]
+                        (cond
+                          (= r :pending) :pending
+                          (ok? r) (let [[_ tok under'] r] [:elem tok (s-tokens under' m)])
+                          :else   :end)))))})
+
+(defn drain [s]
+  (loop [s s acc []]
+    (let [f (sfront s)]
+      (cond
+        (= f :end)     acc
+        (= f :pending) (conj acc :pending)
+        :else          (let [[_ x s'] f] (recur s' (conj acc x)))))))
+
+;; --- ONE grammar, parameterized by element primitives ----------------------
+;;   token := SGR | FN-KEY | TEXT
+;;   SGR    := ESC '[' digit+ 'm'   → {:type :sgr    :params <digits>}
+;;   FN-KEY := ESC '[' digit+ '~'   → {:type :fn-key :params <digits>}
+;;   TEXT   := <non-ESC>            → {:type :text   :ch <char>}
+;; `g` supplies :esc :lbr :m :tilde :digit :notesc :to-str, so the SAME
+;; grammar runs over chars (text) or ints (binary).
+
+(defn make-grammar [g]
+  (let [digits (p-act (p-some (:digit g)) (:to-str g))
+        sgr    (p-act (p-cat [(:esc g) (:lbr g) digits (:m g)])
+                      (fn [v] {:type :sgr :params (nth v 2)}))
+        fnkey  (p-act (p-cat [(:esc g) (:lbr g) digits (:tilde g)])
+                      (fn [v] {:type :fn-key :params (nth v 2)}))
+        text   (p-act (:notesc g) (fn [x] {:type :text :ch ((:to-str g) [x])}))
+        token  (p-alt [sgr fnkey text])]
+    {:token token :top (p-many token)}))
+
+(def ESC (char 27))
+(def text-grammar
+  (make-grammar {:esc    (p-sat (fn [c] (= c ESC)))
+                 :lbr    (p-sat (fn [c] (= c \[)))
+                 :m      (p-sat (fn [c] (= c \m)))
+                 :tilde  (p-sat (fn [c] (= c \~)))
+                 :digit  (p-sat (fn [c] (and (>= (int c) (int \0)) (<= (int c) (int \9)))))
+                 :notesc (p-sat (fn [c] (not= c ESC)))
+                 :to-str (fn [xs] (apply str xs))}))
+
+(def byte-grammar
+  (make-grammar {:esc    (p-sat (fn [b] (= b 27)))
+                 :lbr    (p-sat (fn [b] (= b 91)))
+                 :m      (p-sat (fn [b] (= b 109)))
+                 :tilde  (p-sat (fn [b] (= b 126)))
+                 :digit  (p-sat (fn [b] (and (>= b 48) (<= b 57))))
+                 :notesc (p-sat (fn [b] (not= b 27)))
+                 :to-str (fn [bs] (apply str (map char bs)))}))
+
+;; --- checks -----------------------------------------------------------------
+
+(def pass (atom 0)) (def fail (atom 0))
+(defn check [label got expect]
+  (if (= got expect)
+    (do (swap! pass inc) (println "  PASS" label))
+    (do (swap! fail inc) (println "  FAIL" label "\n    got: " got "\n    want:" expect))))
+
+(println "1. TEXT stream — one grammar over chars; immediate actions, ordered-choice backtrack")
+(let [input (str "a" ESC "[31m" ESC "[5~b")
+      r ((:top text-grammar) (s-str input 0))]
+  (check "matched, value = event list" (ok? r) true)
+  (check "events, in order (FN-KEY won its choice only after SGR's 'm' alt backtracked)"
+         (second r)
+         [{:type :text :ch "a"} {:type :sgr :params "31"}
+          {:type :fn-key :params "5"} {:type :text :ch "b"}]))
+
+(println "2. RAW BINARY stream — the SAME grammar over bytes (ints), primitives swapped")
+(let [bytes [97 27 91 51 49 109 27 91 53 126 98]   ; a ESC[31m ESC[5~ b
+      r ((:top byte-grammar) (s-vec bytes 0))]
+  (check "same events from a byte stream"
+         (second r)
+         [{:type :text :ch "a"} {:type :sgr :params "31"}
+          {:type :fn-key :params "5"} {:type :text :ch "b"}]))
+
+(println "3. STRUCTURAL stream — the SAME combinators descend into nested seqs (OMeta [ ])")
+(let [tagged (p-act (p-list (p-cat [(p-sat keyword?) (p-sat string?)]))
+                    (fn [v] {:tag (first v) :val (second v)}))
+      r ((p-some tagged) (s-vec [[:sgr "31"] [:text "a"]] 0))]
+  (check "matched records by descending into each sub-seq"
+         (second r)
+         [{:tag :sgr :val "31"} {:tag :text :val "a"}]))
+
+(println "4. STREAM ADAPTOR — a token grammar over a byte stream IS an event stream")
+(let [under (s-vec [27 91 51 49 109 27 91 53 126] 0)   ; ESC[31m ESC[5~
+      evstream (s-tokens under (:token byte-grammar))]
+  (check "draining the adaptor yields decoded events"
+         (drain evstream)
+         [{:type :sgr :params "31"} {:type :fn-key :params "5"}]))
+
+(println "5. LIVE unbuffered stream — :pending suspend mid-sequence, resume after feed!")
+(let [lv (live)]
+  (feed! lv [27 91 51])                                ; partial: ESC [ 3
+  (check "suspends (:pending), not a false :fail" ((:token byte-grammar) (:s lv)) :pending)
+  (feed! lv [49 109])                                  ; rest arrives: 1 m
+  (let [r ((:token byte-grammar) (:s lv))]
+    (check "same rule from the same node resumes and matches" (ok? r) true)
+    (check "yields the completed token" (second r) {:type :sgr :params "31"})))
+
+(println "6. genuine EOF (closed) fails, distinct from suspend")
+(let [lv (close! (feed! (live) [27 91 51]))]
+  (check "closed short input fails, not :pending" ((:token byte-grammar) (:s lv)) :fail))
+
+(println)
+(println (str "peg-stream spike: " @pass " passed, " @fail " failed"))
+(when (pos? @fail) (throw (ex-info "spike failed" {:fail @fail})))

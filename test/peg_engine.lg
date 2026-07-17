@@ -1,0 +1,1396 @@
+(ns let-go.peg)
+
+;; Stage 1 of the peg-engine (spec 2026-07-15-peg-engine-design.md): the
+;; peg-match AST interpreter over the STREAM PROTOCOL, with node-owned packrat
+;; memoization. Grammar-as-data: a rule body is a tagged vector that peg-match
+;; walks. No Go changes, no terminput deps; runnable via ./lg.
+;;
+;; Decisions realized here (from the terminal-input design thread):
+;;   * input = stream protocol, immutable lazy nodes; string is a trivial
+;;     stream. Ordered-choice backtracking = re-run a branch against the SAME
+;;     entry node (no mutate/restore).
+;;   * memo table is OWNED BY THE STREAM NODE (one table per position, keyed by
+;;     rule) — dies with the node, cannot leak. Consulted at [:call r].
+;;   * :pending is never memoized (more input could change it).
+;;
+;; AST (spec §2, subset): [:chr c] [:str s] [:class s] [:any]
+;;   [:seq e…] [:alt e…] [:star e] [:plus e] [:opt e] [:not e] [:and e]
+;;   [:call r] [:bind n e] [:expr f]
+;; Match result: a state map {:s :frame :val :grammar} on success, else :fail
+;; or :pending. :seq/:alt value = last/chosen child value; :star/:plus = vector.
+
+;; --- stream protocol: immutable node, memoized tail, node-owned memo table ---
+(defn s-str [src i]
+  (let [memo (atom {}) fr (atom nil)]
+    {:memo memo :idx i
+     :front (fn []
+              (or @fr
+                  (reset! fr (if (< i (count src))
+                               [:elem (get src i) (s-str src (inc i))]
+                               :end))))}))
+(defn sfront [s] ((:front s)))
+
+;; structural stream over a vector — elements are arbitrary values (AST nodes,
+;; tokens). Same node protocol as s-str, so peg-match works unchanged.
+(defn s-elems [v i]
+  (let [memo (atom {}) fr (atom nil)]
+    {:memo memo :idx i
+     :front (fn [] (or @fr (reset! fr (if (< i (count v)) [:elem (nth v i) (s-elems v (inc i))] :end))))}))
+
+;; consumed span from start node up to (not including) end node, as a string.
+;; :idx is a per-stream position index, an identity proxy for span walking.
+(defn span-str [start end]
+  (loop [s start acc []]
+    (if (= (:idx s) (:idx end))
+      (apply str acc)
+      (let [f (sfront s)]
+        (if (vector? f) (let [[_ x s'] f] (recur s' (conj acc x))) (apply str acc))))))
+
+;; live / UNBUFFERED source: pulls one element per force, memoizes its front
+;; (stable tail → stable node identity → the packrat :memo table persists across
+;; a suspend/resume retry). :pending is never cached, so re-forcing after a feed
+;; resumes. Same node protocol as s-str, so peg-match is unchanged.
+(defn s-pull [source idx]
+  (let [pmemo (atom {}) fr (atom nil)]
+    {:memo pmemo :idx idx
+     :front (fn []
+              (or @fr
+                  (let [r (source)]
+                    (cond
+                      (= r :pending) :pending
+                      (= r :end)     (reset! fr :end)
+                      :else          (let [[_ x] r] (reset! fr [:elem x (s-pull source (inc idx))]))))))}))
+
+;; test harness: q holds the not-yet-delivered input (the tty queue), delivered
+;; one element per pull; closed marks genuine EOF.
+(defn live []
+  (let [q (atom []) closed (atom false)]
+    {:q q :closed closed
+     :s (s-pull (fn []
+                  (cond
+                    (seq @q) (let [x (first @q)] (swap! q rest) [:elem x])
+                    @closed  :end
+                    :else    :pending)) 0)}))
+(defn feed! [lv xs] (swap! (:q lv) (fn [c] (into (vec c) xs))) lv)
+(defn close! [lv] (reset! (:closed lv) true) lv)
+
+;; --- character classes: "0-9A-Za-z_" ranges + literals --------------------
+(defn char-in-class? [c cls]
+  (let [n (count cls)]
+    (loop [i 0]
+      (cond
+        (>= i n) false
+        (and (< (+ i 2) n) (= (get cls (inc i)) \-))
+        (let [lo (get cls i) hi (get cls (+ i 2))]
+          (if (and (>= (int c) (int lo)) (<= (int c) (int hi)))
+            true (recur (+ i 3))))
+        :else (if (= c (get cls i)) true (recur (inc i)))))))
+
+;; --- grammar: rules map + parent chain (Piumarta vtable delegation) --------
+(defn grammar-rule [g r]
+  (or (get (:rules g) r)
+      (when (:parent g) (grammar-rule (:parent g) r))))
+
+;; --- the interpreter -------------------------------------------------------
+;; substitute captured values into a DATA template: a symbol naming a capture
+;; becomes its frame value; everything else stays literal data. Pure
+;; construction — no host eval — so a data action is portable and analyzable
+;; (maru/OMeta "semantic action as data").
+(defn subst-template [t frame]
+  (cond
+    (symbol? t) (let [v (get frame (keyword (name t)) ::miss)] (if (= v ::miss) t v))
+    (vector? t) (vec (map (fn [x] (subst-template x frame)) t))
+    (map? t)    (into {} (map (fn [e] [(subst-template (key e) frame)
+                                       (subst-template (val e) frame)]) t))
+    (seq? t)    (map (fn [x] (subst-template x frame)) t)
+    :else t))
+
+;; feval: a small sandboxed interpreter for a lgform-parsed action form. Symbols
+;; resolve from the frame (captures) or a whitelisted host env; lists apply;
+;; if/quote are special forms. This LOWERS call-bearing actions with no host eval
+;; — the other-grammar-lowers-the-code idea, all the way down.
+(def feval-env
+  {'str str 'count count 'keyword keyword 'symbol symbol 'name name
+   'vec vec 'cons cons 'conj conj 'into into 'first first 'rest rest 'nth nth
+   'get get 'apply apply 'list list 'hash-map hash-map 'seq seq 'reverse reverse
+   '= = 'not= not= 'empty? empty? 'not not 'inc inc 'dec dec '+ + '- - '* *})
+(defn feval [form frame]
+  (cond
+    (symbol? form) (let [v (get frame (keyword (name form)) ::miss)]
+                     (if (= v ::miss)
+                       (let [f (get feval-env form ::nofn)]
+                         (if (= f ::nofn) (throw (ex-info "feval: unknown symbol" {:sym form})) f))
+                       v))
+    (vector? form) (vec (map (fn [x] (feval x frame)) form))
+    (map? form)    (into {} (map (fn [e] [(feval (key e) frame) (feval (val e) frame)]) form))
+    (seq? form)    (let [op (first form)]
+                     (cond
+                       (= op 'if)    (if (feval (nth form 1) frame)
+                                       (feval (nth form 2) frame)
+                                       (feval (nth form 3 nil) frame))
+                       (= op 'quote) (second form)
+                       :else (apply (feval op frame) (map (fn [x] (feval x frame)) (rest form)))))
+    :else form))
+
+(declare pm pm-eff pm-eff-apply)
+;; memoized rule application shared by :call and :call-dyn (OMeta apply(t)), with
+;; seed-growing LEFT RECURSION (maru parser.l / Warth). Memo entries carry a
+;; state: :active (entered, computing), :recurred (re-entered at same pos →
+;; left-recursive), :succeeded (has a result/seed), :fail. Re-entry while :active
+;; flips to :recurred and fails (seeds the base case); once the base succeeds we
+;; grow the seed by re-running the rule body until it stops consuming more.
+(defn pm-apply [st r]
+  (let [node (:s st) tbl (:memo node) k [(:name (:grammar st)) r] hit (get @tbl k)]
+    (if hit
+      (let [state (:state hit)]
+        (cond
+          (= state :succeeded) (assoc st :s (:s hit) :val (:val hit))
+          (= state :active)    (do (swap! tbl assoc k (assoc hit :state :recurred)) :fail)
+          :else                :fail))                 ; :recurred or :fail
+      (let [rule-ast (grammar-rule (:grammar st) r)]
+        (when (nil? rule-ast) (throw (ex-info "no such rule" {:rule r})))
+        (swap! tbl assoc k {:state :active :s node :val nil})
+        (let [res (pm rule-ast (assoc st :frame {}))]
+          (cond
+            (= res :pending) (do (swap! tbl dissoc k) :pending)   ; never memoize :pending
+            (= res :fail)    (do (swap! tbl assoc k {:state :fail}) :fail)
+            :else
+            (if (= (:state (get @tbl k)) :recurred)
+              ;; left recursion: seed with the base result, then grow.
+              (do
+                (swap! tbl assoc k {:state :succeeded :s (:s res) :val (:val res)})
+                (loop []
+                  (let [seed (get @tbl k)]
+                    ;; clear seed-phase memo poisoning at the start position (rules
+                    ;; that failed because the seed wasn't ready), keeping the seed.
+                    (reset! tbl {k seed})
+                    (let [res2 (pm rule-ast (assoc st :s node :frame {}))]
+                      (when (and (map? res2) (> (:idx (:s res2)) (:idx (:s seed))))
+                        (swap! tbl assoc k {:state :succeeded :s (:s res2) :val (:val res2)})
+                        (recur)))))
+                (let [f (get @tbl k)] (assoc st :s (:s f) :val (:val f))))
+              (do (swap! tbl assoc k {:state :succeeded :s (:s res) :val (:val res)})
+                  (assoc st :s (:s res) :val (:val res))))))))))
+
+(defn pm [ast st]
+  (let [op (first ast)]
+    (cond
+      (= op :chr)
+      (let [c (second ast) f (sfront (:s st))]
+        (cond (= f :pending) :pending (= f :end) :fail
+              :else (let [[_ x s'] f] (if (= x c) (assoc st :s s' :val x) :fail))))
+
+      (= op :any)
+      (let [f (sfront (:s st))]
+        (cond (= f :pending) :pending (= f :end) :fail
+              :else (let [[_ x s'] f] (assoc st :s s' :val x))))
+
+      (= op :str)
+      (let [str- (second ast)]
+        (loop [i 0 s (:s st)]
+          (if (>= i (count str-))
+            (assoc st :s s :val str-)
+            (let [f (sfront s)]
+              (cond (= f :pending) :pending (= f :end) :fail
+                    :else (let [[_ x s'] f]
+                            (if (= x (get str- i)) (recur (inc i) s') :fail)))))))
+
+      (= op :class)
+      (let [cls (second ast) f (sfront (:s st))]
+        (cond (= f :pending) :pending (= f :end) :fail
+              :else (let [[_ x s'] f]
+                      (if (char-in-class? x cls) (assoc st :s s' :val x) :fail))))
+
+      (= op :seq)
+      (loop [cs (rest ast) st st last-val nil]
+        (if (empty? cs)
+          (assoc st :val last-val)
+          (let [r (pm (first cs) st)]
+            (cond (= r :fail) :fail (= r :pending) :pending
+                  :else (recur (rest cs) r (:val r))))))
+
+      (= op :alt)
+      (loop [bs (rest ast)]
+        (if (empty? bs) :fail
+          (let [r (pm (first bs) st)]
+            (cond (map? r) r (= r :pending) :pending :else (recur (rest bs))))))
+
+      (= op :star)
+      (loop [st st acc []]
+        (let [r (pm (second ast) st)]
+          (cond (= r :pending) :pending
+                (= r :fail) (assoc st :val acc)
+                ;; no-progress guard: a child that matches without advancing
+                ;; (e.g. a bare lookahead) would loop forever — stop instead.
+                (= (:idx (:s r)) (:idx (:s st))) (assoc st :val acc)
+                :else (recur r (conj acc (:val r))))))
+
+      (= op :plus)
+      (let [r (pm [:star (second ast)] st)]
+        (cond (= r :pending) :pending
+              (empty? (:val r)) :fail
+              :else r))
+
+      (= op :opt)
+      (let [r (pm (second ast) st)]
+        (cond (= r :pending) :pending (= r :fail) (assoc st :val nil) :else r))
+
+      (= op :not)
+      ;; negative lookahead never uses the result — run in EFFECT mode (no value
+      ;; construction: skips binds/actions/value-builders in the subtree).
+      (let [r (pm-eff (second ast) st)]
+        (cond (= r :pending) :pending (= r :fail) (assoc st :val nil) :else :fail))
+
+      (= op :and)
+      (let [r (pm (second ast) st)]
+        (cond (= r :pending) :pending (= r :fail) :fail
+              :else (assoc st :val (:val r))))
+
+      (= op :bind)
+      (let [r (pm (nth ast 2) st)]
+        (cond (= r :fail) :fail (= r :pending) :pending
+              :else (assoc r :frame (assoc (:frame r) (second ast) (:val r)))))
+
+      (= op :expr)
+      ;; action: the captured names are the closure's PARAMETERS (not a frame
+      ;; lookup) — apply the action fn to the captured values in declared order.
+      (assoc st :val (apply (nth ast 2) (map (fn [k] (get (:frame st) k)) (second ast))))
+
+      ;; value-builders: run e, set :val to the consumed span (spec $ and $#)
+      (= op :text)
+      (let [start (:s st) r (pm (second ast) st)]
+        (cond (= r :fail) :fail (= r :pending) :pending
+              :else (assoc r :val (span-str start (:s r)))))
+
+      (= op :num)
+      (let [start (:s st) r (pm (second ast) st)]
+        (cond (= r :fail) :fail (= r :pending) :pending
+              :else (assoc r :val (parse-long (span-str start (:s r))))))
+
+      (= op :call)     (pm-apply st (second ast))
+      ;; dynamic apply: the rule name comes from a captured value (OMeta apply(t))
+      (= op :call-dyn) (pm-apply st (get (:frame st) (second ast)))
+
+      ;; foreign call: run rule r of grammar g against the same stream/pos, then
+      ;; return to the caller's grammar. Rule resolution inside g uses g's own
+      ;; parent chain. Not memoized here (rare; avoids a cross-grammar key dance).
+      (= op :call-in)
+      (let [g (second ast) r (nth ast 2) rule-ast (grammar-rule g r)]
+        (when (nil? rule-ast) (throw (ex-info "no such rule" {:grammar (:name g) :rule r})))
+        (let [res (pm rule-ast (assoc st :grammar g :frame {}))]
+          (cond (= res :pending) res
+                (= res :fail) :fail
+                :else (assoc st :s (:s res) :val (:val res)))))
+
+      ;; data action: value = the data template with captures substituted (no eval)
+      (= op :subst)
+      (assoc st :val (subst-template (second ast) (:frame st)))
+
+      ;; call-bearing action lowered via feval (interpreted, not eval'd)
+      (= op :fexpr)
+      (assoc st :val (feval (second ast) (:frame st)))
+
+      ;; jump table: first-set O(1) dispatch on the current element
+      (= op :jump)
+      (let [table (second ast) f (sfront (:s st))]
+        (cond (= f :pending) :pending (= f :end) :fail
+              :else (let [[_ x s'] f] (let [m (get table x ::nojump)]
+                                        (if (= m ::nojump) :fail (pm m (assoc st :s s')))))))
+
+      ;; structural descent (OMeta [ ]): current element must be a seq; open a
+      ;; sub-stream over it, match e, require full consumption.
+      (= op :form)
+      (let [f (sfront (:s st))]
+        (cond (= f :pending) :pending (= f :end) :fail
+              :else (let [[_ x s'] f]
+                      (if (sequential? x)
+                        (let [r (pm (second ast) (assoc st :s (s-elems (vec x) 0)))]
+                          (cond (= r :fail) :fail (= r :pending) :pending
+                                ;; propagate inner frame (form-internal captures are
+                                ;; visible in the enclosing action); advance outer pos.
+                                (= (sfront (:s r)) :end) (assoc st :s s' :val (:val r) :frame (:frame r))
+                                :else :fail))
+                        :fail))))
+
+      :else (throw (ex-info "unknown op" {:op op :ast ast})))))
+
+;; EFFECT-mode matcher (maru $$rule): matches exactly like pm — same success,
+;; failure, and end position — but builds no value (no frame binds, actions, or
+;; value-builders). Used where the result is discarded (negative lookahead), and
+;; memoized under a separate :eff key so it never clashes with value results.
+(defn pm-eff-apply [st r]
+  (let [node (:s st) tbl (:memo node) k [(:name (:grammar st)) r :eff] hit (get @tbl k)]
+    (cond
+      (= hit :fail) :fail
+      hit (assoc st :s (:s hit))
+      :else
+      (let [rule-ast (grammar-rule (:grammar st) r)]
+        (when (nil? rule-ast) (throw (ex-info "no such rule" {:rule r})))
+        (let [res (pm-eff rule-ast (assoc st :frame {}))]
+          (cond
+            (= res :pending) res
+            (= res :fail) (do (swap! tbl assoc k :fail) :fail)
+            :else (do (swap! tbl assoc k {:s (:s res)}) (assoc st :s (:s res)))))))))
+
+(defn pm-eff [ast st]
+  (let [op (first ast)]
+    (cond
+      (= op :chr)   (let [c (second ast) f (sfront (:s st))]
+                      (cond (= f :pending) :pending (= f :end) :fail
+                            :else (let [[_ x s'] f] (if (= x c) (assoc st :s s') :fail))))
+      (= op :any)   (let [f (sfront (:s st))]
+                      (cond (= f :pending) :pending (= f :end) :fail :else (assoc st :s (nth f 2))))
+      (= op :str)   (let [str- (second ast)]
+                      (loop [i 0 s (:s st)]
+                        (if (>= i (count str-)) (assoc st :s s)
+                            (let [f (sfront s)] (cond (= f :pending) :pending (= f :end) :fail
+                                                      :else (let [[_ x s'] f] (if (= x (get str- i)) (recur (inc i) s') :fail)))))))
+      (= op :class) (let [cls (second ast) f (sfront (:s st))]
+                      (cond (= f :pending) :pending (= f :end) :fail
+                            :else (let [[_ x s'] f] (if (char-in-class? x cls) (assoc st :s s') :fail))))
+      (= op :seq)   (loop [cs (rest ast) st st]
+                      (if (empty? cs) st
+                          (let [r (pm-eff (first cs) st)] (cond (= r :fail) :fail (= r :pending) :pending :else (recur (rest cs) r)))))
+      (= op :alt)   (loop [bs (rest ast)]
+                      (if (empty? bs) :fail (let [r (pm-eff (first bs) st)] (cond (map? r) r (= r :pending) :pending :else (recur (rest bs))))))
+      (= op :star)  (loop [st st]
+                      (let [r (pm-eff (second ast) st)]
+                        (cond (= r :pending) :pending (= r :fail) st
+                              (= (:idx (:s r)) (:idx (:s st))) st :else (recur r))))
+      (= op :plus)  (let [r (pm-eff (second ast) st)] (cond (= r :fail) :fail (= r :pending) :pending :else (pm-eff [:star (second ast)] r)))
+      (= op :opt)   (let [r (pm-eff (second ast) st)] (cond (= r :pending) :pending (= r :fail) st :else r))
+      (= op :not)   (let [r (pm-eff (second ast) st)] (cond (= r :pending) :pending (= r :fail) st :else :fail))
+      (= op :and)   (let [r (pm-eff (second ast) st)] (cond (= r :pending) :pending (= r :fail) :fail :else st))
+      (= op :bind)  (pm-eff (nth ast 2) st)         ; run inner, discard capture
+      (= op :expr)  st                               ; actions are no-ops in effect mode
+      (= op :subst) st
+      (= op :fexpr) st
+      (= op :text)  (pm-eff (second ast) st)
+      (= op :num)   (pm-eff (second ast) st)
+      (= op :call)     (pm-eff-apply st (second ast))
+      (= op :call-dyn) (pm-eff-apply st (get (:frame st) (second ast)))
+      (= op :call-in)  (let [g (second ast) r (nth ast 2) rule-ast (grammar-rule g r)]
+                         (when (nil? rule-ast) (throw (ex-info "no such rule" {:rule r})))
+                         (let [res (pm-eff rule-ast (assoc st :grammar g :frame {}))]
+                           (cond (= res :pending) res (= res :fail) :fail :else (assoc st :s (:s res)))))
+      (= op :form)  (let [f (sfront (:s st))]
+                      (cond (= f :pending) :pending (= f :end) :fail
+                            :else (let [[_ x s'] f]
+                                    (if (sequential? x)
+                                      (let [r (pm-eff (second ast) (assoc st :s (s-elems (vec x) 0)))]
+                                        (cond (= r :fail) :fail (= r :pending) :pending
+                                              (= (sfront (:s r)) :end) (assoc st :s s') :else :fail))
+                                      :fail))))
+      (= op :jump)  (let [table (second ast) f (sfront (:s st))]
+                      (cond (= f :pending) :pending (= f :end) :fail
+                            :else (let [[_ x s'] f] (let [m (get table x ::nojump)] (if (= m ::nojump) :fail (pm-eff m (assoc st :s s')))))))
+      :else (throw (ex-info "pm-eff: unknown op" {:op op})))))
+
+(defn parse-node [g rule node]
+  (let [r (pm [:call rule] {:s node :frame {} :val nil :grammar g})]
+    (cond (= r :fail) :fail (= r :pending) :pending :else (:val r))))
+
+(defn parse [g rule input] (parse-node g rule (s-str input 0)))
+
+;; helper for testing bare (non-:call) matchers
+(defn run [ast input]
+  (let [r (pm ast {:s (s-str input 0) :frame {} :val nil :grammar nil})]
+    (if (map? r) (:val r) r)))
+
+;; --- the terminal grammar, hand-built as AST (stage-2 macro will emit this) -
+(def ESC (char 27))
+(def term
+  {:name 'term :parent nil
+   :rules
+   {:digit  [:class "0-9"]
+    :escseq [:seq [:chr ESC] [:chr \[]]
+    :sgr    [:seq [:seq [:call :escseq] [:bind :ds [:plus [:call :digit]]] [:chr \m]]
+                  [:expr [:ds] (fn [ds] {:type :sgr :params (apply str ds)})]]
+    :fnkey  [:seq [:seq [:call :escseq] [:bind :ds [:plus [:call :digit]]] [:chr \~]]
+                  [:expr [:ds] (fn [ds] {:type :fn-key :params (apply str ds)})]]
+    :txt    [:seq [:seq [:not [:chr ESC]] [:bind :c [:any]]]
+                  [:expr [:c] (fn [c] {:type :text :ch (str c)})]]
+    :token  [:alt [:call :sgr] [:call :fnkey] [:call :txt]]
+    :top    [:star [:call :token]]}})
+
+;; --- memo probe grammar: X evaluated once per position despite two alts -----
+(def cnt (atom 0))
+(def memg
+  {:name 'memg :parent nil
+   :rules
+   {:X  [:seq [:class "0-9"] [:expr [] (fn [] (do (swap! cnt inc) :x))]]
+    :AB [:alt [:seq [:call :X] [:chr \a]] [:seq [:call :X] [:chr \b]]]}})
+
+;; --- stage 2: the defgrammar macro (emits the AST the interpreter walks) ----
+;; PEG-faithful sexp surface mapping 1:1 to the AST (spec §6). A bare symbol is
+;; a rule call; a char/string literal is a terminal; `(-> host)` is a semantic
+;; action closing over host env at the expansion site, with captured names
+;; let-bound from the frame.
+(defn pe [form]
+  (cond
+    (string? form) [:str form]
+    (char? form)   [:chr form]
+    (symbol? form) [:call (keyword form)]
+    (seq? form)
+    (let [op (first form)]
+      (cond
+        (= op 'chr)  [:chr (second form)]
+        (= op 'cls)  [:class (second form)]
+        (= op 'any)  [:any]
+        (= op 'call) [:call (keyword (second form))]
+        (= op 'call-dyn) [:call-dyn (keyword (second form))]
+        (= op 'call-in) [:call-in (second form) (keyword (nth form 2))]
+        (= op 'bind) [:bind (keyword (second form)) (pe (nth form 2))]
+        (= op 'seq)  (vec (cons :seq (map pe (rest form))))
+        (= op 'alt)  (vec (cons :alt (map pe (rest form))))
+        (= op 'text) [:text (pe (second form))]
+        (= op 'num)  [:num (pe (second form))]
+        (= op 'form) [:form (pe (second form))]
+        (= op 'star) [:star (pe (second form))]
+        (= op 'plus) [:plus (pe (second form))]
+        (= op 'opt)  [:opt (pe (second form))]
+        (= op 'neg)  [:not (pe (second form))]
+        (= op 'has)  [:and (pe (second form))]
+        :else (throw (ex-info "bad grammar expr" {:form form}))))
+    :else (throw (ex-info "bad grammar expr" {:form form}))))
+
+(defn collect-binds [ast]
+  (cond
+    (not (vector? ast)) nil
+    (= (first ast) :bind) (cons (second ast) (collect-binds (nth ast 2)))
+    :else (mapcat collect-binds (rest ast))))
+
+(defn compile-rule [rform]
+  (let [rname (keyword (first rform))
+        parts (rest rform)
+        lastp (last parts)
+        code? (and (seq? lastp) (= (first lastp) '->))   ; -> host code action
+        data? (and (seq? lastp) (= (first lastp) '=>))    ; => data-template action
+        exprs (if (or code? data?) (butlast parts) parts)
+        body (if (= 1 (count exprs)) (pe (first exprs)) (vec (cons :seq (map pe exprs))))
+        full (cond
+               data? [:seq body [:subst (list 'quote (second lastp))]]
+               code? (let [host (second lastp)
+                           bs   (distinct (collect-binds body))
+                           syms (vec (map (fn [kw] (symbol (name kw))) bs))]
+                       ;; captures become the action fn's parameters — closure variables
+                       [:seq body [:expr (vec bs) (list 'fn syms host)]])
+               :else body)]
+    [rname full]))
+
+(defmacro defgrammar [gname & rules]
+  (let [ext?   (= :extends (first rules))
+        parent (when ext? (second rules))
+        rules  (if ext? (drop 2 rules) rules)
+        rmap   (reduce (fn [m rf] (let [[k v] (compile-rule rf)] (assoc m k v))) {} rules)]
+    (list 'def gname {:name (list 'quote gname) :parent parent :rules rmap})))
+
+(defgrammar term2
+  (digit  (cls "0-9"))
+  (escseq (seq (chr ESC) (chr \[)))
+  (sgr    (seq escseq (bind ds (text (plus digit))) (chr \m)) (-> {:type :sgr    :params ds}))
+  (fnkey  (seq escseq (bind ds (text (plus digit))) (chr \~)) (-> {:type :fn-key :params ds}))
+  (sgrn   (seq escseq (bind n (num (plus digit))) (chr \m))   (-> {:type :sgrn   :n n}))
+  (txt    (seq (neg (chr ESC)) (bind c (any)))               (-> {:type :text   :ch (str c)}))
+  (token  (alt sgr fnkey txt))
+  (top    (star token)))
+
+;; --- checks ----------------------------------------------------------------
+(def pass (atom 0)) (def fail (atom 0))
+(defn check [label got expect]
+  (if (= got expect)
+    (do (swap! pass inc) (println "  PASS" label))
+    (do (swap! fail inc) (println "  FAIL" label "\n    got: " got "\n    want:" expect))))
+
+(println "primitives")
+(check ":chr"        (run [:chr \a] "abc") \a)
+(check ":chr fail"   (run [:chr \x] "abc") :fail)
+(check ":str"        (run [:str "ab"] "abc") "ab")
+(check ":str fail"   (run [:str "ax"] "abc") :fail)
+(check ":class"      (run [:class "0-9"] "7") \7)
+(check ":class miss" (run [:class "0-9"] "z") :fail)
+(check ":any"        (run [:any] "z") \z)
+
+(println "combinators")
+(check ":seq (val=last)" (run [:seq [:chr \a] [:chr \b]] "abc") \b)
+(check ":seq backtrack fail" (run [:seq [:chr \a] [:chr \x]] "abc") :fail)
+(check ":alt first"  (run [:alt [:chr \a] [:chr \b]] "abc") \a)
+(check ":alt second" (run [:alt [:chr \x] [:chr \a]] "abc") \a)
+(check ":star"       (run [:star [:class "0-9"]] "12a") [\1 \2])
+(check ":star empty" (run [:star [:class "0-9"]] "ab") [])
+(check ":plus"       (run [:plus [:class "0-9"]] "12a") [\1 \2])
+(check ":plus fail"  (run [:plus [:class "0-9"]] "ab") :fail)
+(check ":opt some"   (run [:opt [:chr \a]] "abc") \a)
+(check ":opt none"   (run [:opt [:chr \x]] "abc") nil)
+(check ":not passes" (run [:seq [:not [:chr \x]] [:any]] "abc") \a)
+(check ":not blocks" (run [:seq [:not [:chr \a]] [:any]] "abc") :fail)
+(check ":and lookahead" (run [:and [:chr \a]] "abc") \a)
+
+(println "recursion / captures / actions (terminal grammar)")
+(check "sgr"    (parse term :token (str ESC "[31m")) {:type :sgr :params "31"})
+(check "fnkey"  (parse term :token (str ESC "[5~")) {:type :fn-key :params "5"})
+(check "text"   (parse term :token "a") {:type :text :ch "a"})
+(check "top: whole stream, ordered choice + backtrack"
+       (parse term :top (str "a" ESC "[31m" ESC "[5~b"))
+       [{:type :text :ch "a"} {:type :sgr :params "31"}
+        {:type :fn-key :params "5"} {:type :text :ch "b"}])
+
+(println "packrat: node-owned memo table")
+(check "X evaluated once per position despite two alternatives calling it"
+       (do (reset! cnt 0) (parse memg :AB "9b") @cnt) 1)
+
+;; inheritance + foreign call fixtures (hand-built)
+(def gP {:name 'gP :parent nil
+         :rules {:digit [:class "0-9"]
+                 :item  [:plus [:call :digit]]                         ; numbers only
+                 :two   [:seq [:call :item] [:chr \,] [:call :item]]}})
+(def gC {:name 'gC :parent gP                                          ; overrides :item only
+         :rules {:item [:alt [:plus [:call :digit]] [:plus [:class "a-z"]]]}})
+(def gQ {:name 'gQ :parent nil :rules {:sym [:plus [:class "a-z"]]}})
+(def gR {:name 'gR :parent nil
+         :rules {:num [:plus [:class "0-9"]]
+                 :mix [:seq [:call :num] [:chr \-] [:call-in gQ :sym]]}})
+
+(println "inheritance + foreign call (spec §5)")
+(check "child inherits :two + :digit, overrides :item; open recursion picks child's :item"
+       (parse gC :two "12,ab") [\a \b])
+(check "parent (no override) rejects letters" (parse gP :two "12,ab") :fail)
+(check "call-in runs a foreign grammar's rule on the same stream"
+       (parse gR :mix "12-ab") [\a \b])
+
+;; same, via the macro surface (:extends + (call-in g r))
+(defgrammar mP
+  (digit (cls "0-9"))
+  (item  (plus digit))
+  (two   (seq item (chr \,) item)))
+(defgrammar mC :extends mP
+  (item (alt (plus digit) (plus (cls "a-z")))))
+(defgrammar mQ
+  (sym (plus (cls "a-z"))))
+(defgrammar mR
+  (num (plus (cls "0-9")))
+  (mix (seq num (chr \-) (call-in mQ sym))))
+(check "macro :extends open-recursion override == hand-built" (parse mC :two "12,ab") [\a \b])
+(check "macro (call-in mQ sym) == hand-built" (parse mR :mix "12-ab") [\a \b])
+
+(println "stage 2: defgrammar macro — plain grammar, same behavior")
+(check "macro grammar: sgr"   (parse term2 :token (str ESC "[31m")) {:type :sgr :params "31"})
+(check "macro grammar: fnkey" (parse term2 :token (str ESC "[5~")) {:type :fn-key :params "5"})
+(check "macro grammar: top == hand-built AST result"
+       (parse term2 :top (str "a" ESC "[31m" ESC "[5~b"))
+       (parse term  :top (str "a" ESC "[31m" ESC "[5~b")))
+
+(println "value-builders: (text e) consumed span, (num e) parsed number")
+(check "text: consumed span as string" (run [:text [:plus [:class "0-9"]]] "123x") "123")
+(check "num: consumed span as number"  (run [:num  [:plus [:class "0-9"]]] "42x") 42)
+(check "macro (text …) in a rule" (parse term2 :sgr  (str ESC "[31m")) {:type :sgr :params "31"})
+(check "macro (num …) yields an int" (parse term2 :sgrn (str ESC "[31m")) {:type :sgrn :n 31})
+
+(println "live/unbuffered stream: :pending suspend, resume after feed! (same grammar)")
+(let [lv (live)]
+  (feed! lv [ESC \[ \3])                      ; partial SGR
+  (check "one token suspends mid-sequence (:pending, not a false :fail)"
+         (parse-node term2 :token (:s lv)) :pending)
+  (feed! lv [\1 \m])                          ; rest arrives
+  (check "same node resumes to the completed token"
+         (parse-node term2 :token (:s lv)) {:type :sgr :params "31"}))
+(let [lv (live)]
+  (feed! lv [\a ESC \[ \3])                    ; 'a' then a partial SGR
+  (check "top suspends while the 2nd token is incomplete"
+         (parse-node term2 :top (:s lv)) :pending)
+  (feed! lv [\1 \m]) (close! lv)              ; finish it, then close so star can end
+  (check "after feed+close, top yields both tokens (memo reused 'a' across retry)"
+         (parse-node term2 :top (:s lv))
+         [{:type :text :ch "a"} {:type :sgr :params "31"}]))
+
+;; === Phase A: the terse-surface META-GRAMMAR, written in our own engine ======
+;; A grammar (in defgrammar sexp) that parses terse PEG *expression* text into
+;; the AST the interpreter walks. This is the self-hosting surface (spec 2):
+;; the terse notation is defined AS a grammar, not hand-coded. Precedence
+;; (loose→tight): choice `/`  <  sequence (juxtaposition)  <  prefix ~ &  <
+;; label name:e  <  suffix * + ?  <  primary. Whitespace via `ws`.
+(defgrammar metag
+  (ws     (star (cls " \t")))          ; inline whitespace only — a rule body
+  (nl     (star (cls " \t\n\r")))       ; must not cross the newline that ends it
+  (ident  (text (plus (cls "a-zA-Z0-9_"))))
+  ;; primaries — each its own rule so it can carry its own action
+  (pgroup (seq (chr \() ws (bind e choice) ws (chr \))) (-> e))
+  (ptext  (seq (chr \<) ws (bind e choice) ws (chr \>)) (-> [:text e]))
+  (pclass (seq (chr \[) (bind c (text (star (seq (neg (chr \])) (any))))) (chr \])) (-> [:class c]))
+  (pstr1  (seq (chr \') (bind s (text (star (seq (neg (chr \')) (any))))) (chr \')) (-> [:str s]))
+  (pstr2  (seq (chr \") (bind s (text (star (seq (neg (chr \")) (any))))) (chr \")) (-> [:str s]))
+  (pany   (chr \.) (-> [:any]))
+  (pcall  (bind id ident) (-> [:call (keyword id)]))
+  (prim   (alt pgroup ptext pclass pstr1 pstr2 pany pcall))
+  ;; suffix * + ?
+  (sstar  (seq (bind e prim) (chr \*)) (-> [:star e]))
+  (splus  (seq (bind e prim) (chr \+)) (-> [:plus e]))
+  (sopt   (seq (bind e prim) (chr \?)) (-> [:opt e]))
+  (suffx  (alt sstar splus sopt prim))
+  ;; label name:e
+  (lab    (seq (bind nm ident) (chr \:) (bind e suffx)) (-> [:bind (keyword nm) e]))
+  (unary0 (alt lab suffx))
+  ;; prefix ~ &
+  (pnot   (seq (chr \~) (bind e unary)) (-> [:not e]))
+  (pand   (seq (chr \&) (bind e unary)) (-> [:and e]))
+  (unary  (alt pnot pand unary0))
+  ;; sequence: 1+ unary, each allowed leading whitespace
+  (term   (seq ws (bind u unary)) (-> u))
+  (seqr   (bind xs (plus term)) (-> (if (= 1 (count xs)) (first xs) (vec (cons :seq xs)))))
+  ;; ordered choice
+  (atail  (seq ws (chr \/) ws (bind s seqr)) (-> s))
+  (choice (seq (bind x seqr) (bind xs (star atail)))
+          (-> (if (empty? xs) x (vec (cons :alt (cons x xs))))))
+  ;; whole-grammar source: `name = body [-> host-action]`, one rule per line
+  (acode  (seq (chr \-) (chr \>)) (-> :code))    ; -> host code
+  (adata  (seq (chr \=) (chr \>)) (-> :data))     ; => data template
+  (action (seq ws (bind t (alt acode adata)) ws
+               (bind a (text (star (seq (neg (chr (char 10))) (any))))))
+          (-> [t a]))
+  (rule   (seq nl (bind nm ident) ws (chr \=) ws (bind body choice) (bind act (opt action)))
+          (-> [(keyword nm) body act]))
+  (grules (star rule)))
+
+(defn pexpr [s] (parse metag :choice s))
+
+;; lgform: a self-hosted reader grammar for the action sublanguage (the OMeta/
+;; maru "another grammar lowers the action code"). It parses lg literal text into
+;; data — no host read-string. Pure-data actions then need no eval at all.
+(defgrammar lgform
+  (ws    (star (cls " \t\n\r")))
+  (int-  (num (seq (opt (chr \-)) (plus (cls "0-9")))))
+  (str-  (seq (chr \") (bind s (text (star (seq (neg (chr \")) (any))))) (chr \")) (-> s))
+  (kw    (seq (chr \:) (bind s (text (plus (cls "a-zA-Z0-9_.*+/<>=?-"))))) (-> (keyword s)))
+  (sym   (bind s (text (plus (cls "a-zA-Z0-9_.*+/<>=?-")))) (-> (symbol s)))
+  (vecf  (seq (chr \[) (bind xs (star expr)) ws (chr \])) (-> (vec xs)))
+  (mapf  (seq (chr \{) (bind xs (star expr)) ws (chr \})) (-> (apply hash-map xs)))
+  (listf (seq (chr \() (bind xs (star expr)) ws (chr \))) (-> (apply list xs)))
+  (expr  (seq ws (bind v (alt int- str- kw sym vecf mapf listf))) (-> v)))
+
+;; true if a parsed form contains a call (a list) anywhere — such forms still
+;; need eval; call-free forms are pure data and lower to a substitution.
+(defn has-call? [form]
+  (cond (vector? form) (some has-call? form)
+        (map? form)    (or (some has-call? (keys form)) (some has-call? (vals form)))
+        (seq? form)    true
+        :else          false))
+
+;; grammar<- : build a runnable Grammar from terse source. Each rule's captured
+;; host-action text is read + eval'd into a closure that closes over ns scope,
+;; with captured names let-bound from the frame (same shape defgrammar emits).
+(defn grammar<- [gname src]
+  (let [triples (parse metag :grules src)]
+    {:name gname :parent nil
+     :rules (reduce
+              (fn [m t]
+                (let [k (nth t 0) body (nth t 1) act (nth t 2)]
+                  (assoc m k
+                    (cond
+                      (nil? act) body
+                      ;; => data template: parsed by lgform, substituted — NO eval
+                      (= (nth act 0) :data)
+                      [:seq body [:subst (parse lgform :expr (nth act 1))]]
+                      ;; -> host code: parsed by lgform (self-hosted reader). Pure
+                      ;; data lowers to a substitution (no eval); calls still eval.
+                      :else
+                      (let [form (parse lgform :expr (nth act 1))]
+                        (if (has-call? form)
+                          ;; call-bearing: lower to feval — interpreted, NO eval
+                          [:seq body [:fexpr form]]
+                          ;; pure data: substitution — NO eval
+                          [:seq body [:subst form]]))))))
+              {} triples)}))
+
+(println "Phase A: terse-surface meta-grammar parses PEG text -> AST")
+(check "class"        (pexpr "[0-9]")      [:class "0-9"])
+(check "str"          (pexpr "'ab'")       [:str "ab"])
+(check "call"         (pexpr "foo")        [:call :foo])
+(check "any"          (pexpr ".")          [:any])
+(check "star"         (pexpr "foo*")       [:star [:call :foo]])
+(check "plus"         (pexpr "foo+")       [:plus [:call :foo]])
+(check "opt"          (pexpr "foo?")       [:opt [:call :foo]])
+(check "not"          (pexpr "~a")         [:not [:call :a]])
+(check "and"          (pexpr "&a")         [:and [:call :a]])
+(check "label"        (pexpr "x:a")        [:bind :x [:call :a]])
+(check "text builder" (pexpr "<a>")        [:text [:call :a]])
+(check "seq"          (pexpr "a b")        [:seq [:call :a] [:call :b]])
+(check "choice"       (pexpr "a / b")      [:alt [:call :a] [:call :b]])
+(check "group+star"   (pexpr "(a / b)*")   [:star [:alt [:call :a] [:call :b]]])
+(check "precedence: a b / c"
+       (pexpr "a b / c") [:alt [:seq [:call :a] [:call :b]] [:call :c]])
+(check "label binds a suffixed prim: ds:<[0-9]+>"
+       (pexpr "ds:<[0-9]+>") [:bind :ds [:text [:plus [:class "0-9"]]]])
+
+(println "Phase B: parse whole grammar source -> runnable grammar")
+(def numg (grammar<- 'numg "digit = [0-9]\nnumber = <digit+>"))
+(check "rule refs + value-builder from terse source" (parse numg :number "123") "123")
+
+(println "Phase C: BOOTSTRAP — terminal grammar in terse text, run via the engine")
+(def term-src
+  (str "digit = [0-9]\n"
+       "escseq = '" ESC "' '['\n"
+       "sgr = escseq ds:<digit+> 'm' -> {:type :sgr :params ds}\n"
+       "fnkey = escseq ds:<digit+> '~' -> {:type :fn-key :params ds}\n"
+       "txt = ~'" ESC "' c:. -> {:type :text :ch (str c)}\n"
+       "token = sgr / fnkey / txt\n"
+       "top = token*"))
+(def termB (grammar<- 'termB term-src))
+(check "terse-text terminal grammar == sexp term2 (actions lowered, no eval)"
+       (parse termB :top (str "a" ESC "[31m" ESC "[5~b"))
+       [{:type :text :ch "a"} {:type :sgr :params "31"}
+        {:type :fn-key :params "5"} {:type :text :ch "b"}])
+
+(println "Phase D: SELF-HOST fixpoint — metag's own expression grammar, in terse")
+;; The terse-PEG expression grammar written IN terse PEG (with host actions that
+;; build the AST). Parsed by the sexp metag -> metag2; metag2 then parses
+;; expressions identically to metag. `ws = ' '*` keeps it space-only so no
+;; control chars need embedding. (The rule/grammar/action productions transcribe
+;; the same way; expression sublanguage is enough to close the loop.)
+(def metag-src
+  (str "ws = ' '*" "\n"
+       "ident = <[a-zA-Z0-9_]+>" "\n"
+       "pgroup = '(' ws e:choice ws ')' -> e" "\n"
+       "ptext = '<' ws e:choice ws '>' -> [:text e]" "\n"
+       "pclass = '[' c:<(~']' .)*> ']' -> [:class c]" "\n"
+       "pstr1 = \"'\" s:<(~\"'\" .)*> \"'\" -> [:str s]" "\n"
+       "pstr2 = '\"' s:<(~'\"' .)*> '\"' -> [:str s]" "\n"
+       "pany = '.' -> [:any]" "\n"
+       "pcall = id:ident -> [:call (keyword id)]" "\n"
+       "prim = pgroup / ptext / pclass / pstr1 / pstr2 / pany / pcall" "\n"
+       "sstar = e:prim '*' -> [:star e]" "\n"
+       "splus = e:prim '+' -> [:plus e]" "\n"
+       "sopt = e:prim '?' -> [:opt e]" "\n"
+       "suffx = sstar / splus / sopt / prim" "\n"
+       "lab = nm:ident ':' e:suffx -> [:bind (keyword nm) e]" "\n"
+       "unary0 = lab / suffx" "\n"
+       "pnot = '~' e:unary -> [:not e]" "\n"
+       "pand = '&' e:unary -> [:and e]" "\n"
+       "unary = pnot / pand / unary0" "\n"
+       "term = ws u:unary -> u" "\n"
+       "seqr = xs:term+ -> (if (= 1 (count xs)) (first xs) (vec (cons :seq xs)))" "\n"
+       "atail = ws '/' ws s:seqr -> s" "\n"
+       "choice = x:seqr xs:atail* -> (if (empty? xs) x (vec (cons :alt (cons x xs))))"))
+(def metag2 (grammar<- 'metag2 metag-src))
+(defn pexpr2 [s] (parse metag2 :choice s))
+(check "self-host: class"        (pexpr2 "[0-9]")      (pexpr "[0-9]"))
+(check "self-host: str"          (pexpr2 "'ab'")       (pexpr "'ab'"))
+(check "self-host: seq+choice"   (pexpr2 "a b / c")    (pexpr "a b / c"))
+(check "self-host: label+text"   (pexpr2 "ds:<[0-9]+>") (pexpr "ds:<[0-9]+>"))
+(check "self-host: group+star"   (pexpr2 "(a / b)*")   (pexpr "(a / b)*"))
+(check "self-host: prefix"       (pexpr2 "~a")         (pexpr "~a"))
+(check "self-host: metag2 builds a runnable grammar (parse via bootstrapped defs)"
+       (let [g (grammar<- 'sub (str "digit = [0-9]" "\n" "n = <digit+>"))]
+         (parse g :n "42")) "42")
+
+(println "Phase E: semantic action AS DATA (=> template, captures substituted, no eval)")
+(check "subst-template: symbol->value, rest literal"
+       (subst-template [:sgr 'ds {:k 'ds}] {:ds "31"}) [:sgr "31" {:k "31"}])
+(defgrammar term-data
+  (digit  (cls "0-9"))
+  (escseq (seq (chr ESC) (chr \[)))
+  (sgr    (seq escseq (bind ds (text (plus digit))) (chr \m)) (=> [:sgr ds])))
+(check "sexp =>: data-template action (macro), captures substituted"
+       (parse term-data :sgr (str ESC "[31m")) [:sgr "31"])
+(def td-src (str "digit = [0-9]" "\n"
+                 "escseq = '" ESC "' '['" "\n"
+                 "sgr = escseq ds:<digit+> 'm' => {:type :sgr :params ds}"))
+(def tdg (grammar<- 'tdg td-src))
+(check "terse =>: data action built by substitution, NO eval"
+       (parse tdg :sgr (str ESC "[31m")) {:type :sgr :params "31"})
+
+;; === CODE LOWERING: compile the AST to a tree of closures ====================
+;; Each op is decided ONCE at compile time and captured as a specialized closure
+;; over its (already-compiled) children — no per-node cond dispatch, no AST-vector
+;; access at match time. This is stage-3's value-level form (closures instead of
+;; emitted source); the same walk later emits lg source for gogen AOT.
+(defn c-grammar-rule [g r]
+  (or (get (:crules g) r) (when (:parent g) (c-grammar-rule (:parent g) r))))
+
+(defn pc-call [st r]
+  (let [node (:s st) tbl (:memo node) g (:grammar st) k [(:name g) r] hit (get @tbl k)]
+    (cond
+      (= hit :fail) :fail
+      hit (assoc st :s (:s hit) :val (:val hit))
+      :else
+      (let [rf (c-grammar-rule g r)]
+        (when (nil? rf) (throw (ex-info "no such rule" {:rule r})))
+        (let [res (rf (assoc st :frame {}))]
+          (cond (= res :pending) res
+                (= res :fail) (do (swap! tbl assoc k :fail) :fail)
+                :else (do (swap! tbl assoc k {:s (:s res) :val (:val res)})
+                          (assoc st :s (:s res) :val (:val res)))))))))
+
+(declare compile-grammar)
+(defn compile-ast [ast]
+  (let [op (first ast)]
+    (cond
+      (= op :chr)  (let [c (second ast)]
+                     (fn [st] (let [f (sfront (:s st))]
+                                (cond (= f :pending) :pending (= f :end) :fail
+                                      :else (let [[_ x s'] f] (if (= x c) (assoc st :s s' :val x) :fail))))))
+      (= op :any)  (fn [st] (let [f (sfront (:s st))]
+                              (cond (= f :pending) :pending (= f :end) :fail
+                                    :else (let [[_ x s'] f] (assoc st :s s' :val x)))))
+      (= op :str)  (let [s- (second ast) n (count s-)]
+                     (fn [st] (loop [i 0 s (:s st)]
+                                (if (>= i n) (assoc st :s s :val s-)
+                                    (let [f (sfront s)]
+                                      (cond (= f :pending) :pending (= f :end) :fail
+                                            :else (let [[_ x s'] f] (if (= x (get s- i)) (recur (inc i) s') :fail))))))))
+      (= op :class) (let [cls (second ast)]
+                      (fn [st] (let [f (sfront (:s st))]
+                                 (cond (= f :pending) :pending (= f :end) :fail
+                                       :else (let [[_ x s'] f] (if (char-in-class? x cls) (assoc st :s s' :val x) :fail))))))
+      (= op :seq)  (let [cs (vec (map compile-ast (rest ast))) n (count cs)]
+                     (fn [st] (loop [i 0 st st lv nil]
+                                (if (>= i n) (assoc st :val lv)
+                                    (let [r ((nth cs i) st)]
+                                      (cond (= r :fail) :fail (= r :pending) :pending
+                                            :else (recur (inc i) r (:val r))))))))
+      (= op :alt)  (let [cs (vec (map compile-ast (rest ast))) n (count cs)]
+                     (fn [st] (loop [i 0]
+                                (if (>= i n) :fail
+                                    (let [r ((nth cs i) st)]
+                                      (cond (map? r) r (= r :pending) :pending :else (recur (inc i))))))))
+      (= op :star) (let [m (compile-ast (second ast))]
+                     (fn [st] (loop [st st acc []]
+                                (let [r (m st)]
+                                  (cond (= r :pending) :pending
+                                        (= r :fail) (assoc st :val acc)
+                                        (= (:idx (:s r)) (:idx (:s st))) (assoc st :val acc)
+                                        :else (recur r (conj acc (:val r))))))))
+      (= op :plus) (let [sm (compile-ast [:star (second ast)])]
+                     (fn [st] (let [r (sm st)] (cond (= r :pending) :pending (empty? (:val r)) :fail :else r))))
+      (= op :opt)  (let [m (compile-ast (second ast))]
+                     (fn [st] (let [r (m st)] (cond (= r :pending) :pending (= r :fail) (assoc st :val nil) :else r))))
+      (= op :not)  (let [m (compile-ast (second ast))]
+                     (fn [st] (let [r (m st)] (cond (= r :pending) :pending (= r :fail) (assoc st :val nil) :else :fail))))
+      (= op :and)  (let [m (compile-ast (second ast))]
+                     (fn [st] (let [r (m st)] (cond (= r :pending) :pending (= r :fail) :fail :else (assoc st :val (:val r))))))
+      (= op :bind) (let [k (second ast) m (compile-ast (nth ast 2))]
+                     (fn [st] (let [r (m st)] (cond (= r :fail) :fail (= r :pending) :pending
+                                                    :else (assoc r :frame (assoc (:frame r) k (:val r)))))))
+      (= op :expr) (let [caps (second ast) f (nth ast 2)]
+                     (fn [st] (assoc st :val (apply f (map (fn [kk] (get (:frame st) kk)) caps)))))
+      (= op :subst) (let [tmpl (second ast)]
+                      (fn [st] (assoc st :val (subst-template tmpl (:frame st)))))
+      (= op :fexpr) (let [form (second ast)]
+                      (fn [st] (assoc st :val (feval form (:frame st)))))
+      (= op :jump)  (let [table (reduce (fn [m e] (assoc m (key e) (compile-ast (val e)))) {} (second ast))]
+                      (fn [st] (let [f (sfront (:s st))]
+                                 (cond (= f :pending) :pending (= f :end) :fail
+                                       :else (let [[_ x s'] f] (let [cm (get table x ::nojump)]
+                                                                 (if (= cm ::nojump) :fail (cm (assoc st :s s')))))))))
+      (= op :text) (let [m (compile-ast (second ast))]
+                     (fn [st] (let [start (:s st) r (m st)]
+                                (cond (= r :fail) :fail (= r :pending) :pending :else (assoc r :val (span-str start (:s r)))))))
+      (= op :num)  (let [m (compile-ast (second ast))]
+                     (fn [st] (let [start (:s st) r (m st)]
+                                (cond (= r :fail) :fail (= r :pending) :pending :else (assoc r :val (parse-long (span-str start (:s r))))))))
+      (= op :call) (let [r (second ast)] (fn [st] (pc-call st r)))
+      (= op :call-dyn) (let [cap (second ast)] (fn [st] (pc-call st (get (:frame st) cap))))
+      (= op :call-in) (let [cg (compile-grammar (second ast)) rr (nth ast 2)]
+                        (fn [st] (let [rf (c-grammar-rule cg rr)]
+                                   (when (nil? rf) (throw (ex-info "no such rule" {:rule rr})))
+                                   (let [res (rf (assoc st :grammar cg :frame {}))]
+                                     (cond (= res :pending) res (= res :fail) :fail
+                                           :else (assoc st :s (:s res) :val (:val res)))))))
+      (= op :form) (let [m (compile-ast (second ast))]
+                     (fn [st] (let [f (sfront (:s st))]
+                                (cond (= f :pending) :pending (= f :end) :fail
+                                      :else (let [[_ x s'] f]
+                                              (if (sequential? x)
+                                                (let [r (m (assoc st :s (s-elems (vec x) 0)))]
+                                                  (cond (= r :fail) :fail (= r :pending) :pending
+                                                        (= (sfront (:s r)) :end) (assoc st :s s' :val (:val r) :frame (:frame r))
+                                                        :else :fail))
+                                                :fail))))))
+      :else (throw (ex-info "compile: unknown op" {:op op :ast ast})))))
+
+(defn compile-grammar [g]
+  (assoc g
+         :crules (reduce (fn [m e] (assoc m (key e) (compile-ast (val e)))) {} (:rules g))
+         :parent (when (:parent g) (compile-grammar (:parent g)))))
+
+(defn parse-c [cg rule input]
+  (let [rf (c-grammar-rule cg rule)
+        r  (rf {:s (s-str input 0) :frame {} :val nil :grammar cg})]
+    (cond (= r :fail) :fail (= r :pending) :pending :else (:val r))))
+
+(println "Phase F: CODE LOWERING — compile AST to closures; differential vs interpreter")
+(check "compiled == interpreted: terminal top"
+       (parse-c (compile-grammar term2) :top (str "a" ESC "[31m" ESC "[5~b"))
+       (parse term2 :top (str "a" ESC "[31m" ESC "[5~b")))
+(check "compiled == interpreted: inheritance + open-recursion override"
+       (parse-c (compile-grammar gC) :two "12,ab") (parse gC :two "12,ab"))
+(check "compiled == interpreted: foreign call-in"
+       (parse-c (compile-grammar gR) :mix "12-ab") (parse gR :mix "12-ab"))
+(check "compiled == interpreted: value-builder"
+       (parse-c (compile-grammar numg) :number "123") (parse numg :number "123"))
+(check "compiled == interpreted: data action (=>)"
+       (parse-c (compile-grammar tdg) :sgr (str ESC "[31m")) (parse tdg :sgr (str ESC "[31m")))
+(check "compiled == interpreted: meta-grammar parses an expression"
+       (parse-c (compile-grammar metag) :choice "a b / c") (parse metag :choice "a b / c"))
+
+;; === SOURCE EMIT: emit lg forms that call named runtime combinators =========
+;; The combinators are the named peers of the compile-ast closures; emitted code
+;; calls them, so each rule becomes a same-ns defn shape that gogen_ir can AOT-
+;; lower. load-emitted eval's the emitted forms into a :crules-carrying grammar.
+(defn rc-chr [st c]
+  (let [f (sfront (:s st))]
+    (cond (= f :pending) :pending (= f :end) :fail
+          :else (let [[_ x s'] f] (if (= x c) (assoc st :s s' :val x) :fail)))))
+(defn rc-any [st]
+  (let [f (sfront (:s st))]
+    (cond (= f :pending) :pending (= f :end) :fail
+          :else (let [[_ x s'] f] (assoc st :s s' :val x)))))
+(defn rc-str [st s-]
+  (loop [i 0 s (:s st)]
+    (if (>= i (count s-)) (assoc st :s s :val s-)
+        (let [f (sfront s)]
+          (cond (= f :pending) :pending (= f :end) :fail
+                :else (let [[_ x s'] f] (if (= x (get s- i)) (recur (inc i) s') :fail)))))))
+(defn rc-class [st cls]
+  (let [f (sfront (:s st))]
+    (cond (= f :pending) :pending (= f :end) :fail
+          :else (let [[_ x s'] f] (if (char-in-class? x cls) (assoc st :s s' :val x) :fail)))))
+(defn rc-seq [st & ms]
+  (loop [ms ms st st lv nil]
+    (if (empty? ms) (assoc st :val lv)
+        (let [r ((first ms) st)]
+          (cond (= r :fail) :fail (= r :pending) :pending
+                :else (recur (rest ms) r (:val r)))))))
+(defn rc-alt [st & ms]
+  (loop [ms ms]
+    (if (empty? ms) :fail
+        (let [r ((first ms) st)]
+          (cond (map? r) r (= r :pending) :pending :else (recur (rest ms)))))))
+(defn rc-star [st m]
+  (loop [st st acc []]
+    (let [r (m st)]
+      (cond (= r :pending) :pending
+            (= r :fail) (assoc st :val acc)
+            (= (:idx (:s r)) (:idx (:s st))) (assoc st :val acc)
+            :else (recur r (conj acc (:val r)))))))
+(defn rc-plus [st m]
+  (let [r (rc-star st m)] (cond (= r :pending) :pending (empty? (:val r)) :fail :else r)))
+(defn rc-opt [st m]
+  (let [r (m st)] (cond (= r :pending) :pending (= r :fail) (assoc st :val nil) :else r)))
+(defn rc-not [st m]
+  (let [r (m st)] (cond (= r :pending) :pending (= r :fail) (assoc st :val nil) :else :fail)))
+(defn rc-and [st m]
+  (let [r (m st)] (cond (= r :pending) :pending (= r :fail) :fail :else (assoc st :val (:val r)))))
+(defn rc-bind [st k m]
+  (let [r (m st)] (cond (= r :fail) :fail (= r :pending) :pending
+                        :else (assoc r :frame (assoc (:frame r) k (:val r))))))
+(defn rc-expr [st caps f]
+  (assoc st :val (apply f (map (fn [k] (get (:frame st) k)) caps))))
+(defn rc-subst [st tmpl] (assoc st :val (subst-template tmpl (:frame st))))
+(defn rc-fexpr [st form] (assoc st :val (feval form (:frame st))))
+(defn rc-jump [st table]
+  (let [f (sfront (:s st))]
+    (cond (= f :pending) :pending (= f :end) :fail
+          :else (let [[_ x s'] f] (let [m (get table x ::nojump)]
+                                    (if (= m ::nojump) :fail (m (assoc st :s s'))))))))
+(defn rc-text [st m]
+  (let [start (:s st) r (m st)]
+    (cond (= r :fail) :fail (= r :pending) :pending :else (assoc r :val (span-str start (:s r))))))
+(defn rc-num [st m]
+  (let [start (:s st) r (m st)]
+    (cond (= r :fail) :fail (= r :pending) :pending :else (assoc r :val (parse-long (span-str start (:s r)))))))
+(defn rc-call [st r] (pc-call st r))
+(defn rc-call-dyn [st cap] (pc-call st (get (:frame st) cap)))
+(defn rc-form [st m]
+  (let [f (sfront (:s st))]
+    (cond (= f :pending) :pending (= f :end) :fail
+          :else (let [[_ x s'] f]
+                  (if (sequential? x)
+                    (let [r (m (assoc st :s (s-elems (vec x) 0)))]
+                      (cond (= r :fail) :fail (= r :pending) :pending
+                            (= (sfront (:s r)) :end) (assoc st :s s' :val (:val r) :frame (:frame r))
+                            :else :fail))
+                    :fail)))))
+(declare load-emitted)
+(defn rc-call-in [st g r]
+  (let [cg (load-emitted g) rf (c-grammar-rule cg r)]
+    (when (nil? rf) (throw (ex-info "no such rule" {:rule r})))
+    (let [res (rf (assoc st :grammar cg :frame {}))]
+      (cond (= res :pending) res (= res :fail) :fail
+            :else (assoc st :s (:s res) :val (:val res))))))
+
+(defn emit-ast [ast]
+  (let [op (first ast)]
+    (cond
+      (= op :chr)   (list 'fn ['st] (list 'rc-chr 'st (second ast)))
+      (= op :any)   (list 'fn ['st] (list 'rc-any 'st))
+      (= op :str)   (list 'fn ['st] (list 'rc-str 'st (second ast)))
+      (= op :class) (list 'fn ['st] (list 'rc-class 'st (second ast)))
+      (= op :seq)   (list 'fn ['st] (apply list 'rc-seq 'st (map emit-ast (rest ast))))
+      (= op :alt)   (list 'fn ['st] (apply list 'rc-alt 'st (map emit-ast (rest ast))))
+      (= op :star)  (list 'fn ['st] (list 'rc-star 'st (emit-ast (second ast))))
+      (= op :plus)  (list 'fn ['st] (list 'rc-plus 'st (emit-ast (second ast))))
+      (= op :opt)   (list 'fn ['st] (list 'rc-opt 'st (emit-ast (second ast))))
+      (= op :not)   (list 'fn ['st] (list 'rc-not 'st (emit-ast (second ast))))
+      (= op :and)   (list 'fn ['st] (list 'rc-and 'st (emit-ast (second ast))))
+      (= op :bind)  (list 'fn ['st] (list 'rc-bind 'st (second ast) (emit-ast (nth ast 2))))
+      (= op :expr)  (list 'fn ['st] (list 'rc-expr 'st (list 'quote (second ast)) (list 'quote (nth ast 2))))
+      (= op :subst) (list 'fn ['st] (list 'rc-subst 'st (list 'quote (second ast))))
+      (= op :fexpr) (list 'fn ['st] (list 'rc-fexpr 'st (list 'quote (second ast))))
+      (= op :jump)  (list 'fn ['st] (list 'rc-jump 'st (cons 'hash-map (reduce (fn [acc e] (conj acc (key e) (emit-ast (val e)))) [] (second ast)))))
+      (= op :text)  (list 'fn ['st] (list 'rc-text 'st (emit-ast (second ast))))
+      (= op :num)   (list 'fn ['st] (list 'rc-num 'st (emit-ast (second ast))))
+      (= op :call)  (list 'fn ['st] (list 'rc-call 'st (second ast)))
+      (= op :call-dyn) (list 'fn ['st] (list 'rc-call-dyn 'st (second ast)))
+      (= op :call-in) (list 'fn ['st] (list 'rc-call-in 'st (list 'quote (second ast)) (nth ast 2)))
+      (= op :form)  (list 'fn ['st] (list 'rc-form 'st (emit-ast (second ast))))
+      :else (throw (ex-info "emit: unknown op" {:op op})))))
+
+(defn emit-grammar [gname g]
+  (let [crules (reduce (fn [m e] (assoc m (key e) (emit-ast (val e)))) {} (:rules g))]
+    (list 'hash-map
+          :name   (list 'quote gname)
+          :parent (if (:parent g) (emit-grammar (symbol (str (name gname) "-parent")) (:parent g)) nil)
+          :crules crules)))
+
+(defn load-emitted [g] (eval (emit-grammar (:name g) g)))
+
+(println "Phase G: SOURCE EMIT — emit lg forms, eval, differential vs interpreter")
+(check "emit-ast produces a form (data), not a closure" (seq? (emit-ast [:chr \a])) true)
+(check "emitted == interpreted: value-builder grammar (no action fns)"
+       (parse-c (load-emitted numg) :number "123") (parse numg :number "123"))
+(check "emitted == interpreted: terminal grammar (action fns embedded)"
+       (parse-c (load-emitted term2) :top (str "a" ESC "[31m" ESC "[5~b"))
+       (parse term2 :top (str "a" ESC "[31m" ESC "[5~b")))
+(check "emitted == interpreted: inheritance/open-recursion"
+       (parse-c (load-emitted gC) :two "12,ab") (parse gC :two "12,ab"))
+(check "emitted == interpreted: foreign call-in"
+       (parse-c (load-emitted gR) :mix "12-ab") (parse gR :mix "12-ab"))
+(check "emitted == interpreted: data action (=>)"
+       (parse-c (load-emitted tdg) :sgr (str ESC "[31m")) (parse tdg :sgr (str ESC "[31m")))
+
+;; === OPTIMIZER: behavior-preserving AST rewrites ============================
+;; flatten: [:alt [:alt …] …] -> one :alt (same for :seq; both associative).
+;; inline-lit: [:str "abc"] -> [:seq [:chr \a]…[:subst "abc"]] — chars plus a
+;; value-restoring data action (OMeta-JS's seq-inliner). :expr/:subst payloads
+;; are opaque and never recursed into. (These passes are the flatten/inline of
+;; OMeta's optimizer; the structural :form op is what lets them be re-expressed
+;; as tree grammars over the AST.)
+(declare optimize-ast)
+(defn opt-children [ast] (vec (cons (first ast) (map optimize-ast (rest ast)))))
+(defn optimize-ast [ast]
+  (if-not (vector? ast) ast
+    (let [op (first ast)]
+      (cond
+        (or (= op :expr) (= op :subst)) ast
+        (or (= op :alt) (= op :seq))
+        (let [kids (map optimize-ast (rest ast))
+              flat (reduce (fn [acc k]
+                             (if (and (vector? k) (= (first k) op)) (into acc (rest k)) (conj acc k)))
+                           [] kids)]
+          (vec (cons op flat)))
+        (= op :str)
+        (let [s (second ast)]
+          (if (> (count s) 1)
+            (conj (vec (cons :seq (map (fn [c] [:chr c]) s))) [:subst s])
+            ast))
+        :else (opt-children ast)))))
+
+;; The SAME rewrites in OMeta/maru TREE-GRAMMAR style: a grammar matching
+;; structurally over the AST via :form. `opt` dispatches by node shape (ordered
+;; choice); `opt-node` is the generic case (recurse over children, rebuild);
+;; atoms pass through; :expr/:subst payloads pass through unrecursed. This is
+;; the graceful form the plain optimize-ast approximates.
+(defn flatten-op [op ks]
+  (vec (cons op (reduce (fn [acc k]
+                          (if (and (vector? k) (= (first k) op)) (into acc (rest k)) (conj acc k)))
+                        [] ks))))
+(defn inline-str-node [s]
+  (if (> (count s) 1)
+    (conj (vec (cons :seq (map (fn [c] [:chr c]) s))) [:subst s])
+    [:str s]))
+(defgrammar optg
+  (opt-expr  (form (seq (chr :expr) (bind c (any)) (bind f (any))))  (=> [:expr c f]))
+  (opt-subst (form (seq (chr :subst) (bind t (any))))                (=> [:subst t]))
+  (opt-alt   (form (seq (chr :alt) (bind ks (star (call opt)))))     (-> (flatten-op :alt ks)))
+  (opt-seq   (form (seq (chr :seq) (bind ks (star (call opt)))))     (-> (flatten-op :seq ks)))
+  (opt-str   (form (seq (chr :str) (bind s (any))))                  (-> (inline-str-node s)))
+  (opt-node  (form (seq (bind h (any)) (bind ks (star (call opt))))) (-> (vec (cons h ks))))
+  (opt-atom  (bind a (any))                                          (-> a))
+  (opt (alt (call opt-expr) (call opt-subst) (call opt-alt) (call opt-seq)
+            (call opt-str) (call opt-node) (call opt-atom))))
+(defn optimize-tg [ast] (parse-node optg :opt (s-elems [ast] 0)))
+
+;; === COMBINING OPTIMIZERS, OMeta style ======================================
+;; opt-base is BSNullOptimization: generic `trans` (descend a node, recurse over
+;; children, rebuild), payload passthrough for :expr/:subst/:fexpr, and a
+;; `special` dispatch hook that defaults to fail. Each PASS inherits opt-base and
+;; overrides `special` with its rewrites (open recursion: the inherited generic
+;; recurses back through the pass's own opt). An orchestrator combines passes and
+;; runs to a fixpoint (helped = "the AST changed", detected structurally).
+(defgrammar opt-base
+  (op-expr  (form (seq (chr :expr) (bind c (any)) (bind f (any))))  (=> [:expr c f]))
+  (op-subst (form (seq (chr :subst) (bind t (any))))                (=> [:subst t]))
+  (op-fexpr (form (seq (chr :fexpr) (bind e (any))))                (=> [:fexpr e]))
+  (opaque   (alt op-expr op-subst op-fexpr))
+  (special  (chr :__never__))                                        ; default: never matches
+  (generic  (form (seq (bind h (any)) (bind ks (star (call opt))))) (-> (vec (cons h ks))))
+  (atom     (bind a (any))                                          (-> a))
+  (opt      (alt opaque special generic atom)))
+(defgrammar assoc-pass :extends opt-base
+  (s-alt   (form (seq (chr :alt) (bind ks (star (call opt))))) (-> (flatten-op :alt ks)))
+  (s-seq   (form (seq (chr :seq) (bind ks (star (call opt))))) (-> (flatten-op :seq ks)))
+  (special (alt s-alt s-seq)))
+(defgrammar inline-pass :extends opt-base
+  (s-str   (form (seq (chr :str) (bind s (any)))) (-> (inline-str-node s)))
+  (special s-str))
+;; jump-table: an :alt whose every branch is [:seq [:chr c] …≥1 more] with
+;; distinct c becomes [:jump {c → [:seq …rest]}] — first-set O(1) dispatch.
+(defn jumpable? [ks]
+  (and (> (count ks) 1)
+       (every? (fn [k] (and (vector? k) (= (first k) :seq) (>= (count k) 3)
+                            (vector? (nth k 1)) (= (first (nth k 1)) :chr))) ks)
+       (= (count ks) (count (distinct (map (fn [k] (nth (nth k 1) 1)) ks))))))
+(defn make-jump [ks]
+  (if (jumpable? ks)
+    [:jump (reduce (fn [m k] (assoc m (nth (nth k 1) 1) (vec (cons :seq (drop 2 k))))) {} ks)]
+    (vec (cons :alt ks))))
+(defgrammar jumptable-pass :extends opt-base
+  (j-alt   (form (seq (chr :alt) (bind ks (star (call opt))))) (-> (make-jump ks)))
+  (special j-alt))
+(defn run-pass [pass ast] (parse-node pass :opt (s-elems [ast] 0)))
+;; combine passes: reduce the AST through each pass, repeat until nothing changes.
+(defn optimize-passes [passes ast]
+  (loop [ast ast]
+    (let [ast' (reduce (fn [a p] (run-pass p a)) ast passes)]
+      (if (= ast' ast) ast (recur ast')))))
+
+(println "Phase H: OPTIMIZER — structural :form matching + AST rewrite passes")
+(check "structural :form descends into a nested seq via a sub-stream"
+       (parse-node {:name 'sg :parent nil
+                    :rules {:pair [:form [:seq [:call :k] [:call :v]]]
+                            :k [:chr :key] :v [:any]}}
+                   :pair (s-elems [[:key 42]] 0))
+       42)
+(check "flatten: nested alt collapses"
+       (optimize-ast [:alt [:alt [:call :a] [:call :b]] [:call :c]])
+       [:alt [:call :a] [:call :b] [:call :c]])
+(check "flatten: nested seq collapses"
+       (optimize-ast [:seq [:seq [:chr \a] [:chr \b]] [:chr \c]])
+       [:seq [:chr \a] [:chr \b] [:chr \c]])
+(check "inline-lit: multi-char str -> chars + value-restoring data action"
+       (optimize-ast [:str "ab"]) [:seq [:chr \a] [:chr \b] [:subst "ab"]])
+(check "inline-lit preserves value (differential)"
+       (let [g {:name 'ig :parent nil :rules {:r (optimize-ast [:str "ab"])}}]
+         (parse g :r "abc")) "ab")
+(check "optimized grammar == unoptimized (behavior preserved) — terminal"
+       (let [og (assoc term2 :rules (reduce (fn [m e] (assoc m (key e) (optimize-ast (val e)))) {} (:rules term2)))]
+         (parse og :top (str "a" ESC "[31m" ESC "[5~b")))
+       (parse term2 :top (str "a" ESC "[31m" ESC "[5~b")))
+
+(println "Phase H2: OPTIMIZER AS A TREE GRAMMAR (OMeta/maru style)")
+(check "tree-grammar flatten alt == plain optimizer"
+       (optimize-tg [:alt [:alt [:call :a] [:call :b]] [:call :c]])
+       (optimize-ast [:alt [:alt [:call :a] [:call :b]] [:call :c]]))
+(check "tree-grammar flatten seq == plain optimizer"
+       (optimize-tg [:seq [:seq [:chr \a] [:chr \b]] [:chr \c]])
+       (optimize-ast [:seq [:seq [:chr \a] [:chr \b]] [:chr \c]]))
+(check "tree-grammar inline-str == plain optimizer"
+       (optimize-tg [:str "ab"]) (optimize-ast [:str "ab"]))
+(check "tree-grammar preserves a non-target node (bind)"
+       (optimize-tg [:bind :ds [:plus [:call :digit]]]) [:bind :ds [:plus [:call :digit]]])
+(check "tree-grammar optimized grammar == interpreted (terminal, incl. :expr passthrough)"
+       (let [og (assoc term2 :rules (reduce (fn [m e] (assoc m (key e) (optimize-tg (val e)))) {} (:rules term2)))]
+         (parse og :top (str "a" ESC "[31m" ESC "[5~b")))
+       (parse term2 :top (str "a" ESC "[31m" ESC "[5~b")))
+
+(println "Phase J: COMBINING OPTIMIZERS (OMeta style — passes inherit a shared base)")
+(check "opt-base is identity (generic trans, no rewrites)"
+       (run-pass opt-base [:alt [:alt [:call :a] [:call :b]] [:call :c]])
+       [:alt [:alt [:call :a] [:call :b]] [:call :c]])
+(check "assoc-pass (inherits base, overrides special) flattens == plain optimizer"
+       (run-pass assoc-pass [:alt [:alt [:call :a] [:call :b]] [:call :c]])
+       (optimize-ast [:alt [:alt [:call :a] [:call :b]] [:call :c]]))
+(check "inline-pass inlines str == plain optimizer"
+       (run-pass inline-pass [:str "ab"]) (optimize-ast [:str "ab"]))
+(check "combined passes to fixpoint — behavior-preserving on terminal"
+       (let [og (assoc term2 :rules (reduce (fn [m e] (assoc m (key e) (optimize-passes [assoc-pass inline-pass] (val e)))) {} (:rules term2)))]
+         (parse og :top (str "a" ESC "[31m" ESC "[5~b")))
+       (parse term2 :top (str "a" ESC "[31m" ESC "[5~b")))
+(check "combined optimize is a fixpoint (re-running is stable)"
+       (let [o1 (optimize-passes [assoc-pass inline-pass] [:alt [:alt [:call :a] [:call :b]] [:str "xy"]])]
+         (= o1 (optimize-passes [assoc-pass inline-pass] o1))) true)
+
+(println "Phase J2: JUMP-TABLE pass (first-set O(1) dispatch)")
+(def jump-in [:alt [:seq [:chr \a] [:str "X"]] [:seq [:chr \b] [:str "Y"]]])
+(check "jumptable-pass builds a :jump for distinct-char-leading alts"
+       (first (run-pass jumptable-pass jump-in)) :jump)
+(check "jump-table preserves behavior vs the :alt"
+       (let [gj {:name 'gj :parent nil :rules {:r (run-pass jumptable-pass jump-in)}}]
+         [(parse gj :r "aX") (parse gj :r "bY") (parse gj :r "c")])
+       (let [ga {:name 'ga :parent nil :rules {:r jump-in}}]
+         [(parse ga :r "aX") (parse ga :r "bY") (parse ga :r "c")]))
+(check "jumptable-pass leaves a non-conforming alt as :alt"
+       (run-pass jumptable-pass [:alt [:call :a] [:call :b]]) [:alt [:call :a] [:call :b]])
+(check "full pipeline composes flatten+inline+jumptable to fixpoint (behavior-preserving)"
+       (let [og (assoc term2 :rules (reduce (fn [m e] (assoc m (key e) (optimize-passes [assoc-pass inline-pass jumptable-pass] (val e)))) {} (:rules term2)))]
+         (parse og :top (str "a" ESC "[31m" ESC "[5~b")))
+       (parse term2 :top (str "a" ESC "[31m" ESC "[5~b")))
+
+(println "Phase K: DYNAMIC RULE-APPLICATION (OMeta apply(t))")
+(defgrammar dyn-demo
+  (pick (seq (bind t (any)) (call-dyn t)))
+  (a (-> :got-a))
+  (b (-> :got-b)))
+(check "call-dyn dispatches to the rule named by a captured value"
+       [(parse-node dyn-demo :pick (s-elems [:a] 0)) (parse-node dyn-demo :pick (s-elems [:b] 0))]
+       [:got-a :got-b])
+
+;; The FAITHFUL OMeta optimizer: `trans` dispatches by the node's head tag via
+;; apply(t) (call-dyn), and there is a rule named for each AST tag (BSNull-
+;; Optimization). A pass inherits td-base and overrides tag rules DIRECTLY —
+;; no dispatch hook. Leaf tags rebuild with a data template (=>); :seq/:alt need
+;; vec/cons so they use code (->). Atom children match via (any); node children
+;; via (call trans).
+(defgrammar td-base
+  (trans    (form (seq (bind t (any)) (call-dyn t))))
+  (top      trans)
+  (chr      (bind c (any)) (=> [:chr c]))
+  (any      (=> [:any]))
+  (str      (bind s (any)) (=> [:str s]))
+  (class    (bind c (any)) (=> [:class c]))
+  (call     (bind r (any)) (=> [:call r]))
+  (call-dyn (bind c (any)) (=> [:call-dyn c]))
+  (call-in  (seq (bind g (any)) (bind r (any))) (=> [:call-in g r]))
+  (bind     (seq (bind k (any)) (bind e (call trans))) (=> [:bind k e]))
+  (expr     (seq (bind c (any)) (bind f (any))) (=> [:expr c f]))
+  (subst    (bind t (any)) (=> [:subst t]))
+  (fexpr    (bind e (any)) (=> [:fexpr e]))
+  (jump     (bind t (any)) (=> [:jump t]))
+  (seq      (bind ks (star (call trans))) (-> (vec (cons :seq ks))))
+  (alt      (bind ks (star (call trans))) (-> (vec (cons :alt ks))))
+  (star     (bind e (call trans)) (=> [:star e]))
+  (plus     (bind e (call trans)) (=> [:plus e]))
+  (opt      (bind e (call trans)) (=> [:opt e]))
+  (not      (bind e (call trans)) (=> [:not e]))
+  (and      (bind e (call trans)) (=> [:and e]))
+  (text     (bind e (call trans)) (=> [:text e]))
+  (num      (bind e (call trans)) (=> [:num e]))
+  (form     (bind e (call trans)) (=> [:form e])))
+(defgrammar td-assoc :extends td-base
+  (seq (bind ks (star (call trans))) (-> (flatten-op :seq ks)))
+  (alt (bind ks (star (call trans))) (-> (flatten-op :alt ks))))
+(defgrammar td-inline :extends td-base
+  (str (bind s (any)) (-> (inline-str-node s))))
+(defgrammar td-jump :extends td-base
+  (alt (bind ks (star (call trans))) (-> (make-jump ks))))
+(defn run-td [pass ast] (parse-node pass :top (s-elems [ast] 0)))
+(defn optimize-td [passes ast]
+  (loop [ast ast]
+    (let [ast' (reduce (fn [a p] (run-td p a)) ast passes)]
+      (if (= ast' ast) ast (recur ast')))))
+
+(check "faithful td-base (trans/apply(t)) is identity"
+       (run-td td-base [:seq [:call :a] [:bind :x [:chr \y]]])
+       [:seq [:call :a] [:bind :x [:chr \y]]])
+(check "faithful td-assoc == hook assoc-pass (flatten via tag-rule override)"
+       (run-td td-assoc [:alt [:alt [:call :a] [:call :b]] [:call :c]])
+       (run-pass assoc-pass [:alt [:alt [:call :a] [:call :b]] [:call :c]]))
+(check "faithful td-inline == hook inline-pass"
+       (run-td td-inline [:str "ab"]) (run-pass inline-pass [:str "ab"]))
+(check "faithful td-jump builds a :jump for distinct-char alts"
+       (first (run-td td-jump jump-in)) :jump)
+(check "faithful pipeline (apply(t) dispatch) behavior-preserving on terminal"
+       (let [og (assoc term2 :rules (reduce (fn [m e] (assoc m (key e) (optimize-td [td-assoc td-inline td-jump] (val e)))) {} (:rules term2)))]
+         (parse og :top (str "a" ESC "[31m" ESC "[5~b")))
+       (parse term2 :top (str "a" ESC "[31m" ESC "[5~b")))
+
+(println "Phase I: ACTION GRAMMAR — parse -> host code with lgform (self-hosted reader)")
+(check "lgform parses a data map literal" (parse lgform :expr "{:type :sgr :params 31}") {:type :sgr :params 31})
+(check "lgform parses a nested vector"    (parse lgform :expr "[:sgr [:x 1]]") [:sgr [:x 1]])
+(check "lgform parses a list (call form)" (seq? (parse lgform :expr "(count xs)")) true)
+(check "-> pure-data action lowered via lgform (NO eval) == expected"
+       (let [g (grammar<- 'ti (str "digit = [0-9]" "\n" "escseq = '" ESC "' '['" "\n"
+                                   "sgr = escseq ds:<digit+> 'm' -> [:sgr ds]"))]
+         (parse g :sgr (str ESC "[31m"))) [:sgr "31"])
+(check "-> call-bearing action works via feval (NO eval)"
+       (let [g (grammar<- 'ti2 (str "digit = [0-9]" "\n" "escseq = '" ESC "' '['" "\n"
+                                    "sgr = escseq ds:<digit+> 'm' -> (count ds)"))]
+         (parse g :sgr (str ESC "[31m"))) 2)
+(check "feval interprets a call form against captures (no eval)"
+       (feval (quote (str "x" n)) {:n 42}) "x42")
+(check "feval handles if + nested calls"
+       (feval (quote (if (= 1 (count xs)) (first xs) :many)) {:xs [:only]}) :only)
+(check "call-bearing -> lowers to a :fexpr node (no eval path)"
+       (first (last (:r (:rules (grammar<- 'tf (str "digit = [0-9]" "\n" "r = ds:<digit+> -> (count ds)"))))))
+       :fexpr)
+
+(println "Phase M: VALUE/EFFECT SPLIT (maru $rule / $$rule)")
+(check "pm-eff matches like pm — same end position, but builds no value"
+       (let [st {:s (s-str "abX" 0) :frame {} :val :sentinel :grammar nil}
+             v (pm     [:seq [:chr \a] [:chr \b]] st)
+             e (pm-eff [:seq [:chr \a] [:chr \b]] st)]
+         [(= (:idx (:s v)) (:idx (:s e)))   ; same end position
+          (= (:val v) \b)                    ; value path built the result
+          (= (:val e) :sentinel)])           ; effect path left :val untouched
+       [true true true])
+(check "pm-eff fails where pm fails"
+       (pm-eff [:seq [:chr \a] [:chr \x]] {:s (s-str "abX" 0) :frame {} :val nil :grammar nil}) :fail)
+(check ":not now runs in effect mode — negative lookahead still correct (term2 txt)"
+       (parse term2 :token "a") {:type :text :ch "a"})
+(check "effect-mode negative lookahead in a value grammar (metag ~ still parses)"
+       (parse metag :choice "~a") [:not [:call :a]])
+
+(println "Phase L: LEFT RECURSION (seed-growing, maru/Warth)")
+(defgrammar lrec
+  (digit (cls "0-9"))
+  (n     (num (plus digit)))
+  (sub   (seq (bind a (call expr)) (chr \-) (bind b (call n))) (-> (- a b)))
+  (expr  (alt (call sub) (call n))))
+(check "left-recursive, left-associative: 7-2-1 = (7-2)-1 = 4" (parse lrec :expr "7-2-1") 4)
+(check "left recursion: 10-3 = 7" (parse lrec :expr "10-3") 7)
+(check "left recursion: base case (single number)" (parse lrec :expr "5") 5)
+(check "left recursion does not disturb right-recursive grammars"
+       (parse term2 :top (str "a" ESC "[31m" ESC "[5~b"))
+       [{:type :text :ch "a"} {:type :sgr :params "31"}
+        {:type :fn-key :params "5"} {:type :text :ch "b"}])
+
+;; === A Clojure/lg reader, as a grammar =====================================
+(defn clj-sym [s] (cond (= s "nil") nil (= s "true") true (= s "false") false :else (symbol s)))
+(defn unescape [e] (cond (= e \n) \newline (= e \t) \tab (= e \r) \return (= e \") \" (= e \\) \\ :else e))
+(defgrammar cljg
+  (comment (seq (chr \;) (star (seq (neg (chr (char 10))) (any)))))
+  (ws      (star (alt (cls " \t\n\r,") comment)))
+  (symchar (cls "a-zA-Z0-9_.*+/<>=?!$%&.-"))
+  (int-    (num (seq (opt (chr \-)) (plus (cls "0-9")))))
+  (stresc  (seq (chr \\) (bind e (any))) (-> (unescape e)))
+  (strch   (seq (neg (chr \")) (bind c (any))) (-> c))
+  (string- (seq (chr \") (bind cs (star (alt stresc strch))) (chr \")) (-> (apply str cs)))
+  (keyword- (seq (chr \:) (bind s (text (plus symchar)))) (-> (keyword s)))
+  (sym-tok (bind s (text (plus symchar))) (-> (clj-sym s)))
+  (list-   (seq (chr \() (bind xs (star form)) ws (chr \))) (-> (apply list xs)))
+  (vec-    (seq (chr \[) (bind xs (star form)) ws (chr \])) (-> (vec xs)))
+  (map-    (seq (chr \{) (bind xs (star form)) ws (chr \})) (-> (apply hash-map xs)))
+  (set-    (seq (chr \#) (chr \{) (bind xs (star form)) ws (chr \})) (-> (set xs)))
+  (quote-  (seq (chr \') (bind e form)) (-> (list 'quote e)))
+  (form    (seq ws (bind v (alt int- string- keyword- quote- set- list- vec- map- sym-tok))) (-> v)))
+(defn cread [s] (parse cljg :form s))
+
+(println "Phase N: A CLOJURE READER, AS A GRAMMAR (differential vs host read-string)")
+(check "int"        (cread "42")        (read-string "42"))
+(check "neg int"    (cread "-7")        (read-string "-7"))
+(check "string+esc" (cread "\"a\\nb\"") (read-string "\"a\\nb\""))
+(check "keyword"    (cread ":foo")      (read-string ":foo"))
+(check "symbol"     (cread "foo")       (read-string "foo"))
+(check "nil/true/false" [(cread "nil") (cread "true") (cread "false")] [nil true false])
+(check "vector"     (cread "[1 2 3]")   (read-string "[1 2 3]"))
+(check "list"       (cread "(a b c)")   (read-string "(a b c)"))
+(check "map"        (cread "{:a 1 :b 2}") (read-string "{:a 1 :b 2}"))
+(check "set"        (cread "#{1 2 3}")   #{1 2 3})   ; lg read-string expands #{} to a (hash-set …) form; cljg yields the set
+(check "quote"      (cread "'x")         (read-string "'x"))
+(check "nested + comments + commas"
+       (cread "(defn f [x] ; c\n  {:r [x, x]})")
+       (read-string "(defn f [x] ; c\n  {:r [x, x]})"))
+
+(println)
+(println (str "peg-engine stage 1+2: " @pass " passed, " @fail " failed"))
+(when (pos? @fail) (throw (ex-info "peg-engine checks failed" {:fail @fail})))
