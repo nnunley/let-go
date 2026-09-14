@@ -1026,9 +1026,17 @@
   "Two measured results in, the delta surface out. Pure: this is the half of
    PR mode that has no I/O, and the half worth testing directly.
 
-   A delta is signed and POSITIVE MEANS WORSE, because every term is
+  A delta is signed and POSITIVE MEANS WORSE, because every term is
    lower-is-better."
   [base-res head-res base-rev head-rev]
+  (when (or (= :incomplete-go-analysis (:score-status base-res))
+            (nil? (:debt base-res)))
+    (throw (ex-info "Cannot compare incomplete quality report"
+                    {:side :base :score-status (:score-status base-res)})))
+  (when (or (= :incomplete-go-analysis (:score-status head-res))
+            (nil? (:debt head-res)))
+    (throw (ex-info "Cannot compare incomplete quality report"
+                    {:side :head :score-status (:score-status head-res)})))
   {:base {:rev base-rev :debt (:debt base-res) :terms (:terms base-res)}
    :head {:rev head-rev :debt (:debt head-res) :terms (:terms head-res)}
    :debt-delta (- (:debt head-res) (:debt base-res))

@@ -26,6 +26,32 @@
           [{:path "a.lg" :debt 0.45 :definitions [{:name 'big :cc 14}]}
            {:path "b.lg" :debt 0.39 :definitions [{:name 'calm :cc 3}]}]))
 
+(deftest incomplete-analysis-rejects-a-base-delta
+  (let [incomplete {:debt nil :score-status :incomplete-go-analysis
+                    :terms {:erosion nil} :files []}
+        complete {:debt 0.3 :score-status :complete
+                  :terms {:erosion 0.4} :files []}
+        error (try (q/compare-results incomplete complete "BASE" "HEAD")
+                   (catch Throwable e e))]
+    (is (= :base (:side (ex-data error))))))
+
+(deftest incomplete-analysis-rejects-a-head-delta
+  (let [incomplete {:debt nil :score-status :incomplete-go-analysis
+                    :terms {:erosion nil} :files []}
+        complete {:debt 0.3 :score-status :complete
+                  :terms {:erosion 0.4} :files []}
+        error (try (q/compare-results complete incomplete "BASE" "HEAD")
+                   (catch Throwable e e))]
+    (is (= :head (:side (ex-data error))))))
+
+(deftest complete-analysis-still-reports-a-numeric-debt-delta
+  (let [complete {:debt 0.3 :score-status :complete
+                  :terms {:erosion 0.4} :files []}
+        worse (assoc complete :debt 0.34)
+        delta (q/compare-results complete worse "BASE" "HEAD")]
+    (is (number? (:debt-delta delta)))
+    (is (< 0.039 (:debt-delta delta) 0.041))))
+
 (deftest a-regression-reports-a-positive-composite-delta
   (let [d (q/compare-results base head-worse "BASE" "HEAD")]
     (is (> (:debt-delta d) 0))
