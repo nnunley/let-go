@@ -25,20 +25,29 @@ checking completeness.
 
 ## Result contract
 
-- The human-facing erosion summary is `lg=<number> go=<number|UNAVAILABLE|NOT
-  REQUESTED>`, not an unlabeled aggregate erosion number. The EDN breakdown
-  retains `:lg`, `:go`, and `:go-source`; it does not expose a separate
-  `:erosion :value`. The existing `:terms :erosion` remains the auditable
-  combined *debt input* on complete reports, not a third language score.
+- The human-facing erosion summary is `erosion lg=<number>
+  go=<number|UNAVAILABLE|NOT REQUESTED>`, never the old unlabeled `erosion
+  <number>` prefix. The EDN breakdown retains `:lg`, `:go`, and `:go-source`;
+  it does not expose a separate `:erosion :value`. The existing
+  `:terms :erosion` remains the auditable combined *debt input* on complete
+  reports, not a third language score. The top-level EDN field
+  `:score-status` is `:complete` or `:incomplete-go-analysis`.
 - When Go paths were requested and the Go analyzer fails, retain numeric `.lg`
   erosion, set Go erosion to `nil`, set combined erosion term and top-level debt
-  to `nil`, and mark the result incomplete. Text says `debt UNAVAILABLE` and
-  explicitly says Go callables were excluded. EDN carries the same nils and
-  status; it never substitutes zero, a renormalized debt, or an invented bound.
-- When no Go paths were requested, Go is `NOT REQUESTED`/`nil`; a valid
-  `.lg`-only debt remains numeric. When Go analysis succeeds, combined debt and
-  term values remain byte-for-byte numerically equivalent to the current
-  calculation.
+  to `nil`, and set `:score-status :incomplete-go-analysis`. Text says `debt
+  UNAVAILABLE` and explicitly says Go callables were excluded. The old
+  combined `:erosion :callables` and `:high` counts are `nil` on this path;
+  text identifies any shown counts as `.lg`-only. EDN carries the same nils
+  and status; it never substitutes zero, a renormalized debt, or an invented
+  bound.
+- “Go not requested” means no non-generated Go file enters the filtered,
+  tokenized measured corpus. That is the existing `go-analysis` `:source
+  "none"` path, even if default Go roots were configured. Report
+  `go=NOT REQUESTED`, `:go nil`, `:go-source "none"`, and
+  `:score-status :complete`; a valid `.lg`-only debt remains numeric. When Go
+  analysis succeeds, combined debt and term values remain byte-for-byte
+  numerically equivalent to the current calculation, with
+  `:score-status :complete`.
 - `compare-results` rejects a base or head with unavailable debt before
   subtracting or reporting a signed delta, with an error identifying the
   incomplete side. No misleading PR delta is emitted.
@@ -49,8 +58,9 @@ checking completeness.
 ## Verification
 
 Use a fixture containing both `.lg` and Go files with an intentionally missing
-`QUALITY_GO_CALLABLES` path. Assert text labels, EDN nil/status fields, and a
-rejected delta. Assert an `.lg`-only request remains numeric and a successful
-Go run retains the prior combined debt. Run focused quality CLI, score, and
+`QUALITY_GO_CALLABLES` path. Assert text labels, partial-count labels, EDN
+nil/status fields, and a rejected delta. Assert the filtered corpus with no Go
+files remains numeric and reports Go not requested; assert a successful Go run
+retains the prior combined debt. Run focused quality CLI, score, and
 delta tests under `TMPDIR=/tmp`, then the short Go suite, build, vet, and
 frontmatter check. No jj-dependent test is required.
