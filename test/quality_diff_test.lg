@@ -134,6 +134,12 @@
     (is (= [{:start 1 :count 1}] (:old-spans (nth rows 2))))
     (is (= [{:start 1 :count 1}] (:new-spans (nth rows 2))))))
 
+(deftest patch-classifies-binary-summary-with-carriage-return
+  (let [paths (d/parse-name-status-z "M\u0000blob.bin\u0000")
+        patch (str "diff --git a/blob.bin b/blob.bin\n"
+                   "Binary files a/blob.bin and b/blob.bin differ\r\n")]
+    (is (:binary? (first (d/parse-patch-hunks patch paths))))))
+
 (deftest patch-hunk-parser-stays-below-erosion-threshold
   (let [definitions (:definitions (metrics/file-metrics
                                     (slurp "../scripts/quality/diff.lg")))
