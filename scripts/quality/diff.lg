@@ -121,96 +121,102 @@
       [{:start (Integer/parseInt old) :count (if old-count (Integer/parseInt old-count) 1)}
        {:start (Integer/parseInt new) :count (if new-count (Integer/parseInt new-count) 1)}])))
 
+(defn- patch-mode-kind [line]
+  (let [mode (or (second (re-matches
+                          #"^(?:new file mode|deleted file mode|old mode|new mode) (100644|100755|120000|160000)$"
+                          line))
+                 (second (re-matches
+                          #"^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ (100644|100755|120000|160000)$"
+                          line)))]
+    (case mode
+      "100644" :blob
+      "100755" :blob
+      "120000" :symlink
+      "160000" :gitlink
+      nil)))
+
+(defn- advance-patch-section [section line]
+  (cond
+    (str/starts-with? line "@@ ")
+    (update section :hunks conj (hunk-coordinates line))
+
+    (re-matches #"^[+-]Subproject commit [0-9a-fA-F]{40,64}(?:-dirty)?$" line)
+    (assoc section (if (str/starts-with? line "-") :gitlink-old? :gitlink-new?) true)
+
+    (re-matches #"^(?:Binary files .*|GIT binary patch)$" line)
+    (assoc section :binary? true)
+
+    :else
+    (let [kind (patch-mode-kind line)]
+      (cond-> section
+        kind (assoc (case kind
+                      :blob :blob?
+                      :symlink :symlink?
+                      :gitlink :gitlink?) true)
+        (str/starts-with? line "deleted file mode ") (assoc :deleted-file? true)
+        (str/starts-with? line "new file mode ") (assoc :new-file? true)))))
+
+(defn- scan-patch-sections [patch]
+  (loop [lines (str/split patch #"\n") current nil out []]
+    (if (empty? lines)
+      (if current (conj out current) out)
+      (let [line (first lines)]
+        (cond
+          (str/starts-with? line "diff --git ")
+          (recur (rest lines) {:header line :hunks []}
+                 (if current (conj out current) out))
+          current
+          (recur (rest lines) (advance-patch-section current line) out)
+          :else (recur (rest lines) current out))))))
+
+(defn- type-pair? [path section next-section]
+  (and (= :type-changed (:status path))
+       (:deleted-file? section)
+       (:new-file? next-section)
+       (= (:header section) (:header next-section))))
+
+(defn- section-row [path section]
+  (let [type-change? (= :type-changed (:status path))
+        row (assoc path
+                   :old-spans (if type-change? [] (vec (map first (:hunks section))))
+                   :new-spans (if type-change? [] (vec (map second (:hunks section)))))]
+    (cond-> row
+      (:binary? section) (assoc :binary? true)
+      (or (:gitlink? section)
+          (and (not (:blob? section))
+               (:gitlink-old? section) (:gitlink-new? section)))
+      (assoc :gitlink? true)
+      (:symlink? section) (assoc :symlink? true))))
+
+(defn- reconcile-patch-sections [sections paths]
+  (loop [remaining sections statuses paths out []]
+    (if (empty? statuses)
+      (if (empty? remaining)
+        out
+        (throw (ex-info "Git patch section count differs from name-status"
+                        {:sections (count sections) :statuses (count paths)})))
+      (let [path (first statuses)
+            section (first remaining)
+            next-section (second remaining)]
+        (when-not section
+          (throw (ex-info "Git patch section count differs from name-status"
+                          {:sections (count sections) :statuses (count paths)})))
+        (header-paths (:header section) path)
+        ;; Git reports a file/symlink transition as one T status, but its
+        ;; patch has separate deletion and addition sections for that path.
+        (let [paired? (type-pair? path section next-section)]
+          (when paired? (header-paths (:header next-section) path))
+          (recur (drop (if paired? 2 1) remaining)
+                 (rest statuses)
+                 (conj out (section-row path section))))))))
+
 (defn parse-patch-hunks
   "Attach ordered :old-spans/:new-spans to NUL-status records. Each span is
    {:start 1-based-line-or-anchor :count n}; count 0 is an insertion/deletion
    anchor, not a touched line. Every patch section must match its status path
    in order, including paths Git C-quotes for tabs, newlines, or UTF-8 bytes."
   [patch paths]
-  (let [sections (loop [lines (str/split patch #"\n") current nil out []]
-                   (if (empty? lines)
-                     (if current (conj out current) out)
-                     (let [line (first lines)]
-                       (cond
-                         (str/starts-with? line "diff --git ")
-                         (recur (rest lines) {:header line :hunks []}
-                                (if current (conj out current) out))
-                         (and current (str/starts-with? line "@@ "))
-                         (recur (rest lines)
-                                (update current :hunks conj (hunk-coordinates line)) out)
-                         (and current
-                              (re-matches #"^[+-]Subproject commit [0-9a-fA-F]{40,64}(?:-dirty)?$" line))
-                         (recur (rest lines)
-                                (assoc current (if (str/starts-with? line "-")
-                                                 :gitlink-old? :gitlink-new?) true)
-                                out)
-                         (and current (or (str/starts-with? line "Binary files ")
-                                          (= line "GIT binary patch")))
-                         (recur (rest lines) (assoc current :binary? true) out)
-                         (and current
-                              (or (re-matches #"^(?:new file mode|deleted file mode|old mode|new mode) 100(?:644|755)$" line)
-                                  (re-matches #"^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ 100(?:644|755)$" line)))
-                         (recur (rest lines)
-                                (cond-> (assoc current :blob? true)
-                                  (str/starts-with? line "deleted file mode ") (assoc :deleted-file? true)
-                                  (str/starts-with? line "new file mode ") (assoc :new-file? true))
-                                out)
-                         (and current
-                              (or (re-matches #"^(?:new file mode|deleted file mode|old mode|new mode) 160000$" line)
-                                  (re-matches #"^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ 160000$" line)))
-                         (recur (rest lines)
-                                (cond-> (assoc current :gitlink? true)
-                                  (str/starts-with? line "deleted file mode ") (assoc :deleted-file? true)
-                                  (str/starts-with? line "new file mode ") (assoc :new-file? true))
-                                out)
-                         (and current
-                              (or (re-matches #"^(?:new file mode|deleted file mode|old mode|new mode) 120000$" line)
-                                  (re-matches #"^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ 120000$" line)))
-                         (recur (rest lines)
-                                (cond-> (assoc current :symlink? true)
-                                  (str/starts-with? line "deleted file mode ") (assoc :deleted-file? true)
-                                  (str/starts-with? line "new file mode ") (assoc :new-file? true))
-                                out)
-                         (and current (str/starts-with? line "deleted file mode "))
-                         (recur (rest lines) (assoc current :deleted-file? true) out)
-                         (and current (str/starts-with? line "new file mode "))
-                         (recur (rest lines) (assoc current :new-file? true) out)
-                         :else (recur (rest lines) current out)))))]
-    (loop [remaining sections statuses paths out []]
-      (if (empty? statuses)
-        (if (empty? remaining)
-          out
-          (throw (ex-info "Git patch section count differs from name-status"
-                          {:sections (count sections) :statuses (count paths)})))
-        (let [path (first statuses)
-              section (first remaining)
-              next-section (second remaining)]
-          (when-not section
-            (throw (ex-info "Git patch section count differs from name-status"
-                            {:sections (count sections) :statuses (count paths)})))
-          (header-paths (:header section) path)
-          ;; Git reports a file/symlink transition as one T status, but its
-          ;; patch has separate deletion and addition sections for that path.
-          (let [type-pair? (and (= :type-changed (:status path))
-                                (:deleted-file? section)
-                                (:new-file? next-section)
-                                (= (:header section) (:header next-section)))
-                _ (when type-pair? (header-paths (:header next-section) path))
-                row (assoc path
-                           :old-spans (if (= :type-changed (:status path)) []
-                                          (vec (map first (:hunks section))))
-                           :new-spans (if (= :type-changed (:status path)) []
-                                          (vec (map second (:hunks section)))))
-                row (cond-> row
-                      (:binary? section) (assoc :binary? true)
-                      (or (:gitlink? section)
-                          (and (not (:blob? section))
-                               (:gitlink-old? section) (:gitlink-new? section)))
-                      (assoc :gitlink? true)
-                      (:symlink? section) (assoc :symlink? true))]
-            (recur (drop (if type-pair? 2 1) remaining)
-                   (rest statuses)
-                   (conj out row))))))))
+  (reconcile-patch-sections (scan-patch-sections patch) paths))
 
 (defn- git-output [root args]
   (let [command (concat ["git"] (if root ["-C" root] []) args)

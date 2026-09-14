@@ -1,6 +1,7 @@
 (ns test.quality-diff-test
   (:require
    [quality.diff :as d]
+   [quality.metrics :as metrics]
    [quality.touched :as touched]
    [test :refer :all]))
 
@@ -90,6 +91,55 @@
                       "diff --git a/a.lg b/a.lg\n@@ -1 +1 @@\n-a\n+b\n")]
     (is (thrown? Throwable (d/parse-patch-hunks one paths)))
     (is (thrown? Throwable (d/parse-patch-hunks reversed paths)))))
+
+(deftest patch-reports-exact-section-count-mismatch
+  (let [paths (d/parse-name-status-z "M\u0000a.lg\u0000M\u0000b.lg\u0000")
+        patch "diff --git a/a.lg b/a.lg\n@@ -1 +1 @@\n-a\n+b\n"
+        error (try (d/parse-patch-hunks patch paths)
+                   (catch Throwable e e))]
+    (is (= {:sections 1 :statuses 2} (ex-data error)))))
+
+(deftest patch-reports-exact-header-path-mismatch
+  (let [path {:status :modified :old-path "a.lg" :new-path "a.lg"}
+        header "diff --git a/wrong.lg b/wrong.lg"
+        error (try (d/parse-patch-hunks (str header "\n") [path])
+                   (catch Throwable e e))]
+    (is (= {:status path :header header} (ex-data error)))))
+
+(deftest patch-reports-exact-malformed-hunk
+  (let [line "@@ malformed @@"
+        error (try (d/parse-patch-hunks
+                    (str "diff --git a/a.lg b/a.lg\n" line "\n")
+                    [{:status :modified :old-path "a.lg" :new-path "a.lg"}])
+                   (catch Throwable e e))]
+    (is (= {:line line} (ex-data error)))))
+
+(deftest patch-classifies-binary-gitlink-and-symlink-metadata
+  (let [oid "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        patch (str "diff --git a/blob.bin b/blob.bin\n"
+                   "index 111..222 100644\nGIT binary patch\n"
+                   "diff --git a/module.lg b/module.lg\n"
+                   "index 111..222 160000\n"
+                   "-Subproject commit " oid "\n"
+                   "+Subproject commit " oid "-dirty\n"
+                   "diff --git a/link.lg b/link.lg\n"
+                   "index 111..222 120000\n"
+                   "@@ -1 +1 @@\n-old\n+new\n")
+        paths (d/parse-name-status-z
+               "M\u0000blob.bin\u0000M\u0000module.lg\u0000M\u0000link.lg\u0000")
+        rows (d/parse-patch-hunks patch paths)]
+    (is (:binary? (first rows)))
+    (is (:gitlink? (second rows)))
+    (is (:symlink? (nth rows 2)))
+    (is (= [{:start 1 :count 1}] (:old-spans (nth rows 2))))
+    (is (= [{:start 1 :count 1}] (:new-spans (nth rows 2))))))
+
+(deftest patch-hunk-parser-stays-below-erosion-threshold
+  (let [definitions (:definitions (metrics/file-metrics
+                                    (slurp "../scripts/quality/diff.lg")))
+        parser (first (filter #(= 'parse-patch-hunks (:name %)) definitions))]
+    (is parser)
+    (is (<= (:cc parser) 10))))
 
 (deftest patch-coalesces-only-matched-type-change-sections
   (let [paths (d/parse-name-status-z "T\u0000type.lg\u0000M\u0000other.lg\u0000")
