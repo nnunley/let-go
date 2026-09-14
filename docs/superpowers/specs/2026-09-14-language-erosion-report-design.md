@@ -32,8 +32,9 @@ checking completeness.
   `:terms :erosion` remains the auditable combined *debt input* on complete
   reports, not a third language score. The top-level EDN field
   `:score-status` is `:complete` or `:incomplete-go-analysis`.
-- When Go paths were requested and the Go analyzer fails, retain numeric `.lg`
-  erosion, set Go erosion to `nil`, set combined erosion term and top-level debt
+- When Go paths were requested and the Go analyzer fails, retain the existing
+  `.lg` erosion value (numeric when it has callable mass, otherwise `nil`/`N/A`),
+  set Go erosion to `nil`, set combined erosion term and top-level debt
   to `nil`, and set `:score-status :incomplete-go-analysis`. Text says `debt
   UNAVAILABLE` and explicitly says Go callables were excluded. The old
   combined `:erosion :callables` and `:high` counts are `nil` on this path;
@@ -48,8 +49,9 @@ checking completeness.
   analysis succeeds, combined debt and term values remain byte-for-byte
   numerically equivalent to the current calculation, with
   `:score-status :complete`.
-- `N/A` means that language entered the measured corpus but has zero callable
-  mass, so `quality.terms/erosion` returned `nil`. Its EDN language score is
+- `N/A` means zero callable mass for that language among measured files,
+  including a Go-only corpus with no `.lg` files; then
+  `quality.terms/erosion` returned `nil`. Its EDN language score is
   `nil`, yet `:score-status` stays `:complete` when the analyzer succeeded.
   This is distinct from `NOT REQUESTED` (no measured Go files) and
   `UNAVAILABLE` (a requested analyzer failed). A Go-only corpus may similarly
