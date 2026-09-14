@@ -25,8 +25,8 @@ checking completeness.
 
 ## Result contract
 
-- The human-facing erosion summary is `erosion lg=<number>
-  go=<number|UNAVAILABLE|NOT REQUESTED>`, never the old unlabeled `erosion
+- The human-facing erosion summary is `erosion lg=<number|N/A>
+  go=<number|N/A|UNAVAILABLE|NOT REQUESTED>`, never the old unlabeled `erosion
   <number>` prefix. The EDN breakdown retains `:lg`, `:go`, and `:go-source`;
   it does not expose a separate `:erosion :value`. The existing
   `:terms :erosion` remains the auditable combined *debt input* on complete
@@ -48,6 +48,12 @@ checking completeness.
   analysis succeeds, combined debt and term values remain byte-for-byte
   numerically equivalent to the current calculation, with
   `:score-status :complete`.
+- `N/A` means that language entered the measured corpus but has zero callable
+  mass, so `quality.terms/erosion` returned `nil`. Its EDN language score is
+  `nil`, yet `:score-status` stays `:complete` when the analyzer succeeded.
+  This is distinct from `NOT REQUESTED` (no measured Go files) and
+  `UNAVAILABLE` (a requested analyzer failed). A Go-only corpus may similarly
+  show `lg=N/A` without making the result incomplete.
 - `compare-results` rejects a base or head with unavailable debt before
   subtracting or reporting a signed delta, with an error identifying the
   incomplete side. No misleading PR delta is emitted.
@@ -60,7 +66,8 @@ checking completeness.
 Use a fixture containing both `.lg` and Go files with an intentionally missing
 `QUALITY_GO_CALLABLES` path. Assert text labels, partial-count labels, EDN
 nil/status fields, and a rejected delta. Assert the filtered corpus with no Go
-files remains numeric and reports Go not requested; assert a successful Go run
-retains the prior combined debt. Run focused quality CLI, score, and
+files remains numeric and reports Go not requested; assert Go-only and
+successful-Go-with-no-functions cases distinguish `N/A` from failure; assert a
+successful Go run retains the prior combined debt. Run focused quality CLI, score, and
 delta tests under `TMPDIR=/tmp`, then the short Go suite, build, vet, and
 frontmatter check. No jj-dependent test is required.
