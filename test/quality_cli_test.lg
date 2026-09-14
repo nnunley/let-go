@@ -39,6 +39,7 @@
       (is (= (:debt r) (:debt (score/corpus-score (:terms r)))))
       (is (str/includes? out1 "erosion lg="))
       (is (str/includes? out1 "go="))
+      (is (not (re-find #"\n  erosion\s+[0-9]" out1)))
       (is (every? (fn [[_ v]] (or (nil? v) (<= 0.0 v 1.0))) (:terms r)))
       (is (nil? (:score r)))
       (is (= "supplied" (get-in r [:inputs :ci :source])))

@@ -79,9 +79,10 @@
   (let [preferred [:erosion :uncovered :verbosity :comment-debt :dead :defects
                    :testing :efficiency]
         known (set (map first (:weights score/thresholds)))
-        order (concat (filter known preferred)
-                      (sort (remove (set preferred) known)))]
-    (concat
+        order (remove #{:erosion}
+                      (concat (filter known preferred)
+                              (sort (remove (set preferred) known))))]
+    (remove nil? (concat
       [(str "debt " (if (= :incomplete-go-analysis score-status) "UNAVAILABLE" (n3 total))
             "   (0 is perfect, 1 is worst)")]
       (for [k order]
@@ -130,7 +131,7 @@
             " agent-generated erosion 0.68 verbosity 0.44")
        (str "  testing density=" (n1 (:density testing)) "/KLOC"
          " ratio=" (n2 (:ratio testing))
-         " assertions=" (:assertions testing))])))
+         " assertions=" (:assertions testing))]))))
 
 (defn- file-table
   "The per-file table, in the order the producer fixed: debt DESCENDING
