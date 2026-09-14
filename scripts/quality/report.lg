@@ -72,7 +72,7 @@
           "machine load would make the composite non-deterministic for the same "
           "tree")]))
 
-(defn- debt-block [{total :debt :keys [terms coverage testing erosion verbosity dead
+(defn- debt-block [{total :debt :keys [score-status terms coverage testing erosion verbosity dead
                                        comment-debt lint cost]}]
   ;; Display order only (names, not numbers); any future term in
   ;; `thresholds` that isn't listed here still prints, after these.
@@ -82,19 +82,20 @@
         order (concat (filter known preferred)
                       (sort (remove (set preferred) known)))]
     (concat
-      [(str "debt " (n3 total) "   (0 is perfect, 1 is worst)")]
+      [(str "debt " (if (= :incomplete-go-analysis score-status) "UNAVAILABLE" (n3 total))
+            "   (0 is perfect, 1 is worst)")]
       (for [k order]
         (str "  " (pad (name k) 12) (lpad (n3 (terms k)) 7)
              "  weight " (n2 (get (:weights score/thresholds) k))))
       [(str "  coverage lg=" (n1 (get-in coverage [:lg :percent])) "% static"
             " go=" (if (:go coverage) (str (n1 (get-in coverage [:go :percent])) "% dynamic") "none"))
-       (str "  erosion " (n3 (:value erosion))
-         " (" (:high erosion) " of " (:callables erosion)
-         " callables over cc " (get-in score/thresholds [:erosion :cc]) ")"
-         "  lg=" (n3 (:lg erosion))
-         " go=" (if (= "unavailable" (:go-source erosion))
-                  "UNAVAILABLE"
-                  (n3 (:go erosion))))
+       (str "  erosion lg=" (if (nil? (:lg erosion)) "N/A" (n3 (:lg erosion)))
+            " go=" (case (:go-source erosion)
+                     "unavailable" "UNAVAILABLE"
+                     "none" "NOT REQUESTED"
+                     (if (nil? (:go erosion)) "N/A" (n3 (:go erosion)))))
+       (when (= :incomplete-go-analysis score-status)
+         "  Go callables excluded; combined debt unavailable")
        (str "  dead " (n3 (:value dead))
          " (" (:dead-definitions dead) " of "
          (:definitions dead) " definitions, "

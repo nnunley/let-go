@@ -785,7 +785,8 @@
                                                 (:functions go-analysis))
                                           (fn [p n] (get mass-by [p (str n)] 0.0)))))
         classes (dup/clone-classes dup-pairs (:clone-class-max-members score/thresholds))
-        corpus-terms {:erosion (terms/erosion callables)
+        go-unavailable? (= "unavailable" (:source go-analysis))
+        corpus-terms {:erosion (when-not go-unavailable? (terms/erosion callables))
                       :verbosity (terms/verbosity (reduce + 0 (vals dup-lines))
                                                   (when (:findings lint) flagged-code-total)
                                                   (reduce + 0 (map :loc files)))
@@ -804,7 +805,10 @@
                       ;; breaks the promise that a delta means the code
                       ;; changed. `:cost` replaces it, structurally.
                       :cost (cost/cost-share costs)}
-        corpus (score/corpus-score corpus-terms)]
+        raw-corpus (score/corpus-score corpus-terms)
+        corpus (assoc raw-corpus
+                      :score-status (if go-unavailable? :incomplete-go-analysis :complete)
+                      :debt (when-not go-unavailable? (:debt raw-corpus)))]
     (merge corpus
            {:inputs {:commit (:to grange)
                      :commit-source (:head-source grange)
@@ -824,11 +828,12 @@
                        :efficiency-pts efficiency}
             :testing testing
             ;; Paper-aligned terms, REPORTED but not yet in the composite.
-            :erosion {:value (terms/erosion callables)
-                      :callables (count callables)
-                      :high (count (filter (fn [c] (> (:cc c) (get-in score/thresholds [:erosion :cc]))) callables))
+            :erosion {:callables (when-not go-unavailable? (count callables))
+                      :high (when-not go-unavailable?
+                              (count (filter (fn [c] (> (:cc c) (get-in score/thresholds [:erosion :cc]))) callables)))
                       :lg (terms/erosion (filter (fn [c] (str/ends-with? (:path c) ".lg")) callables))
-                      :go (terms/erosion (filter (fn [c] (str/ends-with? (:path c) ".go")) callables))
+                      :go (when-not (contains? #{"none" "unavailable"} (:source go-analysis))
+                            (terms/erosion (filter (fn [c] (str/ends-with? (:path c) ".go")) callables)))
                       :go-source (:source go-analysis)}
             ;; OURS, not the paper's, and an UPPER BOUND: see quality.terms.
             :dead {:value (terms/dead-share dead-defs all-defs)

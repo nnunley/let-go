@@ -2,6 +2,7 @@
   (:require
    [clojure.string :as str]
    [quality :as q]
+   [quality.score :as score]
    [test :refer :all]))
 
 ;; The test runner's cwd is `test/`, so the fixture corpus is at
@@ -30,6 +31,14 @@
       ;; Debt is unbounded above; it is only ever non-negative.
       ;; bounded: every scored number is a share in [0, 1]
       (is (<= 0.0 (:debt r) 1.0))
+      (is (= :complete (:score-status r)))
+      (is (number? (get-in r [:erosion :lg])))
+      (is (number? (get-in r [:erosion :go])))
+      (is (< (math/abs (- 0.7563004013065922 (:debt r))) 1e-9))
+      (is (< (math/abs (- 0.6594225937101561 (get-in r [:terms :erosion]))) 1e-9))
+      (is (= (:debt r) (:debt (score/corpus-score (:terms r)))))
+      (is (str/includes? out1 "erosion lg="))
+      (is (str/includes? out1 "go="))
       (is (every? (fn [[_ v]] (or (nil? v) (<= 0.0 v 1.0))) (:terms r)))
       (is (nil? (:score r)))
       (is (= "supplied" (get-in r [:inputs :ci :source])))
@@ -179,16 +188,16 @@
         out (with-out-str (q/main ["--since" "2000-01-01" "--edn" edn-path
                                    "--source-root" fixtures fixtures]))
         r (read-string (slurp edn-path))]
-    (is (str/includes? out "erosion "))
+    (is (str/includes? out "erosion lg="))
     (is (str/includes? out "verbosity "))
     (is (str/includes? out "LOWER BOUND on the paper's metric"))
     (is (str/includes? out "paper baselines: human corpus erosion 0.34"))
     ;; both are shares in [0,1]
-    (is (<= 0.0 (get-in r [:erosion :value]) 1.0))
+    (is (not (contains? (:erosion r) :value)))
     (is (<= 0.0 (get-in r [:verbosity :value]) 1.0))
     ;; Go measurements come from the Go tool, and their absence must be
     ;; visible rather than scored as perfect
-    (is (contains? #{"go run" "none"} (get-in r [:erosion :go-source])))
+    (is (not (contains? #{"none" "unavailable"} (get-in r [:erosion :go-source]))))
     (is (pos? (get-in r [:erosion :callables])))
     ;; per-file verbosity too
     (is (every? (fn [f] (or (nil? (:verbosity f)) (<= 0.0 (:verbosity f) 1.0)))
@@ -240,6 +249,62 @@
       (is (contains? (set (:omitted r)) :comment-debt))
       ;; and verbosity still reports, from clone lines alone
       (is (some? (get-in r [:terms :verbosity]))))))
+
+(defn- fixture-report [edn-name source-root path]
+  (let [edn-path (str (os/temp-dir) "/" edn-name)
+        out (with-out-str
+              (q/main ["--since" "2000-01-01" "--edn" edn-path
+                       "--source-root" source-root path]))]
+    {:out out :r (read-string (slurp edn-path))}))
+
+(deftest unavailable-go-analysis-never-lowers-debt
+  (let [saved (os/getenv "QUALITY_GO_CALLABLES")
+        edn-path (str (os/temp-dir) "/quality-go-unavailable.edn")]
+    (try
+      (os/setenv "QUALITY_GO_CALLABLES" "/nonexistent/go-callables")
+      (let [out (with-out-str
+                  (q/main ["--since" "2000-01-01" "--edn" edn-path
+                           "--source-root" fixtures fixtures]))
+            r (read-string (slurp edn-path))]
+        (is (= :incomplete-go-analysis (:score-status r)))
+        (is (nil? (:debt r)))
+        (is (nil? (get-in r [:terms :erosion])))
+        (is (number? (get-in r [:erosion :lg])))
+        (is (nil? (get-in r [:erosion :go])))
+        (is (= "unavailable" (get-in r [:erosion :go-source])))
+        (is (nil? (get-in r [:erosion :callables])))
+        (is (nil? (get-in r [:erosion :high])))
+        (is (not (contains? (:erosion r) :value)))
+        (is (str/includes? out "debt UNAVAILABLE"))
+        (is (str/includes? out "erosion lg="))
+        (is (str/includes? out "go=UNAVAILABLE"))
+        (is (str/includes? out "Go callables excluded")))
+      (finally (os/setenv "QUALITY_GO_CALLABLES" (or saved ""))))))
+
+(deftest language-erosion-empty-boundaries
+  (let [{lg-out :out lg-r :r}
+        (fixture-report "quality-lg-only.edn" fixtures
+                        (str fixtures "/cli_src.lg"))
+        {go-out :out go-r :r}
+        (fixture-report "quality-go-only.edn" fixtures
+                        (str fixtures "/dup_a.go"))
+        {empty-out :out empty-r :r}
+        (fixture-report "quality-go-empty.edn" "fixtures/quality-go-empty"
+                        "fixtures/quality-go-empty/empty.go")]
+    (is (= "none" (get-in lg-r [:erosion :go-source])))
+    (is (nil? (get-in lg-r [:erosion :go])))
+    (is (= :complete (:score-status lg-r)))
+    (is (number? (:debt lg-r)))
+    (is (str/includes? lg-out "go=NOT REQUESTED"))
+    (is (nil? (get-in go-r [:erosion :lg])))
+    (is (number? (get-in go-r [:erosion :go])))
+    (is (= :complete (:score-status go-r)))
+    (is (str/includes? go-out "lg=N/A"))
+    (is (nil? (get-in empty-r [:erosion :lg])))
+    (is (nil? (get-in empty-r [:erosion :go])))
+    (is (not= "unavailable" (get-in empty-r [:erosion :go-source])))
+    (is (= :complete (:score-status empty-r)))
+    (is (str/includes? empty-out "lg=N/A go=N/A"))))
 
 (deftest comment-kinds-excludes-the-cosmetic-and-heuristic-rules
   ;; :comment-divider is cosmetic and :devlog-comment is an admitted phrase
